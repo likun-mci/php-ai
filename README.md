@@ -51,8 +51,7 @@ use Ai\AI;
 库自带 PSR-4 加载器，把整个目录放进项目后引入一次即可：
 
 ```php
-require_once APPPATH . 'libraries/Ai/autoload.php';   // CodeIgniter
-// require_once __DIR__ . '/libraries/Ai/autoload.php'; // 原生 PHP
+require_once __DIR__ . '/autoload.php';
 
 use Ai\AI;
 ```

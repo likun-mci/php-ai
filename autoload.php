@@ -2,7 +2,7 @@
 /**
  * Ai 库 PSR-4 自动加载
  *
- * 命名空间 Ai\ 映射到当前目录（__DIR__）
+ * 命名空间 Ai\ 映射到当前目录下的 src/
  *
  * 使用方式（在项目入口或 CI hooks 中引入一次即可）：
  *     require_once APPPATH . 'libraries/Ai/autoload.php';
@@ -13,7 +13,7 @@ spl_autoload_register(function (string $class): void {
     static $map = null;
     if ($map === null) {
         $map = [
-            'Ai\\'                       => __DIR__,
+            'Ai\\'                       => __DIR__ . DIRECTORY_SEPARATOR . 'src',
         ];
     }
 

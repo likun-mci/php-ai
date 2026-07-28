@@ -806,22 +806,28 @@ class GPT4Turbo extends BaseModel
 ## 架构
 
 ```
-Ai/
-├── AI.php                  # 主入口：配置、模型解析、对话、流式、回调
+php-ai/
+├── src/                    # 源代码（PSR-4 命名空间 Ai\）
+│   ├── AI.php              # 主入口：配置、模型解析、对话、流式、回调
+│   ├── Agent/              # Agent 循环 + 长期记忆
+│   ├── Contracts/          # 接口定义：Model / Protocol / Transport / AIResponse
+│   ├── Editor/             # AI 代码编辑：上下文 / 协议 / 动作 / 执行器 / 工作区
+│   ├── Exceptions/         # AIException / ConfigException / RequestException
+│   ├── Helpers/            # AIFile（附件封装）、Endpoint（端点解析）、Protocols（协议注册表）、Headers（请求头合并）
+│   ├── Models/             # 模型层：各平台模型的名称、端点、能力、默认配置
+│   │   ├── BaseModel.php
+│   │   ├── CustomModel.php # 通用模型：任意模型名 + 手选协议 + 自定义接口地址
+│   │   ├── OpenAI/  Claude/  Gemini/  DeepSeek/
+│   ├── Protocol/           # 协议层：OpenAI / Claude / Gemini / DeepSeek
+│   ├── Response/           # 统一响应对象
+│   ├── Tools/              # HttpFetch（SSRF 防护）、WebContent（格式化）
+│   └── Transport/          # cURL 传输层（含 SSE 解析、代理、超时）
 ├── autoload.php            # PSR-4 加载器（不用 Composer 时引入）
-├── Contracts/              # 接口定义：Model / Protocol / Transport / AIResponse
-├── Protocol/               # 协议层：OpenAI / Claude / Gemini / DeepSeek
-├── Models/                 # 模型层：各平台模型的名称、端点、能力、默认配置
-│   ├── BaseModel.php
-│   ├── CustomModel.php     # 通用模型：任意模型名 + 手选协议 + 自定义接口地址
-│   ├── OpenAI/  Claude/  Gemini/  DeepSeek/
-├── Response/AIResponse.php # 统一响应对象
-├── Transport/CurlTransport.php  # cURL 传输层（含 SSE 解析、代理、超时）
-├── Exceptions/             # AIException / ConfigException / RequestException
-├── Helpers/                # AIFile（附件封装）、Endpoint（端点解析）、Protocols（协议注册表）、Headers（请求头合并）
-├── Agent/                  # Agent 循环 + 长期记忆
-├── Editor/                 # AI 代码编辑：上下文 / 协议 / 动作 / 执行器 / 工作区
-└── Tools/                  # HttpFetch（SSRF 防护）、WebContent（格式化）
+├── composer.json
+├── examples*.php           # 使用示例
+├── LICENSE
+├── README.md
+└── .gitignore
 ```
 
 设计上分四层：**模型层**声明「是什么」（名称、端点、能力），**协议层**负责「怎么说」（请求/响应/流式格式），**传输层**负责「怎么发」（cURL、代理、超时、SSE），**主入口**负责编排。新增平台只动前两层。

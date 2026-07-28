@@ -14,7 +14,7 @@ class DeepSeekChat extends BaseModel
     protected $endpoint = 'https://api.deepseek.com/v1/chat/completions';
     protected $features = ['chat', 'stream', 'function_calling'];
     protected $config = [
-        'max_tokens' => 1024*200,
+        'max_tokens' => 1024*256,
         'temperature' => 1.0,
     ];
     

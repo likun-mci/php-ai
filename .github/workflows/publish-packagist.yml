@@ -1,0 +1,18 @@
+name: Update Packagist
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  update-packagist:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Notify Packagist
+        uses: packagist/packagist-publish@v1
+        with:
+          username: ${{ secrets.PACKAGIST_USERNAME }}
+          api_token: ${{ secrets.PACKAGIST_API_TOKEN }}

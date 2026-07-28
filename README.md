@@ -180,6 +180,8 @@ $ai->resolveEndpoint(); // 'https://api.openai.com/v1/chat/completions'，当前
 $ai->listModels();      // 已设置 model 时：调用平台接口拉取该平台真实可用模型
                         // 端点跟随 base_url / endpoint 走，接第三方网关时列的就是网关的模型
                         // OpenAI / Gemini / DeepSeek 实时拉取；Claude 拉取失败时回退内置列表；不支持则返回 null
+$ai->listModels(true);  // 传入 true 返回完整模型数据（含 id / created / owned_by / pricing 等）
+                        // 适用于 OpenRouter、Requesty 等需要展示模型价格/能力标签的场景
 ```
 
 **真实用例**——按平台分组拉取模型列表并本地缓存一周，供后台下拉框渲染：
@@ -221,8 +223,9 @@ $ai->setConfig([
     'platform'     => '',            // 平台名，仅供业务层标识，默认由模型名/协议决定
     'headers'      => [],            // 追加/覆盖请求头，值为 null 表示删除协议默认头
     'extra_body'   => [],            // 追加到请求体的私有参数
-    'max_tokens'   => 1024 * 64,     // 最大输出 tokens
-    'temperature'  => 0.7,           // 温度
+    'max_tokens'             => 1024 * 64,  // 最大输出 tokens
+    'max_completion_tokens'  => 16384,      // 仅 OpenAI o1/o3 系列，覆盖 max_tokens
+    'temperature'            => 0.7,        // 温度
     'organization' => 'org-xxx',     // 仅 OpenAI 企业账号
     'project_id'   => 'proj_xxx',    // 仅 OpenAI 企业账号
 ]);
@@ -230,7 +233,7 @@ $ai->setConfig([
 
 `setConfig()` 是**增量合并**，可以分多次调用；每次传入 `model` 都会重建模型与协议实例。`base_url`、`protocol` 等既可以和 `model` 一起传，也可以在设置模型之后再补。
 
-生成参数（`max_tokens`、`temperature`、`top_p`、`top_k`、`stop`、`presence_penalty`、`frequency_penalty`、`seed`、`response_format`、`system`、`tools`、`tool_choice`、`reasoning_effort`、`thinking`）写在 `setConfig()` 里对所有请求生效，单次 `chat()` 的 payload 优先级更高；连接信息（`api_key`、`base_url` 等）不会进入请求体。
+生成参数（`max_tokens`、`max_completion_tokens`、`temperature`、`top_p`、`top_k`、`stop`、`presence_penalty`、`frequency_penalty`、`seed`、`response_format`、`system`、`tools`、`tool_choice`、`reasoning_effort`、`thinking`）写在 `setConfig()` 里对所有请求生效，单次 `chat()` 的 payload 优先级更高；连接信息（`api_key`、`base_url` 等）不会进入请求体。
 
 接口有私有参数时用 `extra_body`（直接并入请求体），需要特殊鉴权头时用 `headers`：
 
@@ -249,11 +252,16 @@ $ai->setConfig([
 ```php
 $ai->setModel('claude-3-opus')   // 单独切换模型
    ->setTimeout(300)             // 超时（秒），长文本生成务必调大
+   ->setConnectTimeout(30)       // 连接超时（秒），独立于总超时
+   ->setUserAgent('MyApp/1.0')   // 自定义 User-Agent（默认不发送）
+   ->setSslVerify(false)         // 禁用 SSL 校验（仅调试/内网自签）
    ->setProxy('socks5h://127.0.0.1:1080')
    ->setStream(true)
    ->setAttachments([$file])
    ->chat($prompt);
 ```
+
+调试时可用 `$ai->getLastInfo()` 获取最近一次请求的 cURL 信息（http_code、总耗时等）。
 
 ### 网络代理
 
@@ -482,7 +490,7 @@ $ai->onAfter(function ($response) {          // onResponse() 是它的别名
 |------|------|
 | `getContent(): string` | 回复文本（流式模式下为累积后的完整文本） |
 | `getRaw(): array` | 平台原始响应体（Agent 解析 `tool_use` 块靠它） |
-| `getUsage(): array` | `['prompt_tokens'=>, 'completion_tokens'=>, 'total_tokens'=>]` |
+| `getUsage(): array` | 完整用量对象，含 `prompt_tokens` / `completion_tokens` / `total_tokens` 及平台返回的扩展字段（`prompt_tokens_details.cached_tokens`、`cache_creation_input_tokens` 等，因平台而异） |
 | `tokens(): int` | 总 tokens |
 | `getModel(): string` | 实际返回的模型名 |
 | `isSuccess(): bool` | 是否成功 |

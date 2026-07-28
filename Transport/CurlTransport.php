@@ -1,0 +1,359 @@
+<?php
+namespace Ai\Transport;
+
+use Ai\Contracts\TransportInterface;
+use Ai\Exceptions\RequestException;
+
+/**
+ * HTTP 传输层实现（使用 cURL）
+ */
+class CurlTransport implements TransportInterface
+{
+    /**
+     * 超时时间（秒）
+     * @var int
+     */
+    protected $timeout = 60;
+    
+    /**
+     * 代理地址
+     * @var string
+     */
+    protected $proxy = '';
+    
+    /**
+     * 代理类型
+     * @var int
+     */
+    protected $proxyType = CURLPROXY_HTTP;
+    
+    /**
+     * 流式输出回调函数
+     * @var callable|null
+     */
+    protected $streamCallback = null;
+    
+    /**
+     * 流式输出缓冲区
+     * @var string
+     */
+    protected $streamBuffer = '';
+    
+    /**
+     * 流式输出完整内容
+     * @var string
+     */
+    protected $streamFullContent = '';
+
+    /**
+     * 流式输出中捕获到的最后一个 usage 数据
+     * @var array
+     */
+    protected $streamLastUsage = [];
+    
+    /**
+     * 发送 POST 请求
+     */
+    public function post(string $url, array $data, array $headers = []): array
+    {
+        // 重置流式数据
+        $this->streamBuffer = '';
+        $this->streamFullContent = '';
+        $this->streamLastUsage = [];
+        
+        $ch = curl_init($url);
+        
+        curl_setopt($ch, CURLOPT_POST, true);
+        curl_setopt($ch, CURLOPT_POSTFIELDS, json_encode($data));
+        curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+        curl_setopt($ch, CURLOPT_TIMEOUT, $this->timeout);
+        
+        // 设置代理
+        if (!empty($this->proxy)) {
+            curl_setopt($ch, CURLOPT_PROXY, $this->proxy);
+            curl_setopt($ch, CURLOPT_PROXYTYPE, $this->proxyType);
+        }
+        
+        // 如果设置了流式回调，启用流式输出
+        if ($this->streamCallback !== null) {
+            curl_setopt($ch, CURLOPT_WRITEFUNCTION, function($ch, $data) {
+                return $this->handleStreamData($data);
+            });
+        }
+        
+        $curlHeaders = [];
+        foreach ($headers as $key => $value) {
+            $curlHeaders[] = "{$key}: {$value}";
+        }
+        curl_setopt($ch, CURLOPT_HTTPHEADER, $curlHeaders);
+        // 强制 HTTP/1.1，规避部分服务端/代理在 HTTP/2 下的 "SSL unexpected eof while reading"
+        if (defined('CURL_HTTP_VERSION_1_1')) {
+            curl_setopt($ch, CURLOPT_HTTP_VERSION, CURL_HTTP_VERSION_1_1);
+        }
+        curl_setopt($ch, CURLOPT_FORBID_REUSE, true);
+
+        // 非流式：对连接级瞬时错误（SSL eof / recv 错误 / 空响应等）自动重试，提升多轮 Agent 稳定性
+        $maxTries = ($this->streamCallback !== null) ? 1 : 3;
+        $response = false; $errno = 0; $error = '';
+        for ($try = 1; $try <= $maxTries; $try++) {
+            $response = curl_exec($ch);
+            $errno = curl_errno($ch);
+            $error = curl_error($ch);
+            if ($response !== false) break;
+            // 35=SSL connect, 52=empty reply, 55=send error, 56=recv error(含 unexpected eof)
+            if (!in_array($errno, [35, 52, 55, 56], true) || $try >= $maxTries) break;
+            usleep(400000 * $try);
+        }
+        $info = curl_getinfo($ch);
+        $httpCode = $info['http_code'] ?? 0;
+        if (function_exists('curl_close') && version_compare(PHP_VERSION, '8.0.0', '<')) {
+            curl_close($ch);
+        }
+        $GLOBALS['curl_info'] = $info; // 供调试使用
+        
+        // 如果使用了流式输出，response 已经在 streamFullContent 中
+        if ($this->streamCallback !== null && !empty($this->streamFullContent)) {
+            $response = $this->streamFullContent;
+        }
+        
+        if ($response === false || $httpCode >= 400) {
+            // 尝试解析错误响应体
+            $errorResponse = [];
+            $errorMessage = $error ?: "HTTP Error: {$httpCode}";
+            
+            if ($response && is_string($response)) {
+                $decoded = json_decode($response, true);
+                if ($decoded) {
+                    $errorResponse = $decoded;
+                    // 尝试从响应中提取错误消息
+                    if (isset($decoded['error']['message'])) {
+                        $errorMessage .= ': ' . $decoded['error']['message'];
+                    } elseif (isset($decoded['error'])) {
+                        $errorMessage .= ': ' . json_encode($decoded['error']);
+                    } elseif (isset($decoded['message'])) {
+                        $errorMessage .= ': ' . $decoded['message'];
+                    }
+                } else {
+                    // 如果不是 JSON，保留原始响应
+                    $errorResponse['raw_response'] = $response;
+                }
+            }
+            
+            throw new RequestException(
+                $errorMessage,
+                '',
+                (string)$httpCode,
+                array_merge(['url' => $url, 'http_code' => $httpCode], $errorResponse)
+            );
+        }
+        
+        $decoded = json_decode($response, true);
+        return $decoded ?: [];
+    }
+    
+    /**
+     * 发送 GET 请求
+     */
+    public function get(string $url, array $params = [], array $headers = []): array
+    {
+        if (!empty($params)) {
+            $url .= '?' . http_build_query($params);
+        }
+        
+        $ch = curl_init($url);
+        
+        curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+        curl_setopt($ch, CURLOPT_TIMEOUT, $this->timeout);
+        
+        // 设置代理
+        if (!empty($this->proxy)) {
+            curl_setopt($ch, CURLOPT_PROXY, $this->proxy);
+            curl_setopt($ch, CURLOPT_PROXYTYPE, $this->proxyType);
+        }
+        
+        $curlHeaders = [];
+        foreach ($headers as $key => $value) {
+            $curlHeaders[] = "{$key}: {$value}";
+        }
+        curl_setopt($ch, CURLOPT_HTTPHEADER, $curlHeaders);
+        
+        $response = curl_exec($ch);
+        $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+        $error = curl_error($ch);
+        if (function_exists('curl_close') && version_compare(PHP_VERSION, '8.0.0', '<')) {
+            curl_close($ch);
+        }
+
+        if ($response === false || $httpCode >= 400) {
+            // 尝试解析错误响应体
+            $errorResponse = [];
+            $errorMessage = $error ?: "HTTP Error: {$httpCode}";
+            
+            if ($response && is_string($response)) {
+                $decoded = json_decode($response, true);
+                if ($decoded) {
+                    $errorResponse = $decoded;
+                    // 尝试从响应中提取错误消息
+                    if (isset($decoded['error']['message'])) {
+                        $errorMessage .= ': ' . $decoded['error']['message'];
+                    } elseif (isset($decoded['error'])) {
+                        $errorMessage .= ': ' . json_encode($decoded['error']);
+                    } elseif (isset($decoded['message'])) {
+                        $errorMessage .= ': ' . $decoded['message'];
+                    }
+                } else {
+                    // 如果不是 JSON，保留原始响应
+                    $errorResponse['raw_response'] = $response;
+                }
+            }
+            
+            throw new RequestException(
+                $errorMessage,
+                '',
+                (string)$httpCode,
+                array_merge(['url' => $url, 'http_code' => $httpCode], $errorResponse)
+            );
+        }
+        
+        $decoded = json_decode($response, true);
+        return $decoded ?: [];
+    }
+    
+    /**
+     * 设置超时时间
+     */
+    public function setTimeout(int $timeout): TransportInterface
+    {
+        $this->timeout = $timeout;
+        return $this;
+    }
+    
+    /**
+     * 设置网络代理
+     * 自动识别代理协议类型
+     */
+    public function setProxy(string $proxy): TransportInterface
+    {
+        if (empty($proxy)) {
+            $this->proxy = '';
+            return $this;
+        }
+        
+        // 解析代理协议
+        $parsed = parse_url($proxy);
+        
+        if (!$parsed || !isset($parsed['scheme'])) {
+            throw new \InvalidArgumentException('Invalid proxy format. Expected: protocol://host:port');
+        }
+        
+        $scheme = strtolower($parsed['scheme']);
+        
+        // 设置代理类型
+        switch ($scheme) {
+            case 'http':
+            case 'https':
+                $this->proxyType = CURLPROXY_HTTP;
+                break;
+                
+            case 'socks5':
+                $this->proxyType = CURLPROXY_SOCKS5;
+                break;
+                
+            case 'socks5h':
+                $this->proxyType = CURLPROXY_SOCKS5_HOSTNAME;
+                break;
+                
+            case 'socks4':
+                $this->proxyType = CURLPROXY_SOCKS4;
+                break;
+                
+            case 'socks4a':
+                $this->proxyType = CURLPROXY_SOCKS4A;
+                break;
+                
+            default:
+                throw new \InvalidArgumentException("Unsupported proxy protocol: {$scheme}");
+        }
+        
+        $this->proxy = $proxy;
+        return $this;
+    }
+    
+    /**
+     * 返回流式请求中捕获到的 usage 数据
+     * @return array
+     */
+    public function getStreamUsage(): array
+    {
+        return $this->streamLastUsage;
+    }
+
+    /**
+     * 设置流式输出回调函数
+     */
+    public function setStreamCallback(?callable $callback): TransportInterface
+    {
+        $this->streamCallback = $callback;
+        return $this;
+    }
+    
+    /**
+     * 处理流式数据
+     * @param string $data 接收到的数据块
+     * @return int 返回处理的字节数
+     */
+    protected function handleStreamData(string $data): int
+    {
+        $length = strlen($data);
+        
+        // 累加到完整内容中
+        $this->streamFullContent .= $data;
+        
+        // 累加到缓冲区
+        $this->streamBuffer .= $data;
+        
+        // 解析 SSE 格式的流式数据
+        $lines = explode("\n", $this->streamBuffer);
+        
+        // 保留最后一行（可能不完整）
+        $this->streamBuffer = array_pop($lines);
+        
+        foreach ($lines as $line) {
+            $line = trim($line);
+            
+            if (empty($line)) {
+                continue;
+            }
+            
+            // SSE 格式: "data: {...}"
+            if (strpos($line, 'data: ') === 0) {
+                $jsonData = substr($line, 6);
+                
+                // 检查是否是结束标记
+                if ($jsonData === '[DONE]') {
+                    continue;
+                }
+                
+                // 解析 JSON 数据
+                $decoded = json_decode($jsonData, true);
+                
+                if ($decoded !== null && $this->streamCallback) {
+                    // 捕获 usage 数据（OpenAI/DeepSeek 开启 stream_options 后在末尾 chunk 返回）
+                    if (!empty($decoded['usage'])) {
+                        $this->streamLastUsage = $decoded['usage'];
+                    }
+                    try {
+                        // 直接传递原始数据给回调，不在这里提取内容
+                        // 内容提取由协议层负责
+                        call_user_func($this->streamCallback, $decoded);
+                    } catch (\Exception $e) {
+                        // 回调异常不影响主流程
+                        error_log('Stream callback error: ' . $e->getMessage());
+                    }
+                }
+            }
+        }
+        
+        return $length;
+    }
+}

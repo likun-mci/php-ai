@@ -46,6 +46,14 @@ class Claude implements ProtocolInterface
     }
 
     /**
+     * 透传白名单：buildRequest 放行的 Anthropic Messages 参数
+     */
+    protected static $passthroughKeys = [
+        'max_tokens', 'temperature', 'top_p', 'top_k', 'stop_sequences',
+        'system', 'metadata', 'tools', 'tool_choice', 'thinking',
+    ];
+
+    /**
      * 构建请求数据
      */
     public function buildRequest(array $payload): array
@@ -55,25 +63,18 @@ class Claude implements ProtocolInterface
             'messages' => $this->convertMessages($payload['messages'] ?? []),
             'max_tokens' => $payload['max_tokens'] ?? 4096,
         ];
-        
-        // 可选参数
-        if (isset($payload['temperature'])) {
-            $request['temperature'] = $payload['temperature'];
-        }
-        if (isset($payload['system'])) {
-            $request['system'] = $payload['system'];
-        }
-        // 流式开关必须写入请求体，否则服务端按非流式返回，传输层按 SSE 解析会得到空内容
-        if (isset($payload['stream'])) {
-            $request['stream'] = (bool) $payload['stream'];
+
+        // 白名单透传所有已知生成参数
+        foreach (self::$passthroughKeys as $key) {
+            if ($key === 'max_tokens') continue; // 已在 base 中设置
+            if (array_key_exists($key, $payload)) {
+                $request[$key] = $payload[$key];
+            }
         }
 
-        // 工具调用（Anthropic tools 规范）：tools=[{name,description,input_schema}]
-        if (isset($payload['tools']) && is_array($payload['tools']) && $payload['tools']) {
-            $request['tools'] = $payload['tools'];
-        }
-        if (isset($payload['tool_choice'])) {
-            $request['tool_choice'] = $payload['tool_choice'];
+        // 流式开关必须写入请求体，否则服务端按非流式返回
+        if (!empty($payload['stream'])) {
+            $request['stream'] = true;
         }
 
         return $request;
@@ -105,19 +106,20 @@ class Claude implements ProtocolInterface
     {
         $content = '';
         $usage = [];
-        
+
         if (isset($response['content'][0]['text'])) {
             $content = $response['content'][0]['text'];
         }
-        
+
         if (isset($response['usage'])) {
-            $usage = [
-                'prompt_tokens' => $response['usage']['input_tokens'] ?? 0,
-                'completion_tokens' => $response['usage']['output_tokens'] ?? 0,
-                'total_tokens' => ($response['usage']['input_tokens'] ?? 0) + ($response['usage']['output_tokens'] ?? 0),
-            ];
+            // 原样保留平台返回的完整 usage 对象（含 cache_creation_input_tokens 等）
+            $usage = $response['usage'];
+            // 确保三个标准字段向下兼容
+            $usage['prompt_tokens'] = $usage['prompt_tokens'] ?? ($usage['input_tokens'] ?? 0);
+            $usage['completion_tokens'] = $usage['completion_tokens'] ?? ($usage['output_tokens'] ?? 0);
+            $usage['total_tokens'] = $usage['total_tokens'] ?? (int)$usage['prompt_tokens'] + (int)$usage['completion_tokens'];
         }
-        
+
         return new AIResponse([
             'content' => $content,
             'model' => $response['model'] ?? '',
@@ -197,10 +199,11 @@ class Claude implements ProtocolInterface
             $response = $transport->get($this->modelsEndpoint($config), [], $this->buildHeaders($config));
 
             if (isset($response['data']) && is_array($response['data'])) {
+                $raw = !empty($config['__models_raw']);
                 $models = [];
                 foreach ($response['data'] as $model) {
                     if (isset($model['id'])) {
-                        $models[$model['id']] = $model['display_name'] ?? $model['id'];
+                        $models[$model['id']] = $raw ? $model : ($model['display_name'] ?? $model['id']);
                     }
                 }
                 if ($models) {

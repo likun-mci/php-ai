@@ -75,7 +75,7 @@ class AI
      * @var array
      */
     protected static $payloadKeys = [
-        'max_tokens', 'temperature', 'top_p', 'top_k', 'stop',
+        'max_tokens', 'max_completion_tokens', 'temperature', 'top_p', 'top_k', 'stop',
         'presence_penalty', 'frequency_penalty', 'seed', 'response_format',
         'system', 'tools', 'tool_choice', 'reasoning_effort', 'thinking',
     ];
@@ -462,16 +462,16 @@ class AI
 
             // 流式模式：用累积的内容和 usage 直接构建响应，不走 parseResponse
             if ( $payload['stream'] ) {
-                // 尝试从 transport 获取 usage（需要 stream_options: include_usage）
+                // 从 transport 获取完整 usage（含 prompt_tokens_details 等）
                 $streamUsage = [];
                 if (method_exists($this->transport, 'getStreamUsage')) {
                     $rawUsage = $this->transport->getStreamUsage();
                     if (!empty($rawUsage)) {
-                        $streamUsage = [
-                            'prompt_tokens'     => $rawUsage['prompt_tokens'] ?? 0,
-                            'completion_tokens' => $rawUsage['completion_tokens'] ?? 0,
-                            'total_tokens'      => $rawUsage['total_tokens'] ?? 0,
-                        ];
+                        $streamUsage = $rawUsage; // 原样保留完整 usage
+                        // 确保三个标准字段向下兼容
+                        $streamUsage['prompt_tokens'] = $streamUsage['prompt_tokens'] ?? 0;
+                        $streamUsage['completion_tokens'] = $streamUsage['completion_tokens'] ?? 0;
+                        $streamUsage['total_tokens'] = $streamUsage['total_tokens'] ?? 0;
                     }
                 }
                 $response = new \Ai\Response\AIResponse([
@@ -626,7 +626,55 @@ class AI
         $this->transport->setTimeout($timeout);
         return $this;
     }
-    
+
+    /**
+     * 设置连接超时时间（秒）。
+     * 独立于总超时，用于快速失败场景。不调用则与总超时一致。
+     */
+    public function setConnectTimeout(int $seconds): self
+    {
+        if (method_exists($this->transport, 'setConnectTimeout')) {
+            $this->transport->setConnectTimeout($seconds);
+        }
+        return $this;
+    }
+
+    /**
+     * 设置 User-Agent。
+     * 传空串（默认）则不发送 User-Agent 头。
+     */
+    public function setUserAgent(string $userAgent): self
+    {
+        if (method_exists($this->transport, 'setUserAgent')) {
+            $this->transport->setUserAgent($userAgent);
+        }
+        return $this;
+    }
+
+    /**
+     * 设置是否校验 SSL 证书。
+     * 生产环境不应关闭，仅调试/内网自签证书时使用。
+     */
+    public function setSslVerify(bool $verify): self
+    {
+        if (method_exists($this->transport, 'setSslVerify')) {
+            $this->transport->setSslVerify($verify);
+        }
+        return $this;
+    }
+
+    /**
+     * 获取最近一次请求的 cURL info（调试用）
+     * @return array
+     */
+    public function getLastInfo(): array
+    {
+        if (method_exists($this->transport, 'getLastInfo')) {
+            return $this->transport->getLastInfo();
+        }
+        return [];
+    }
+
     /**
      * 设置网络代理
      * 支持格式：
@@ -729,14 +777,19 @@ class AI
      * 根据当前设置的平台/协议，调用相应的模型列表接口
      * 如果模型配置中没有指定具体模型，则返回所有支持的平台列表（从模型映射表动态获取）
      * 如果平台不支持模型列表API，返回 null
-     * 
-     * @return array|null 模型列表 ['model_id' => 'model_name']，不支持返回 null
-     * 
+     *
+     * @param bool $raw 为 true 时返回平台原始模型数据（含 pricing、context_length 等），
+     *                  默认为空则返回 ['model_id' => 'model_name']
+     * @return array|null 模型列表，不支持返回 null
+     *
      * @example
      * $models = $ai->listModels();
      * // ['gpt-4' => 'gpt-4', 'gpt-3.5-turbo' => 'gpt-3.5-turbo']
+     *
+     * $models = $ai->listModels(true);
+     * // ['gpt-4' => ['id'=>'gpt-4', 'created'=>..., ...], ...]
      */
-    public function listModels(): ?array
+    public function listModels(bool $raw = false): ?array
     {
         // 如果没有指定模型，返回所有支持的平台列表
         if( ! isset($this->config['model']) ) {
@@ -747,7 +800,10 @@ class AI
         }
         // 把实际对话端点一并传给协议层，便于自定义接口推导出同源的模型列表端点
         $config = $this->config;
-        $config['endpoint'] = $this->resolveEndpoint();
+        $config['endpoint'] = $this->currentEndpoint();
+        if ($raw) {
+            $config['__models_raw'] = true;
+        }
         return $this->protocol->listModels($config, $this->transport);
     }
 

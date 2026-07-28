@@ -46,6 +46,16 @@ class OpenAI implements ProtocolInterface
     }
 
     /**
+     * 透传白名单：buildRequest 放行的 OpenAI Chat Completions 参数
+     */
+    protected static $passthroughKeys = [
+        'temperature', 'max_tokens', 'max_completion_tokens', 'top_p', 'top_k',
+        'stop', 'presence_penalty', 'frequency_penalty', 'seed', 'response_format',
+        'system', 'tools', 'tool_choice', 'reasoning_effort', 'thinking',
+        'metadata', 'user', 'parallel_tool_calls',
+    ];
+
+    /**
      * 构建请求数据
      */
     public function buildRequest(array $payload): array
@@ -54,22 +64,20 @@ class OpenAI implements ProtocolInterface
             'model' => $payload['model'] ?? 'gpt-4',
             'messages' => $payload['messages'] ?? [],
         ];
-        
-        // 可选参数
-        if (isset($payload['temperature'])) {
-            $request['temperature'] = $payload['temperature'];
-        }
-        if (isset($payload['max_tokens'])) {
-            $request['max_tokens'] = $payload['max_tokens'];
-        }
-        if (isset($payload['stream'])) {
-            $request['stream'] = $payload['stream'];
-            // 开启流式 usage 返回，便于最终计算 tokens
-            if ($payload['stream'] === true) {
-                $request['stream_options'] = ['include_usage' => true];
+
+        // 白名单透传所有已知生成参数（文档 & setConfig() 列出的参数都能实际送到接口）
+        foreach (self::$passthroughKeys as $key) {
+            if (array_key_exists($key, $payload)) {
+                $request[$key] = $payload[$key];
             }
         }
-        
+
+        // 流式
+        if (!empty($payload['stream'])) {
+            $request['stream'] = true;
+            $request['stream_options'] = ['include_usage' => true];
+        }
+
         return $request;
     }
     
@@ -80,19 +88,20 @@ class OpenAI implements ProtocolInterface
     {
         $content = '';
         $usage = [];
-        
+
         if (isset($response['choices'][0]['message']['content'])) {
             $content = $response['choices'][0]['message']['content'];
         }
-        
+
         if (isset($response['usage'])) {
-            $usage = [
-                'prompt_tokens' => $response['usage']['prompt_tokens'] ?? 0,
-                'completion_tokens' => $response['usage']['completion_tokens'] ?? 0,
-                'total_tokens' => $response['usage']['total_tokens'] ?? 0,
-            ];
+            // 原样保留平台返回的完整 usage 对象（含 cached_tokens、prompt_tokens_details 等）
+            $usage = $response['usage'];
+            // 确保三个标准字段向下兼容
+            $usage['prompt_tokens'] = $usage['prompt_tokens'] ?? ($usage['input_tokens'] ?? 0);
+            $usage['completion_tokens'] = $usage['completion_tokens'] ?? ($usage['output_tokens'] ?? 0);
+            $usage['total_tokens'] = $usage['total_tokens'] ?? (int)$usage['prompt_tokens'] + (int)$usage['completion_tokens'];
         }
-        
+
         return new AIResponse([
             'content' => $content,
             'model' => $response['model'] ?? '',
@@ -164,29 +173,31 @@ class OpenAI implements ProtocolInterface
 
     /**
      * 列举可用模型列表
+     *
+     * config 中设置 '__models_raw' => true 可返回完整的模型数据对象而非仅 id。
      */
     public function listModels(array $config, $transport): ?array
     {
         try {
             $endpoint = $this->modelsEndpoint($config);
             $headers  = $this->buildHeaders($config);
-            
+
             $response = $transport->get($endpoint, [], $headers);
-            
+
             if (!isset($response['data']) || !is_array($response['data'])) {
                 return null;
             }
-            
+
+            $raw = !empty($config['__models_raw']);
             $models = [];
             foreach ($response['data'] as $model) {
                 if (isset($model['id'])) {
-                    // 使用 id 作为键和值，也可以用 owned_by 或其他字段作为描述
-                    $models[$model['id']] = $model['id'];
+                    $models[$model['id']] = $raw ? $model : $model['id'];
                 }
             }
-            
+
             return $models;
-            
+
         } catch (\Exception $e) {
             error_log('Failed to list OpenAI models: ' . $e->getMessage());
             return null;

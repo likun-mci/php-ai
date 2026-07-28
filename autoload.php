@@ -4,8 +4,8 @@
  *
  * 命名空间 Ai\ 映射到当前目录下的 src/
  *
- * 使用方式（在项目入口或 CI hooks 中引入一次即可）：
- *     require_once APPPATH . 'libraries/Ai/autoload.php';
+ * 使用方式（在项目入口引入一次即可）：
+ *     require_once __DIR__ . '/autoload.php';
  */
 
 spl_autoload_register(function (string $class): void {

@@ -46,6 +46,15 @@ class Gemini implements ProtocolInterface
     }
 
     /**
+     * 透传白名单：buildRequest 放行的参数（Gemini OpenAI 兼容端点的标准参数）
+     */
+    protected static $passthroughKeys = [
+        'temperature', 'max_tokens', 'top_p', 'top_k',
+        'stop', 'presence_penalty', 'frequency_penalty', 'seed', 'response_format',
+        'system', 'tools', 'tool_choice',
+    ];
+
+    /**
      * 构建请求数据
      */
     public function buildRequest(array $payload): array
@@ -54,18 +63,19 @@ class Gemini implements ProtocolInterface
             'model' => $payload['model'] ?? 'gemini-pro',
             'messages' => $payload['messages'] ?? [],
         ];
-        
-        // 可选参数
-        if (isset($payload['temperature'])) {
-            $request['temperature'] = $payload['temperature'];
+
+        // 白名单透传所有已知生成参数
+        foreach (self::$passthroughKeys as $key) {
+            if (array_key_exists($key, $payload)) {
+                $request[$key] = $payload[$key];
+            }
         }
-        if (isset($payload['max_tokens'])) {
-            $request['max_tokens'] = $payload['max_tokens'];
+
+        // 流式
+        if (!empty($payload['stream'])) {
+            $request['stream'] = true;
         }
-        if (isset($payload['stream'])) {
-            $request['stream'] = $payload['stream'];
-        }
-        
+
         return $request;
     }
     
@@ -103,19 +113,18 @@ class Gemini implements ProtocolInterface
         }
 
         if (isset($response['usage'])) {
-            $usage = [
-                'prompt_tokens'     => $response['usage']['prompt_tokens'] ?? 0,
-                'completion_tokens' => $response['usage']['completion_tokens'] ?? 0,
-                'total_tokens'      => $response['usage']['total_tokens'] ?? 0,
-            ];
+            // 原样保留（OpenAI 兼容结构）
+            $usage = $response['usage'];
+            $usage['prompt_tokens'] = $usage['prompt_tokens'] ?? ($usage['input_tokens'] ?? 0);
+            $usage['completion_tokens'] = $usage['completion_tokens'] ?? ($usage['output_tokens'] ?? 0);
+            $usage['total_tokens'] = $usage['total_tokens'] ?? (int)$usage['prompt_tokens'] + (int)$usage['completion_tokens'];
         } elseif (isset($response['usageMetadata'])) {
-            $usage = [
-                'prompt_tokens' => $response['usageMetadata']['promptTokenCount'] ?? 0,
-                'completion_tokens' => $response['usageMetadata']['candidatesTokenCount'] ?? 0,
-                'total_tokens' => $response['usageMetadata']['totalTokenCount'] ?? 0,
-            ];
+            $usage = $response['usageMetadata']; // 原样保留
+            $usage['prompt_tokens'] = $usage['prompt_tokens'] ?? ($usage['promptTokenCount'] ?? 0);
+            $usage['completion_tokens'] = $usage['completion_tokens'] ?? ($usage['candidatesTokenCount'] ?? 0);
+            $usage['total_tokens'] = $usage['total_tokens'] ?? ($usage['totalTokenCount'] ?? 0);
         }
-        
+
         return new AIResponse([
             'content' => $content,
             'model' => $response['model'] ?? ($response['modelVersion'] ?? ''),
@@ -197,26 +206,26 @@ class Gemini implements ProtocolInterface
             if (isset($config['api_key'])) {
                 $params['key'] = $config['api_key'];
             }
-            
+
             $headers = $this->buildHeaders($config);
             $response = $transport->get($endpoint, $params, $headers);
-            
+
             if (!isset($response['models']) || !is_array($response['models'])) {
                 return null;
             }
-            
+
+            $raw = !empty($config['__models_raw']);
             $models = [];
             foreach ($response['models'] as $model) {
                 if (isset($model['name'])) {
                     // name 格式为 "models/gemini-pro"，提取模型名称
                     $modelId = str_replace('models/', '', $model['name']);
-                    $displayName = $model['displayName'] ?? $modelId;
-                    $models[$modelId] = $displayName;
+                    $models[$modelId] = $raw ? $model : ($model['displayName'] ?? $modelId);
                 }
             }
-            
+
             return $models;
-            
+
         } catch (\Exception $e) {
             error_log('Failed to list Gemini models: ' . $e->getMessage());
             return null;

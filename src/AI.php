@@ -81,6 +81,58 @@ class AI
     ];
 
     /**
+     * 数值型生成参数的取值范围 [最小值, 最大值]
+     * 超出范围时自动截断到最近的边界值。
+     */
+    protected static $numericRanges = [
+        'temperature'       => [0.0, 2.0],
+        'top_p'             => [0.0, 1.0],
+        'top_k'             => [0, PHP_INT_MAX],
+        'presence_penalty'  => [-2.0, 2.0],
+        'frequency_penalty' => [-2.0, 2.0],
+        'seed'              => [0, PHP_INT_MAX],
+        'max_tokens'        => [1, PHP_INT_MAX],
+    ];
+
+    /**
+     * 净化数值型生成参数：确保类型正确、取值在合法范围内
+     *
+     * - 字符串数字（如 "0.7"、"1"）转为 float / int
+     * - 超出范围的值自动截断到最近的边界值
+     * - 非数值类型的值原样保留（pass-through）
+     *
+     * @param array $params 配置项或 payload 数组
+     * @return array
+     */
+    protected static function sanitizePayloadParams(array $params): array
+    {
+        foreach (self::$numericRanges as $key => [$min, $max]) {
+            if (!array_key_exists($key, $params)) {
+                continue;
+            }
+            $value = $params[$key];
+
+            // 跳过 null 和不属于数值/数字字符串的值
+            if ($value === null) {
+                continue;
+            }
+            if (!is_numeric($value)) {
+                continue;
+            }
+
+            // 判断目标类型：整数参（max_tokens / top_k / seed）转 int，其余转 float
+            $intKeys = ['max_tokens', 'top_k', 'seed'];
+            $num = in_array($key, $intKeys, true)
+                ? (int) $value
+                : (float) $value;
+
+            // 截断到合法范围
+            $params[$key] = max($min, min($max, $num));
+        }
+        return $params;
+    }
+
+    /**
      * 模型名称到类名的映射表
      * @var array
      */
@@ -135,6 +187,7 @@ class AI
      */
     public function setConfig(array $config): self
     {
+        $config = self::sanitizePayloadParams($config);
         $this->config = array_merge($this->config, $config);
         if( isset($this->config['rounds']) ){
             $this->rounds = intval( $this->config['rounds'] );
@@ -360,6 +413,9 @@ class AI
             'model' => $this->model->getName(),
             'messages' => [],
         ], $this->model->getConfig(), $this->collectModelParams(), $payload);
+
+        // 对合并后的 payload 做数值参数净化（类型转换 + 范围截断）
+        $payload = self::sanitizePayloadParams($payload);
         
         // 处理附件：交由模型层处理模型特定的附件格式
         if (!empty($this->attachments)) {

@@ -1,0 +1,60 @@
+{
+    "name": "likun-mci/php-ai",
+    "description": "框架无关的 PHP AI 标准库：统一 OpenAI / Claude / Gemini / DeepSeek 调用，内置流式输出、Agent 工具调用循环、AI 代码编辑协议与安全网页抓取。",
+    "type": "library",
+    "keywords": [
+        "ai",
+        "llm",
+        "openai",
+        "claude",
+        "anthropic",
+        "gemini",
+        "deepseek",
+        "agent",
+        "sdk",
+        "stream",
+        "php-ai",
+        "llm-sdk"
+    ],
+    "homepage": "https://github.com/likun-mci/php-ai",
+    "license": "MIT",
+    "authors": [
+        {
+            "name": "likun-mci",
+            "email": "likun.work@qq.com",
+            "homepage": "https://likun.work",
+            "role": "Developer"
+        }
+    ],
+    "support": {
+        "email": "likun.work@qq.com",
+        "issues": "https://github.com/likun-mci/php-ai/issues",
+        "source": "https://github.com/likun-mci/php-ai"
+    },
+    "require": {
+        "php": ">=7.2",
+        "ext-curl": "*",
+        "ext-json": "*",
+        "ext-mbstring": "*"
+    },
+    "suggest": {
+        "ext-dom": "Ai\\Tools\\WebContent 的 HTML 转换需要，缺失时降级为正则回退",
+        "league/html-to-markdown": "更高质量的 HTML → Markdown 转换，安装后 Ai\\Tools\\WebContent 会自动优先使用"
+    },
+    "autoload": {
+        "psr-4": {
+            "Ai\\": ""
+        },
+        "exclude-from-classmap": [
+            "examples.php",
+            "examples_models.php",
+            "examples_stream.php",
+            "examples_custom.php"
+        ]
+    },
+    "config": {
+        "sort-packages": true,
+        "optimize-autoloader": true
+    },
+    "minimum-stability": "stable"
+}

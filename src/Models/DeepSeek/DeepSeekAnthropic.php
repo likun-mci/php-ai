@@ -18,7 +18,7 @@ class DeepSeekAnthropic extends BaseModel
     protected $endpoint = 'https://api.deepseek.com/anthropic/v1/messages';
     protected $features = ['chat', 'stream'];
     protected $config = [
-        'max_tokens'  => 1024*200,
+        'max_tokens'  => 1024*256,
         'temperature' => 1.0,
     ];
 

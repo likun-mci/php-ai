@@ -359,3 +359,6 @@ try {
 }
 
 echo "所有示例执行完成！\n";
+echo "\n---\n";
+echo "更多示例：\n";
+echo "  php examples_openrouter.php   # OpenRouter 聚合中转使用示例\n";

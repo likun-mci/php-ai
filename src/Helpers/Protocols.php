@@ -37,6 +37,11 @@ class Protocols
             'label'    => 'DeepSeek（OpenAI 兼容）',
             'platform' => 'deepseek',
         ],
+        'openrouter' => [
+            'class'    => 'Ai\\Protocol\\OpenRouter',
+            'label'    => 'OpenRouter（聚合中转）',
+            'platform' => 'openrouter',
+        ],
     ];
 
     /** 协议标识别名 */
@@ -50,6 +55,9 @@ class Protocols
         'chat_completions'  => 'openai',
         'chat-completions'  => 'openai',
         'google'            => 'gemini',
+        'or'                => 'openrouter',
+        'open-router'       => 'openrouter',
+        'open_router'       => 'openrouter',
     ];
 
     /**

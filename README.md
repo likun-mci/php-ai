@@ -1,6 +1,6 @@
 # PHP AI 标准库
 
-一个框架无关的 PHP AI 调用标准库，用统一接口屏蔽 OpenAI / Claude(Anthropic) / Gemini / DeepSeek 等平台在**鉴权方式、请求协议、返回格式、流式协议**上的差异。
+一个框架无关的 PHP AI 调用标准库，用统一接口屏蔽 OpenAI / Claude(Anthropic) / Gemini / DeepSeek / OpenRouter 等平台在**鉴权方式、请求协议、返回格式、流式协议**上的差异。
 
 除对话能力外，还内置了 **Agent 工具调用循环**、**AI 代码编辑协议**、**带 SSRF 防护的网页抓取工具**与 **Agent 长期记忆**，可直接用于构建后台 AI 助手、代码编辑助手、内容翻译等实际业务。
 
@@ -10,7 +10,7 @@
 
 ## 特性
 
-- 🔌 **多平台**：OpenAI、Claude(Anthropic)、Gemini、DeepSeek，含 DeepSeek 的 Anthropic 兼容端点
+- 🔌 **多平台**：OpenAI、Claude(Anthropic)、Gemini、DeepSeek、OpenRouter，含 DeepSeek 的 Anthropic 兼容端点
 - 🎯 **统一接口**：`AI::create()->chat()`，切换平台只需换 `model`
 - 🧩 **任意模型 + 任意接口**：模型名不受内置清单限制，可手选协议格式（`protocol`）并指定自定义接口地址（`base_url` / `endpoint`），一套代码同时对接官方 API、第三方中转与自建网关
 - 🌊 **流式输出**：一行 `setStream(true)`，自动按 SSE 协议实时吐出数据块
@@ -108,6 +108,7 @@ $response = $ai->chat([
 | DeepSeek | `deepseek-v4-pro` | OpenAI | api.deepseek.com |
 | DeepSeek | `deepseek-v4-flash` | OpenAI | api.deepseek.com |
 | DeepSeek | `deepseek-anthropic` | **Claude** | api.deepseek.com/anthropic |
+| OpenRouter | `openai/gpt-4o` 等完整标识 | **OpenRouter**（OpenAI 兼容） | openrouter.ai/api |
 
 `deepseek-anthropic` 是 DeepSeek 的 Anthropic 兼容端点，用 Claude 协议通信——**需要工具调用（Agent）时用它，可以用 DeepSeek 的价格跑 Anthropic 的 tools 协议**。
 
@@ -141,6 +142,7 @@ $ai = AI::create([
 | `claude` / `anthropic` | Anthropic Messages，**工具调用（Agent）必须用它** | `/v1/messages` |
 | `gemini` | Gemini 的 OpenAI 兼容端点 | `/v1beta/openai/chat/completions` |
 | `deepseek` | DeepSeek（OpenAI 兼容），仅默认地址不同 | `/v1/chat/completions` |
+| `openrouter` / `or` | **OpenRouter 聚合中转**（OpenAI 兼容），自动拼接默认地址 | `/v1/chat/completions` |
 | 自定义协议类名 | 实现 `Ai\Contracts\ProtocolInterface` 的类，见「扩展开发」 | 由该类决定 |
 
 不传 `protocol` 时按模型名推断（`gpt-*`→openai、`claude-*`→claude、`gemini-*`→gemini、`deepseek-*`→deepseek，也识别 `厂商/模型` 写法），推断不出则按 `openai` 处理。`$ai->listProtocols()` 可取到上表用于后台下拉框。
@@ -314,14 +316,65 @@ $ai = AI::create([
 
 `endpoint` 优先级高于 `base_url`；两者都不设置时使用官方默认端点，完全向后兼容。
 
-**常见接入写法**
+---
+
+### OpenRouter 聚合中转
+
+[OpenRouter](https://openrouter.ai) 是一个 AI 模型聚合平台，通过统一的 OpenAI 兼容接口访问 OpenAI、Claude、Gemini、DeepSeek、Llama 等多种模型。库已内置 `openrouter` 协议，**开箱即用**：
 
 ```php
-// 阿里云百炼（OpenAI 兼容模式）
-AI::create(['model'=>'qwen-max', 'protocol'=>'openai', 'api_key'=>'sk-xxx',
-            'base_url'=>'https://dashscope.aliyuncs.com/compatible-mode/v1']);
+// 方式一（推荐）：手选 protocol = openrouter，自动使用 openrouter.ai/api
+$ai = AI::create([
+    'model'    => 'openai/gpt-4o',              // OpenRouter 上的完整模型标识
+    'protocol' => 'openrouter',
+    'api_key'  => 'sk-or-v1-xxxxxxxxx',         // OpenRouter API Key
+    'referer'  => 'https://myapp.com',          // 可选，来源标识（OpenRouter 后台查看）
+    'title'    => 'MyApp',                      // 可选，应用名称
+]);
 
-// one-api / new-api 之类的聚合网关
+// 方式二：用 base_url 配置（不依赖 protocol=openrouter）
+$ai = AI::create([
+    'model'    => 'anthropic/claude-sonnet-4-20250514',
+    'base_url' => 'https://openrouter.ai/api',
+    'api_key'  => 'sk-or-v1-xxxxxxxxx',
+]);
+```
+
+OpenRouter 上的模型名使用 `厂商/模型` 格式，协议推断规则会自动提取厂商前缀：
+- `openai/gpt-4o` → 协议推断为 `openai`，自动使用 OpenAI 协议格式
+- `anthropic/claude-sonnet-4-20250514` → 协议推断为 `claude`（但 OpenRouter 接口仍以 OpenAI 兼容格式应答，**协议以 `protocol` 配置为准**）
+- `deepseek/deepseek-chat` → 协议推断为 `deepseek`
+- `google/gemini-2.5-pro-exp-03-25` → 协议推断为 `gemini`
+
+> **OpenRouter 返回的 usage 字段是 OpenRouter 统计而非原始模型统计**（可能包含缓存命中标记等扩展字段），`$response->getUsage()` 原样透传。
+
+**通过 OpenRouter 查看实时模型状态：**
+
+```php
+$ai = AI::create([
+    'protocol' => 'openrouter',
+    'api_key'  => 'sk-or-v1-xxx',
+]);
+$models = $ai->setModel('openai/gpt-4o')->listModels(true);
+// 返回含 id、pricing、context_length 等的完整模型信息
+```
+
+---
+
+### 其他常见 AI 中转/聚合服务
+
+以下中转站和网关均使用 OpenAI 兼容协议（`protocol=openai`），只需配置 `base_url` 或 `endpoint`：
+
+```php
+// API2D（国内 OpenAI 中转）
+AI::create(['model'=>'gpt-4o', 'protocol'=>'openai', 'api_key'=>'fkxxxxx',
+            'base_url'=>'https://openapi.api2d.com']);
+
+// Cloudflare AI Gateway（官方聚合网关）
+AI::create(['model'=>'@cf/meta/llama-3-8b-instruct', 'protocol'=>'openai', 'api_key'=>'xxx',
+            'base_url'=>'https://gateway.ai.cloudflare.com/v1/{account_id}/{gateway_id}');
+
+// one-api / new-api（自建聚合网关，最通用）
 AI::create(['model'=>'glm-4.6', 'protocol'=>'openai', 'api_key'=>'sk-xxx',
             'base_url'=>'https://gateway.example.com']);
 
@@ -334,9 +387,15 @@ AI::create(['model'=>'my-agent-model', 'protocol'=>'anthropic', 'api_key'=>'k',
 AI::create(['model'=>'llama3', 'protocol'=>'openai',
             'base_url'=>'http://10.0.0.9:11434/v1',
             'headers' =>['Authorization'=>null, 'X-Internal-Token'=>'t']]);
+
+// 阿里云百炼（OpenAI 兼容模式）
+AI::create(['model'=>'qwen-max', 'protocol'=>'openai', 'api_key'=>'sk-xxx',
+            'base_url'=>'https://dashscope.aliyuncs.com/compatible-mode/v1']);
 ```
 
-> **模型列表端点**：`listModels()` 会跟随 `base_url` 走同一个网关；只配了 `endpoint` 时，库按对话端点同源推导（如 `.../v1/chat/completions` → `.../v1/models`）。若网关的模型列表路径特殊，用 `endpoint_models` 单独完整覆盖（仅对 `listModels()` 生效）。
+以上所有接入方式均支持流式输出、附件、回调等完整功能。
+
+> **模型列表端点**：`listModels()` 会跟随 `base_url` 走同一个网关；只配了 `endpoint` 时，库按对话端点同源推导（如 `.../v1/chat/completions` → `.../v1/models`）。若网关的模型列表路径特殊，用 `endpoint_models` 单独完整覆盖（仅对 `listModels()` 生效）。OpenRouter 的模型列表接口返回完整定价数据，`listModels(true)` 可获取。
 
 当前实际请求端点可随时查询：
 
@@ -825,7 +884,7 @@ php-ai/
 │   │   ├── BaseModel.php
 │   │   ├── CustomModel.php # 通用模型：任意模型名 + 手选协议 + 自定义接口地址
 │   │   ├── OpenAI/  Claude/  Gemini/  DeepSeek/
-│   ├── Protocol/           # 协议层：OpenAI / Claude / Gemini / DeepSeek
+│   ├── Protocol/           # 协议层：OpenAI / Claude / Gemini / DeepSeek / OpenRouter
 │   ├── Response/           # 统一响应对象
 │   ├── Tools/              # HttpFetch（SSRF 防护）、WebContent（格式化）
 │   └── Transport/          # cURL 传输层（含 SSE 解析、代理、超时）

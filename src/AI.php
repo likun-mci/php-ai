@@ -271,9 +271,13 @@ class AI
         // 能确定官方地址（模型名可识别，或用户手选了协议）时才给默认端点，
         // 否则留空，等 base_url/endpoint 配置进来；请求前仍未给出则报错，
         // 避免把第三方 Key 发到不相干的官方域名。
-        $officialBase = $detected !== null
-            ? \Ai\Helpers\Protocols::baseUrlOf($detected)
-            : ($protocolConf !== '' ? \Ai\Helpers\Protocols::baseUrlOf($protocolConf) : '');
+        //
+        // 优先级：手选协议 > 模型名推断。当用户手选了协议（如 openrouter）
+        // 但模型名推断出另一个协议时（如 openai/gpt-4o → openai），
+        // 以手选协议的官方地址为准，避免转发到错误的官方域名。
+        $officialBase = $protocolConf !== ''
+            ? \Ai\Helpers\Protocols::baseUrlOf($protocolConf)
+            : ($detected !== null ? \Ai\Helpers\Protocols::baseUrlOf($detected) : '');
 
         $endpoint = $officialBase !== ''
             ? \Ai\Helpers\Protocols::endpointOf($protocol, $officialBase)
@@ -287,7 +291,9 @@ class AI
             // 平台名以模型名推断为准；接第三方接口（模型名无法归属官方平台）时为 custom，
             // 业务层据此去找 {平台}__api_key 之类的配置
             'platform'         => trim((string)($this->config['platform'] ?? ''))
-                ?: ($detected !== null ? \Ai\Helpers\Protocols::platformOf($detected) : 'custom'),
+                ?: ($protocolConf !== ''
+                    ? \Ai\Helpers\Protocols::platformOf($protocolConf)
+                    : ($detected !== null ? \Ai\Helpers\Protocols::platformOf($detected) : 'custom')),
             'features'         => (array)($this->config['features'] ?? []),
             'config'           => $this->collectModelParams(),
         ]);

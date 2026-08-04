@@ -49,7 +49,8 @@
             "examples.php",
             "examples_models.php",
             "examples_stream.php",
-            "examples_custom.php"
+            "examples_custom.php",
+            "examples_claude_cli.php"
         ]
     },
     "config": {

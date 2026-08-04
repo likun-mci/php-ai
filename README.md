@@ -15,6 +15,7 @@
 - 🧩 **任意模型 + 任意接口**：模型名不受内置清单限制，可手选协议格式（`protocol`）并指定自定义接口地址（`base_url` / `endpoint`），一套代码同时对接官方 API、第三方中转与自建网关
 - 🌊 **流式输出**：一行 `setStream(true)`，自动按 SSE 协议实时吐出数据块
 - 🧰 **Agent 循环**：挂载工具（函数）后自动完成「模型决策 → 执行工具 → 回填结果」多轮循环
+- 🤖 **Claude Code CLI**：直接调用本机 claude 程序（`Ai\Cli\ClaudeCode`），文件读写 / 工具执行 / 会话续接，路径自动检测并缓存
 - 📝 **代码编辑协议**：结构化编辑上下文 + 可校验的编辑动作，支持规划/审核/自动执行三种模式
 - 🛡️ **安全抓取**：`HttpFetch` 内置 SSRF、DNS rebinding、内网地址、协议逃逸防护
 - 📄 **多模态附件**：图片等附件按各平台格式自动适配
@@ -402,6 +403,128 @@ AI::create(['model'=>'qwen-max', 'protocol'=>'openai', 'api_key'=>'sk-xxx',
 ```php
 echo $ai->resolveEndpoint();   // 返回按配置解析后的实际端点
 ```
+
+---
+
+## Claude Code CLI 程序调用
+
+`Ai\Cli\ClaudeCode` 直接调用本机安装的 **claude 可执行程序**（Claude Code CLI），与 `Ai\Protocol\Claude`（Anthropic HTTP API）互补。适合让 AI 直接操作工作区文件：读写文件、执行工具，配合 `acceptEdits` 权限模式实现"AI 改代码"。
+
+### 快速开始
+
+```php
+use Ai\Cli\ClaudeCode;
+
+$cli = ClaudeCode::create([
+    'workdir' => '/var/www',   // 工作目录（AI 的文件操作都发生在这里）
+]);
+
+$response = $cli->chat('检查一下 index.php 的语法，有问题直接改');
+echo $response->getContent();   // 最终文本
+echo $response->getSessionId(); // 会话 ID
+echo $response->getCostUsd();   // CLI 实测费用（USD）
+```
+
+默认参数（来自生产实践，均经实测验证）：
+
+```
+claude --print --output-format stream-json --verbose
+       --allowedTools "Read Edit Write Grep Glob" --disallowedTools "Bash"
+       --permission-mode acceptEdits  [--resume <会话ID>]  < prompt.txt
+```
+
+- `--print`：非交互模式，一次查询后退出
+- `--allowedTools Read Edit Write Grep Glob`：仅放行文件类工具
+- `--disallowedTools Bash`：禁用 Bash，阻止任意命令执行（沙箱安全）
+- `--permission-mode acceptEdits`：文件编辑免确认
+- 提示词经临时文件 + stdin 重定向传入，避开命令行长度上限（SSH exec 通道受限时尤为重要）
+
+### claude 路径：自动检测 + 缓存 + 手动指定
+
+```php
+$cli = ClaudeCode::create();            // 自动检测（含缓存）
+$cli->setBinary('/usr/local/bin/claude'); // 手动指定（优先级最高）
+
+// 缓存控制
+$cli->setBinaryCacheEnabled(true);      // 是否启用文件缓存（默认 true）
+$cli->setBinaryCacheTtl(86400);         // 缓存有效期秒（默认 1 天）
+$cli->clearBinaryCache();               // 清除缓存，强制重新探测
+```
+
+自动检测顺序：`command -v claude`（PATH）→ 常见安装路径（`~/.local/bin`、Homebrew、`/usr/bin`）→ nvm 最新版本 `~/.nvm/versions/node/*/bin/claude` → 登录 shell `command -v`。结果缓存到进程内 + 文件（默认 `sys_get_temp_dir()/ai_claude_binary_cache.json`），避免 PHP-FPM 下每次请求重复探测。
+
+### 自定义 CLI 参数
+
+所有 claude 参数均可覆盖/新增/删除：
+
+```php
+$cli
+    ->setFlag('allowedTools', 'Read Grep Glob')   // 收紧工具权限
+    ->setFlag('model', 'claude-sonnet-4-5')        // 指定模型
+    ->setFlag('max-turns', 3)                      // 限制轮数
+    ->setFlag('include-partial-messages', true)    // 逐 token 增量事件
+    ->setFlag('max-budget-usd', 5)                 // 单轮费用上限（注意是 max-budget-usd）
+    ->setFlag('system-prompt', '你是代码审查专家')  // 替换系统提示词
+    ->removeFlag('verbose')                        // 删除默认参数
+    ->resetFlags();                                // 恢复默认
+```
+
+参数名不区分下划线：`setFlag('permission_mode', 'plan')` 等价于 `--permission-mode plan`。
+
+> **注意**：`claude` CLI 没有 `--working-dir`、`--max-budget`、`--proxy`、`--theme` 这些参数（实测会被拒绝）。工作目录用 `setWorkdir()`（内部转成 `cd ... &&`），代理走环境变量 `HTTP_PROXY`/`HTTPS_PROXY`。
+
+### 流式调用（事件回调）
+
+`runStream()` 逐事件回调，可直接转发给 SSE：
+
+```php
+$cli->runStream('帮我重构这段代码', function ($event, $data) {
+    if ($event === 'start')   { /* ['resume' => bool] */ }
+    if ($event === 'message') { /* 原始 stream-json 事件（assistant/user/result...） */ }
+    if ($event === 'stderr')  { /* 排查日志 */ }
+    if ($event === 'result')  {
+        // ['content','session_id','model','usage','total_cost_usd','num_turns','duration_ms','exit_code']
+    }
+    if ($event === 'done')    { /* 结束 */ }
+});
+```
+
+`result` 事件是最终汇总：文本取自 `result.result`，费用取自 `result.total_cost_usd`（CLI 实测值，无需价格表），`is_error:true` 时 `isSuccess()` 返回 `false`。
+
+### 多轮会话续接
+
+```php
+$res = $cli->chat('第一问');
+$cli->setSessionId($res->getSessionId());   // 下一轮自动 --resume 续接
+
+$cli->chat('第二问', ['reset' => true]);    // 强制开启新会话
+```
+
+每次执行后若输出带新 `session_id`，会自动回写到内部，`getSessionId()` 始终是最新的。
+
+### 自定义执行器（远程 / 容器化场景）
+
+默认用 `proc_open` 本地执行。需要经 SSH/SFTP 在宿主机跑 claude 时（如 Docker 容器内 PHP），注入自定义执行器：
+
+```php
+$cli->setRunner(function ($cmd, $onChunk) {
+    $stream = ssh2_exec($conn, $cmd);         // 在宿主机执行同一命令
+    $err = ssh2_fetch_stream($stream, SSH2_STREAM_STDERR);
+    while ($buf = fread($stream, 8192))       { $onChunk($buf, 'out'); }
+    while ($buf = fread($err, 8192))          { $onChunk($buf, 'err'); }
+    return 0;
+});
+```
+
+配套设置：
+- `setShellPrefix('export LANG=en_US.UTF-8; ')`：注入环境（如 locale、nvm PATH）
+- `setPromptDir('/data/ai_prompt_tmp')`：提示词临时文件目录，容器与宿主机 1:1 挂载时指向双方可见路径（命令里的 `stdin` 重定向会在宿主机侧读取该文件）
+- 本地执行时默认自动把 nvm 下 claude 所在目录加入 PATH（`setAutoNvmPath(false)` 关闭）
+
+### 环境要求
+
+- 已安装 Claude Code CLI（`npm install -g @anthropic-ai/claude-code` 或原生安装）
+- 本地执行需要 `proc_open`；`shell_exec` 仅用于路径兜底探测，缺失时自动跳过
 
 ---
 
@@ -876,9 +999,10 @@ php-ai/
 ├── src/                    # 源代码（PSR-4 命名空间 Ai\）
 │   ├── AI.php              # 主入口：配置、模型解析、对话、流式、回调
 │   ├── Agent/              # Agent 循环 + 长期记忆
+│   ├── Cli/                # ClaudeCode CLI 程序调用 + 响应对象
 │   ├── Contracts/          # 接口定义：Model / Protocol / Transport / AIResponse
 │   ├── Editor/             # AI 代码编辑：上下文 / 协议 / 动作 / 执行器 / 工作区
-│   ├── Exceptions/         # AIException / ConfigException / RequestException
+│   ├── Exceptions/         # AIException / ConfigException / RequestException / ProcessException
 │   ├── Helpers/            # AIFile（附件封装）、Endpoint（端点解析）、Protocols（协议注册表）、Headers（请求头合并）
 │   ├── Models/             # 模型层：各平台模型的名称、端点、能力、默认配置
 │   │   ├── BaseModel.php
@@ -906,7 +1030,8 @@ php-ai/
 - 工具调用（`tools`）仅 Claude 协议实现，OpenAI 的 function calling 尚未接入；
 - 自定义模型的 `supports()` 能力是乐观默认值（对方接口实际支持什么库无从得知），需要准确值时用 `features` 配置项自行声明；
 - `Ai\Protocol\Gemini::convertMessages()` 未被调用——Gemini 走的是 OpenAI 兼容端点，消息直接透传；
-- `cost()` 需自行传入价格表，库不内置各平台价格。
+- `cost()` 需自行传入价格表，库不内置各平台价格；
+- `Ai\Cli\ClaudeCode` 依赖本机已安装 claude 程序；`proc_open` / `shell_exec` 被禁用的受限 PHP 环境需改用自定义执行器（如 SSH/SFTP）。
 
 ---
 

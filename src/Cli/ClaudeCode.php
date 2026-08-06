@@ -10,17 +10,31 @@ use Ai\Exceptions\ProcessException;
  * 直接调用本机安装的 claude 可执行程序（Claude Code CLI），而非 Anthropic HTTP API。
  * 典型场景：在代码编辑器中让 AI 直接读/写工作区文件、执行工具调用。
  *
- * 默认参数参考生产环境实践（--print 非交互 + stream-json 流式 + 仅文件类工具 + acceptEdits）：
+ * 默认参数（--print 非交互 + stream-json 流式 + acceptEdits）：
  *     claude --print --output-format stream-json --verbose
+ *            --setting-sources user,project,local --no-chrome
  *            --allowedTools "Read Edit Write Grep Glob" --disallowedTools "Bash"
  *            --permission-mode acceptEdits [--resume <会话ID>] < prompt.txt
  *
+ * 其中 --setting-sources 与 --no-chrome 对齐官方 IDE 插件的启动参数：
+ * print 模式下 CLI 默认不加载全部设置源，不显式指定会导致项目 CLAUDE.md、
+ * .claude/settings.json 的权限规则、自定义 agent/skill 全部失效。
+ *
+ * 注意 --allowedTools / --disallowedTools 是"免权限提示白名单 / 拒绝名单"，
+ * 不是可用工具集合。要真正限制模型能看到哪些工具用 setTools()（--tools）。
+ *
  * 主要能力：
  *  - 可执行文件路径自动检测 + 缓存（手动设置优先级最高）
- *  - 默认 CLI 参数 + 用户自定义/覆盖/删除参数
- *  - 会话续接（--resume）与 session_id 自动回写
- *  - stream-json 逐事件回调（转发给 SSE 或自行渲染）
+ *  - 默认 CLI 参数 + 用户自定义/覆盖/删除参数，全部 CLI 选项有对应 setter
+ *  - 会话续接（--resume / --continue / --fork-session）与 session_id 自动回写
+ *  - stream-json 逐事件回调，事件已按 IDE 插件的语义细分
+ *    （init/text/thinking/tool_use/tool_result/rate_limit/...）
+ *  - 结构化输出（--json-schema）、预算上限（--max-budget-usd）、
+ *    降级模型（--fallback-model）、思考预算（--max-thinking-tokens）
  *  - 本地 proc_open 执行，也可注入自定义执行器（如经 SSH/SFTP 远程执行）
+ *
+ * 需要"一个进程内多轮对话 + 工具权限实时回调 + 中断"时，改用 ClaudeCodeSession，
+ * 那是 IDE 插件采用的双工（--input-format stream-json）工作模式。
  *
  * 用法：
  * ```php
@@ -30,6 +44,8 @@ use Ai\Exceptions\ProcessException;
  * echo $res->getSessionId();     // 会话 ID，下轮传回即可续接
  * $cli->setSessionId($res->getSessionId()); // 自动续接
  * ```
+ *
+ * @see ClaudeCodeSession 常驻双工会话（多轮 / 权限回调 / 中断）
  */
 class ClaudeCode
 {
@@ -40,10 +56,39 @@ class ClaudeCode
     protected static $defaultFlags = [
         'output-format'   => 'stream-json',
         'verbose'         => true,
+        'setting-sources' => 'user,project,local',
+        'no-chrome'       => true,
         'allowedTools'    => ['Read', 'Edit', 'Write', 'Grep', 'Glob'],
         'disallowedTools' => ['Bash'],
         'permission-mode' => 'acceptEdits',
     ];
+
+    /**
+     * 多值参数的渲染方式（与 CLI 的参数解析规则对应）：
+     *  comma    → --flag 'a,b'         （逗号分隔单值）
+     *  variadic → --flag 'a' 'b'       （一个 flag 后跟多个值）
+     *  repeat   → --flag 'a' --flag 'b'（flag 本身重复）
+     * 未列出的数组值按 --flag 'a b'（空格拼成单值）渲染。
+     */
+    protected static $arrayFlagStyles = [
+        'setting-sources' => 'comma',
+        'fallback-model'  => 'comma',
+        'tools'           => 'comma',
+        'add-dir'         => 'variadic',
+        'mcp-config'      => 'variadic',
+        'betas'           => 'variadic',
+        'file'            => 'variadic',
+        'plugin-dir'      => 'repeat',
+        'plugin-url'      => 'repeat',
+    ];
+
+    /** --permission-mode 合法取值 */
+    protected static $permissionModes = [
+        'acceptEdits', 'auto', 'bypassPermissions', 'manual', 'dontAsk', 'plan',
+    ];
+
+    /** --effort 合法取值 */
+    protected static $effortLevels = ['low', 'medium', 'high', 'xhigh', 'max'];
 
     /** @var string 手动指定的 claude 可执行文件路径（最高优先级） */
     protected $binary = '';
@@ -129,6 +174,8 @@ class ClaudeCode
 
     /**
      * 快捷构造
+     *
+     * @return static
      */
     public static function create(array $config = []): self
     {
@@ -430,7 +477,7 @@ class ClaudeCode
      */
     public function getFlags(): array
     {
-        $flags = self::$defaultFlags;
+        $flags = static::$defaultFlags;
         foreach ($this->flags as $name => $value) {
             $flags[$name] = $value;
         }
@@ -438,6 +485,380 @@ class ClaudeCode
             unset($flags[$name]);
         }
         return $flags;
+    }
+
+    // ---------------------------------------------------------------------
+    // 常用参数快捷设置（等价于 setFlag()，仅提供更明确的签名与取值校验）
+    // ---------------------------------------------------------------------
+
+    /**
+     * 权限模式：acceptEdits（默认，自动接受文件编辑）、auto（智能判定，IDE 插件默认）、
+     * bypassPermissions（全放行）、manual（逐次询问）、dontAsk、plan（只规划不改动）
+     */
+    public function setPermissionMode(string $mode): self
+    {
+        if (!in_array($mode, static::$permissionModes, true)) {
+            throw new ConfigException(
+                '不支持的 permission-mode: ' . $mode . '，可选：' . implode(' / ', static::$permissionModes)
+            );
+        }
+        return $this->setFlag('permission-mode', $mode);
+    }
+
+    /**
+     * 免权限提示的工具白名单（--allowedTools），支持 "Bash(git *)" 这类细粒度写法
+     * @param array|string $tools
+     */
+    public function setAllowedTools($tools): self
+    {
+        return $this->setFlag('allowedTools', $tools);
+    }
+
+    /**
+     * 拒绝使用的工具名单（--disallowedTools）
+     * @param array|string $tools
+     */
+    public function setDisallowedTools($tools): self
+    {
+        return $this->setFlag('disallowedTools', $tools);
+    }
+
+    /**
+     * 限定模型可用的内置工具集合（--tools）。
+     * 传空数组/空串禁用全部工具，传 'default' 使用全部工具。
+     * 与 setAllowedTools() 的区别：这里决定"有哪些工具"，那里决定"哪些不用问"。
+     * @param array|string $tools 如 ['Read','Edit','Grep'] 或 'default'
+     */
+    public function setTools($tools): self
+    {
+        if (is_array($tools) && !$tools) {
+            return $this->setFlag('tools', '');
+        }
+        return $this->setFlag('tools', $tools);
+    }
+
+    /**
+     * 权限询问交给外部工具处理（--permission-prompt-tool），
+     * IDE 插件用 'stdio' 走标准输入输出的 control_request 协议。
+     * 一次性模式下无回路可用，通常只在 ClaudeCodeSession 中设置。
+     */
+    public function setPermissionPromptTool(string $tool): self
+    {
+        return $this->setFlag('permission-prompt-tool', $tool);
+    }
+
+    /**
+     * 跳过全部权限检查（--dangerously-skip-permissions）。
+     * 仅建议在无外网的沙箱中使用。
+     */
+    public function setSkipPermissions(bool $enabled = true): self
+    {
+        return $enabled ? $this->setFlag('dangerously-skip-permissions', true)
+                        : $this->removeFlag('dangerously-skip-permissions');
+    }
+
+    /**
+     * 额外授权可访问的目录（--add-dir），工作目录之外的路径需在此声明
+     * @param array|string $dirs
+     */
+    public function setAddDirs($dirs): self
+    {
+        return $this->setFlag('add-dir', is_array($dirs) ? $dirs : [$dirs]);
+    }
+
+    /**
+     * 追加一个额外授权目录
+     */
+    public function addDir(string $dir): self
+    {
+        $flags = $this->getFlags();
+        $dirs = isset($flags['add-dir']) ? (array) $flags['add-dir'] : [];
+        $dirs[] = $dir;
+        return $this->setFlag('add-dir', array_values(array_unique($dirs)));
+    }
+
+    /**
+     * 思考预算 token 上限（--max-thinking-tokens）。
+     * IDE 插件使用 31999；默认不传（由 CLI 自行决定），调高会显著增加成本。
+     */
+    public function setThinkingTokens(int $tokens): self
+    {
+        return $tokens > 0 ? $this->setFlag('max-thinking-tokens', $tokens)
+                           : $this->removeFlag('max-thinking-tokens');
+    }
+
+    /**
+     * 推理投入档位（--effort）：low / medium / high / xhigh / max
+     */
+    public function setEffort(string $level): self
+    {
+        if (!in_array($level, static::$effortLevels, true)) {
+            throw new ConfigException(
+                '不支持的 effort: ' . $level . '，可选：' . implode(' / ', static::$effortLevels)
+            );
+        }
+        return $this->setFlag('effort', $level);
+    }
+
+    /**
+     * 主模型过载/不可用时的降级模型（--fallback-model），按顺序尝试
+     * @param array|string $models
+     */
+    public function setFallbackModel($models): self
+    {
+        return $this->setFlag('fallback-model', $models);
+    }
+
+    /**
+     * 本次调用的花费上限（--max-budget-usd），超出即终止。无人值守场景强烈建议设置。
+     */
+    public function setMaxBudgetUsd(float $amount): self
+    {
+        return $amount > 0 ? $this->setFlag('max-budget-usd', $amount)
+                           : $this->removeFlag('max-budget-usd');
+    }
+
+    /**
+     * 结构化输出（--json-schema）：约束最终结果符合给定 JSON Schema，
+     * 结果可用 ClaudeCodeResponse::getStructured() 取回数组。
+     * @param array|string $schema 数组会自动 json_encode
+     */
+    public function setJsonSchema($schema): self
+    {
+        if (is_array($schema)) {
+            $schema = json_encode($schema, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+            if ($schema === false) {
+                throw new ConfigException('json-schema 序列化失败');
+            }
+        }
+        return $this->setFlag('json-schema', (string) $schema);
+    }
+
+    /**
+     * 替换默认系统提示词（--system-prompt）
+     */
+    public function setSystemPrompt(string $prompt): self
+    {
+        return $this->setFlag('system-prompt', $prompt);
+    }
+
+    /**
+     * 在默认系统提示词后追加内容（--append-system-prompt）
+     */
+    public function appendSystemPrompt(string $prompt): self
+    {
+        return $this->setFlag('append-system-prompt', $prompt);
+    }
+
+    /**
+     * 指定本次会话使用的 agent（--agent）
+     */
+    public function setAgent(string $agent): self
+    {
+        return $this->setFlag('agent', $agent);
+    }
+
+    /**
+     * 定义临时自定义 agent（--agents），如
+     * ['reviewer' => ['description' => '代码审查', 'prompt' => '你是代码审查员']]
+     * @param array|string $agents
+     */
+    public function setAgents($agents): self
+    {
+        if (is_array($agents)) {
+            $agents = json_encode($agents, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+            if ($agents === false) {
+                throw new ConfigException('agents 序列化失败');
+            }
+        }
+        return $this->setFlag('agents', (string) $agents);
+    }
+
+    /**
+     * 加载 MCP 服务器配置（--mcp-config），可传 JSON 文件路径或 JSON 字符串
+     * @param array|string $configs
+     */
+    public function setMcpConfig($configs): self
+    {
+        if (is_array($configs) && isset($configs['mcpServers'])) {
+            $encoded = json_encode($configs, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+            if ($encoded === false) {
+                throw new ConfigException('mcp-config 序列化失败');
+            }
+            $configs = [$encoded];
+        }
+        return $this->setFlag('mcp-config', is_array($configs) ? $configs : [$configs]);
+    }
+
+    /**
+     * 只使用 --mcp-config 指定的 MCP 服务器，忽略其它来源（--strict-mcp-config）
+     */
+    public function setStrictMcpConfig(bool $enabled = true): self
+    {
+        return $enabled ? $this->setFlag('strict-mcp-config', true)
+                        : $this->removeFlag('strict-mcp-config');
+    }
+
+    /**
+     * 设置加载哪些配置来源（--setting-sources），默认 ['user','project','local']。
+     * 传空数组表示不加载任何配置（等价于纯净环境）。
+     * @param array|string $sources
+     */
+    public function setSettingSources($sources): self
+    {
+        if (is_array($sources) && !$sources) {
+            return $this->removeFlag('setting-sources');
+        }
+        return $this->setFlag('setting-sources', $sources);
+    }
+
+    /**
+     * 额外加载的设置（--settings），可传 JSON 文件路径或 JSON 字符串
+     * @param array|string $settings
+     */
+    public function setSettings($settings): self
+    {
+        if (is_array($settings)) {
+            $settings = json_encode($settings, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+            if ($settings === false) {
+                throw new ConfigException('settings 序列化失败');
+            }
+        }
+        return $this->setFlag('settings', (string) $settings);
+    }
+
+    /**
+     * 输出 token 级增量（--include-partial-messages），
+     * 开启后事件流会多出 'partial' 事件（原始 stream_event）。
+     */
+    public function setPartialMessages(bool $enabled = true): self
+    {
+        return $enabled ? $this->setFlag('include-partial-messages', true)
+                        : $this->removeFlag('include-partial-messages');
+    }
+
+    /**
+     * 输出 hook 生命周期事件（--include-hook-events）
+     */
+    public function setIncludeHookEvents(bool $enabled = true): self
+    {
+        return $enabled ? $this->setFlag('include-hook-events', true)
+                        : $this->removeFlag('include-hook-events');
+    }
+
+    /**
+     * 转发子 agent 的文本与思考内容（--forward-subagent-text）
+     */
+    public function setForwardSubagentText(bool $enabled = true): self
+    {
+        return $enabled ? $this->setFlag('forward-subagent-text', true)
+                        : $this->removeFlag('forward-subagent-text');
+    }
+
+    /**
+     * 指定本次会话的 session id（--session-id，必须是合法 UUID）。
+     * 与 setSessionId() 的区别：这里是"新建会话时指定 ID"，那里是"续接已有会话"。
+     */
+    public function setFixedSessionId(string $uuid): self
+    {
+        return $this->setFlag('session-id', $uuid);
+    }
+
+    /**
+     * 续接时分叉出新会话 ID（--fork-session），不污染原会话
+     */
+    public function setForkSession(bool $enabled = true): self
+    {
+        return $enabled ? $this->setFlag('fork-session', true)
+                        : $this->removeFlag('fork-session');
+    }
+
+    /**
+     * 续接当前目录下最近一次会话（--continue），无需知道 session id
+     */
+    public function setContinueLast(bool $enabled = true): self
+    {
+        return $enabled ? $this->setFlag('continue', true)
+                        : $this->removeFlag('continue');
+    }
+
+    /**
+     * 会话是否落盘（--no-session-persistence）。关闭后无法 --resume 续接。
+     */
+    public function setSessionPersistence(bool $enabled): self
+    {
+        return $enabled ? $this->removeFlag('no-session-persistence')
+                        : $this->setFlag('no-session-persistence', true);
+    }
+
+    /**
+     * 调试输出（--debug + --debug-to-stderr，IDE 插件同款组合），
+     * 日志走 stderr，可在 'stderr' 事件里收到，不污染 stream-json。
+     * @param bool|string $filter true 全量，或类别过滤串如 "api,hooks" / "!file"
+     */
+    public function setDebug($filter = true): self
+    {
+        if ($filter === false) {
+            return $this->removeFlag('debug')->removeFlag('debug-to-stderr');
+        }
+        return $this->setFlag('debug', $filter === true ? true : (string) $filter)
+                    ->setFlag('debug-to-stderr', true);
+    }
+
+    /**
+     * 输出认证状态事件（--enable-auth-status），IDE 插件用它展示登录态
+     */
+    public function setAuthStatus(bool $enabled = true): self
+    {
+        return $enabled ? $this->setFlag('enable-auth-status', true)
+                        : $this->removeFlag('enable-auth-status');
+    }
+
+    /**
+     * 精简模式（--bare）：跳过 hooks / LSP / 插件同步 / CLAUDE.md 自动发现等，
+     * 启动最快、上下文最干净，需要什么就用 setSystemPrompt()/addDir() 显式给。
+     */
+    public function setBare(bool $enabled = true): self
+    {
+        return $enabled ? $this->setFlag('bare', true) : $this->removeFlag('bare');
+    }
+
+    /**
+     * 安全模式（--safe-mode）：禁用全部自定义配置，用于排查配置问题
+     */
+    public function setSafeMode(bool $enabled = true): self
+    {
+        return $enabled ? $this->setFlag('safe-mode', true) : $this->removeFlag('safe-mode');
+    }
+
+    /**
+     * 禁用全部 skill / 斜杠命令（--disable-slash-commands）
+     */
+    public function setDisableSlashCommands(bool $enabled = true): self
+    {
+        return $enabled ? $this->setFlag('disable-slash-commands', true)
+                        : $this->removeFlag('disable-slash-commands');
+    }
+
+    /**
+     * 自动压缩窗口（--autocompact），传 'auto' 或 100k–1M 之间的 token 数
+     * @param string|int $value
+     */
+    public function setAutocompact($value): self
+    {
+        return $this->setFlag('autocompact', (string) $value);
+    }
+
+    /**
+     * 输出格式（--output-format）：stream-json（默认）/ json / text。
+     * 改成 text/json 后逐事件回调将不再有细分事件，只能拿到最终文本。
+     */
+    public function setOutputFormat(string $format): self
+    {
+        if (!in_array($format, ['text', 'json', 'stream-json'], true)) {
+            throw new ConfigException('不支持的 output-format: ' . $format);
+        }
+        return $this->setFlag('output-format', $format);
     }
 
     /**
@@ -452,7 +873,7 @@ class ClaudeCode
     }
 
     /**
-     * 单个参数渲染为命令行片段
+     * 单个参数渲染为命令行片段（按 $arrayFlagStyles 决定多值写法）
      */
     protected function renderFlag(string $name, $value): string
     {
@@ -463,7 +884,26 @@ class ClaudeCode
             return '';
         }
         if (is_array($value)) {
-            $value = implode(' ', array_filter(array_map('strval', $value), 'strlen'));
+            $items = array_values(array_filter(array_map('strval', $value), 'strlen'));
+            if (!$items) {
+                return '';
+            }
+            $style = isset(static::$arrayFlagStyles[$name]) ? static::$arrayFlagStyles[$name] : 'space';
+            if ($style === 'repeat') {
+                $out = '';
+                foreach ($items as $item) {
+                    $out .= ' --' . $name . ' ' . escapeshellarg($item);
+                }
+                return $out;
+            }
+            if ($style === 'variadic') {
+                $out = ' --' . $name;
+                foreach ($items as $item) {
+                    $out .= ' ' . escapeshellarg($item);
+                }
+                return $out;
+            }
+            $value = implode($style === 'comma' ? ',' : ' ', $items);
         }
         return ' --' . $name . ' ' . escapeshellarg((string) $value);
     }
@@ -620,14 +1060,24 @@ class ClaudeCode
     /**
      * 流式调用：逐事件回调 + 返回最终汇总结果。
      *
-     * $onEvent(string $event, mixed $data)：
-     *  - 'start'    ['resume' => bool] 是否续接会话
-     *  - 'message'  原始 stream-json 事件数组（assistant/user/result/... 原样透传）
-     *  - 'stderr'   stderr 文本块
-     *  - 'line'     非 JSON 的 stdout 原始行
-     *  - 'result'   汇总数组 ['content','session_id','model','usage','total_cost_usd',
-     *                          'num_turns','duration_ms','exit_code']
-     *  - 'done'     null
+     * $onEvent(string $event, mixed $data)，事件语义对齐官方 IDE 插件：
+     *  - 'start'          ['resume' => bool] 是否续接会话
+     *  - 'init'           system/init 事件（cwd、session_id、可用工具、模型、MCP 服务器）
+     *  - 'message'        原始 stream-json 事件数组（所有事件都会先走这里，原样透传）
+     *  - 'text'           助手正文文本块（string）
+     *  - 'thinking'       助手思考内容（string）
+     *  - 'tool_use'       ['id','name','input'] 工具调用
+     *  - 'tool_result'    ['tool_use_id','content','is_error'] 工具执行结果
+     *  - 'text_delta'     token 级正文增量（需 setPartialMessages(true)）
+     *  - 'thinking_delta' token 级思考增量（需 setPartialMessages(true)）
+     *  - 'partial'        原始 stream_event（需 setPartialMessages(true)）
+     *  - 'system'         其它 system 子类型（thinking_tokens、compact_boundary 等）
+     *  - 'rate_limit'     限流状态信息
+     *  - 'error'          result 事件标记 is_error 时触发
+     *  - 'stderr'         stderr 文本块（开 setDebug() 后调试日志走这里）
+     *  - 'line'           非 JSON 的 stdout 原始行
+     *  - 'result'         汇总数组（同 ClaudeCodeResponse::toArray()）
+     *  - 'done'           null
      *
      * @param string   $prompt  用户提示词
      * @param callable|null $onEvent 事件回调；为空时仅返回结果对象
@@ -656,16 +1106,23 @@ class ClaudeCode
         $emit('start', ['resume' => ($sessionId !== '')]);
 
         $collect = [
-            'session_id' => $sessionId,
-            'model'      => '',
-            'usage'      => [],
-            'cost'       => 0.0,
-            'num_turns'  => 0,
-            'duration'   => 0,
-            'result_text'=> '',
-            'asst_text'  => '',
-            'exit_code'  => -1,
-            'is_error'   => false,
+            'session_id'  => $sessionId,
+            'model'       => '',
+            'usage'       => [],
+            'cost'        => 0.0,
+            'num_turns'   => 0,
+            'duration'    => 0,
+            'result_text' => '',
+            'asst_text'   => '',
+            'thinking'    => '',
+            'exit_code'   => -1,
+            'is_error'    => false,
+            'subtype'     => '',
+            'stop_reason' => '',
+            'tools'       => [],
+            'tool_uses'   => [],
+            'denials'     => [],
+            'init'        => [],
         ];
 
         $lineBuf = '';
@@ -701,16 +1158,25 @@ class ClaudeCode
             $this->sessionId = $collect['session_id'];
         }
 
+        $content = $collect['result_text'] !== '' ? $collect['result_text'] : $collect['asst_text'];
         $result = [
-            'content'      => $collect['result_text'] !== '' ? $collect['result_text'] : $collect['asst_text'],
+            'content'      => $content,
             'model'        => $collect['model'],
             'usage'        => $collect['usage'],
-            'success'      => !$collect['is_error'],
+            'success'      => !$collect['is_error'] && $collect['exit_code'] === 0,
             'session_id'   => $collect['session_id'],
             'cost_usd'     => $collect['cost'],
             'num_turns'    => $collect['num_turns'],
             'duration_ms'  => $collect['duration'],
             'exit_code'    => $collect['exit_code'],
+            'subtype'      => $collect['subtype'],
+            'stop_reason'  => $collect['stop_reason'],
+            'thinking'     => $collect['thinking'],
+            'tools'        => $collect['tools'],
+            'tool_uses'    => $collect['tool_uses'],
+            'permission_denials' => $collect['denials'],
+            'init'         => $collect['init'],
+            'structured'   => self::decodeStructured($content),
             'command'      => $cmd,
             'raw'          => [],
         ];
@@ -741,39 +1207,173 @@ class ClaudeCode
             $collect['session_id'] = $ev['session_id'];
         }
 
-        if (($ev['type'] ?? '') === 'assistant') {
-            if (isset($ev['message']['model']) && is_string($ev['message']['model'])) {
-                $collect['model'] = $ev['message']['model'];
-            }
-            if (isset($ev['message']['content']) && is_array($ev['message']['content'])) {
-                foreach ($ev['message']['content'] as $block) {
-                    if (($block['type'] ?? '') === 'text' && isset($block['text'])) {
-                        $collect['asst_text'] .= (string) $block['text'];
+        $type = isset($ev['type']) ? (string) $ev['type'] : '';
+
+        switch ($type) {
+            case 'system':
+                $this->handleSystemEvent($ev, $collect, $emit);
+                break;
+
+            case 'assistant':
+                $this->handleAssistantEvent($ev, $collect, $emit);
+                break;
+
+            case 'user':
+                // --replay-user-messages 下 CLI 会把收到的用户消息原样回显，用于确认已投递
+                if (!empty($ev['isReplay'])) {
+                    $emit('replay', $ev);
+                    break;
+                }
+                // 工具执行结果由 CLI 以 user 消息回填
+                if (isset($ev['message']['content']) && is_array($ev['message']['content'])) {
+                    foreach ($ev['message']['content'] as $block) {
+                        if (($block['type'] ?? '') === 'tool_result') {
+                            $emit('tool_result', [
+                                'tool_use_id' => (string) ($block['tool_use_id'] ?? ''),
+                                'content'     => $block['content'] ?? null,
+                                'is_error'    => !empty($block['is_error']),
+                            ]);
+                        }
                     }
                 }
-            }
-        }
+                break;
 
-        if (($ev['type'] ?? '') === 'result') {
-            if (isset($ev['result']) && is_string($ev['result'])) {
-                $collect['result_text'] = $ev['result'];
+            case 'stream_event':
+                // --include-partial-messages 下的 token 级增量
+                $emit('partial', $ev);
+                if (($ev['event']['type'] ?? '') === 'content_block_delta') {
+                    $delta = $ev['event']['delta'] ?? [];
+                    if (($delta['type'] ?? '') === 'text_delta' && isset($delta['text'])) {
+                        $emit('text_delta', (string) $delta['text']);
+                    } elseif (($delta['type'] ?? '') === 'thinking_delta' && isset($delta['thinking'])) {
+                        $emit('thinking_delta', (string) $delta['thinking']);
+                    }
+                }
+                break;
+
+            case 'rate_limit_event':
+                $emit('rate_limit', $ev['rate_limit_info'] ?? []);
+                break;
+
+            case 'result':
+                $this->handleResultEvent($ev, $collect, $emit);
+                break;
+        }
+    }
+
+    /**
+     * system 事件：init 携带会话初始信息，其余按子类型透传
+     */
+    protected function handleSystemEvent(array $ev, array &$collect, callable $emit): void
+    {
+        $subtype = isset($ev['subtype']) ? (string) $ev['subtype'] : '';
+        if ($subtype === 'init') {
+            $collect['init'] = $ev;
+            if (isset($ev['tools']) && is_array($ev['tools'])) {
+                $collect['tools'] = $ev['tools'];
             }
-            if (isset($ev['usage']) && is_array($ev['usage'])) {
-                $collect['usage'] = $ev['usage'];
+            if (isset($ev['model']) && is_string($ev['model']) && $ev['model'] !== '') {
+                $collect['model'] = $ev['model'];
             }
-            if (isset($ev['total_cost_usd'])) {
-                $collect['cost'] = (float) $ev['total_cost_usd'];
-            }
-            if (isset($ev['num_turns'])) {
-                $collect['num_turns'] = (int) $ev['num_turns'];
-            }
-            if (isset($ev['duration_ms'])) {
-                $collect['duration'] = (int) $ev['duration_ms'];
-            }
-            if (isset($ev['is_error'])) {
-                $collect['is_error'] = (bool) $ev['is_error'];
+            $emit('init', $ev);
+            return;
+        }
+        $emit('system', $ev);
+    }
+
+    /**
+     * assistant 事件：拆出文本 / 思考 / 工具调用三类内容块
+     */
+    protected function handleAssistantEvent(array $ev, array &$collect, callable $emit): void
+    {
+        if (isset($ev['message']['model']) && is_string($ev['message']['model'])) {
+            $collect['model'] = $ev['message']['model'];
+        }
+        if (!isset($ev['message']['content']) || !is_array($ev['message']['content'])) {
+            return;
+        }
+        foreach ($ev['message']['content'] as $block) {
+            $blockType = isset($block['type']) ? (string) $block['type'] : '';
+            if ($blockType === 'text' && isset($block['text'])) {
+                $collect['asst_text'] .= (string) $block['text'];
+                $emit('text', (string) $block['text']);
+            } elseif ($blockType === 'thinking' && isset($block['thinking'])) {
+                $collect['thinking'] .= (string) $block['thinking'];
+                $emit('thinking', (string) $block['thinking']);
+            } elseif ($blockType === 'tool_use') {
+                $use = [
+                    'id'    => (string) ($block['id'] ?? ''),
+                    'name'  => (string) ($block['name'] ?? ''),
+                    'input' => $block['input'] ?? [],
+                ];
+                $collect['tool_uses'][] = $use;
+                $emit('tool_use', $use);
             }
         }
+    }
+
+    /**
+     * result 事件：本轮汇总（用量、费用、轮数、终止原因、被拒工具）
+     */
+    protected function handleResultEvent(array $ev, array &$collect, callable $emit): void
+    {
+        if (isset($ev['result']) && is_string($ev['result'])) {
+            $collect['result_text'] = $ev['result'];
+        }
+        if (isset($ev['usage']) && is_array($ev['usage'])) {
+            $collect['usage'] = $ev['usage'];
+        }
+        if (isset($ev['modelUsage']) && is_array($ev['modelUsage']) && $collect['model'] === '') {
+            $names = array_keys($ev['modelUsage']);
+            if ($names) {
+                $collect['model'] = (string) $names[0];
+            }
+        }
+        if (isset($ev['total_cost_usd'])) {
+            $collect['cost'] = (float) $ev['total_cost_usd'];
+        }
+        if (isset($ev['num_turns'])) {
+            $collect['num_turns'] = (int) $ev['num_turns'];
+        }
+        if (isset($ev['duration_ms'])) {
+            $collect['duration'] = (int) $ev['duration_ms'];
+        }
+        if (isset($ev['is_error'])) {
+            $collect['is_error'] = (bool) $ev['is_error'];
+        }
+        if (isset($ev['subtype'])) {
+            $collect['subtype'] = (string) $ev['subtype'];
+        }
+        if (isset($ev['stop_reason']) && is_string($ev['stop_reason'])) {
+            $collect['stop_reason'] = $ev['stop_reason'];
+        }
+        if (isset($ev['permission_denials']) && is_array($ev['permission_denials'])) {
+            $collect['denials'] = $ev['permission_denials'];
+        }
+        if ($collect['is_error']) {
+            $emit('error', $ev);
+        }
+    }
+
+    /**
+     * 尝试把最终文本解析为结构化数组（配合 --json-schema 使用），失败返回 null。
+     * 兼容模型把 JSON 包在 ```json 代码块里的情况。
+     */
+    public static function decodeStructured(string $content): ?array
+    {
+        $text = trim($content);
+        if ($text === '') {
+            return null;
+        }
+        if (strpos($text, '```') === 0) {
+            $text = preg_replace('/^```[a-zA-Z]*\s*|\s*```$/', '', $text);
+            $text = trim((string) $text);
+        }
+        if ($text === '' || ($text[0] !== '{' && $text[0] !== '[')) {
+            return null;
+        }
+        $data = json_decode($text, true);
+        return is_array($data) ? $data : null;
     }
 
     /**
@@ -797,6 +1397,16 @@ class ClaudeCode
      */
     public function buildCommand(string $binary, string $promptFile, string $workdir = '', array $options = []): string
     {
+        return $this->buildBaseCommand($binary, $workdir, $options, ' < ' . escapeshellarg($promptFile));
+    }
+
+    /**
+     * 组装不含 stdin 重定向的基础命令（双工会话模式复用）
+     *
+     * @param string $suffix 追加在参数之后、cd/前缀包裹之前的片段
+     */
+    protected function buildBaseCommand(string $binary, string $workdir, array $options, string $suffix = ''): string
+    {
         $cmd = $binary . ' --print' . $this->renderFlags($options);
 
         $sessionId = isset($options['session_id']) ? (string) $options['session_id'] : $this->sessionId;
@@ -807,7 +1417,7 @@ class ClaudeCode
             $cmd .= ' --resume ' . escapeshellarg($sessionId);
         }
 
-        $cmd .= ' < ' . escapeshellarg($promptFile);
+        $cmd .= $suffix;
 
         if ($workdir !== '') {
             $cmd = 'cd ' . escapeshellarg($workdir) . ' && ' . $cmd;

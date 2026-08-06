@@ -30,6 +30,30 @@ class ClaudeCodeResponse extends AIResponse
     /** @var int 进程退出码（-1 表示未知） */
     protected $exitCode;
 
+    /** @var string result 事件子类型：success / error_max_turns / error_during_execution ... */
+    protected $subtype;
+
+    /** @var string 终止原因：end_turn / max_tokens / tool_use ... */
+    protected $stopReason;
+
+    /** @var string 本轮思考内容（若模型产生了 thinking 块） */
+    protected $thinking;
+
+    /** @var array 本次会话可用工具名列表（取自 system/init 事件） */
+    protected $tools;
+
+    /** @var array 本轮的工具调用记录，每项 ['id','name','input'] */
+    protected $toolUses;
+
+    /** @var array 被权限拒绝的工具调用记录 */
+    protected $permissionDenials;
+
+    /** @var array system/init 事件原文（cwd、mcp_servers、slash_commands 等） */
+    protected $init;
+
+    /** @var array|null --json-schema 结构化输出解析结果 */
+    protected $structured;
+
     public function __construct(array $data)
     {
         parent::__construct($data);
@@ -39,6 +63,15 @@ class ClaudeCodeResponse extends AIResponse
         $this->durationMs = (int) ($data['duration_ms'] ?? 0);
         $this->command   = (string) ($data['command'] ?? '');
         $this->exitCode  = (int) ($data['exit_code'] ?? -1);
+        $this->subtype   = (string) ($data['subtype'] ?? '');
+        $this->stopReason = (string) ($data['stop_reason'] ?? '');
+        $this->thinking  = (string) ($data['thinking'] ?? '');
+        $this->tools     = (array) ($data['tools'] ?? []);
+        $this->toolUses  = (array) ($data['tool_uses'] ?? []);
+        $this->permissionDenials = (array) ($data['permission_denials'] ?? []);
+        $this->init      = (array) ($data['init'] ?? []);
+        $this->structured = isset($data['structured']) && is_array($data['structured'])
+            ? $data['structured'] : null;
     }
 
     /**
@@ -90,6 +123,78 @@ class ClaudeCodeResponse extends AIResponse
     }
 
     /**
+     * 获取 result 事件子类型（success / error_max_turns / error_during_execution ...）
+     */
+    public function getSubtype(): string
+    {
+        return $this->subtype;
+    }
+
+    /**
+     * 获取终止原因（end_turn / max_tokens / tool_use ...）
+     */
+    public function getStopReason(): string
+    {
+        return $this->stopReason;
+    }
+
+    /**
+     * 获取本轮思考内容（未开启 thinking 时为空串）
+     */
+    public function getThinking(): string
+    {
+        return $this->thinking;
+    }
+
+    /**
+     * 获取本次会话可用的工具名列表
+     */
+    public function getTools(): array
+    {
+        return $this->tools;
+    }
+
+    /**
+     * 获取本轮的工具调用记录，每项 ['id','name','input']
+     */
+    public function getToolUses(): array
+    {
+        return $this->toolUses;
+    }
+
+    /**
+     * 获取被权限拒绝的工具调用记录
+     */
+    public function getPermissionDenials(): array
+    {
+        return $this->permissionDenials;
+    }
+
+    /**
+     * 获取 system/init 事件原文（cwd、mcp_servers、slash_commands、permissionMode 等）
+     */
+    public function getInit(): array
+    {
+        return $this->init;
+    }
+
+    /**
+     * 获取结构化输出（配合 setJsonSchema() 使用），无法解析为 JSON 时返回 null
+     */
+    public function getStructured(): ?array
+    {
+        return $this->structured;
+    }
+
+    /**
+     * 是否发生了权限拒绝（工具被拦截）
+     */
+    public function hasPermissionDenials(): bool
+    {
+        return !empty($this->permissionDenials);
+    }
+
+    /**
      * 费用：优先返回 CLI 实测 total_cost_usd（无需价格表），否则回退按价格表估算
      */
     public function cost(array $pricing = []): float
@@ -112,6 +217,13 @@ class ClaudeCodeResponse extends AIResponse
             'duration_ms' => $this->durationMs,
             'exit_code'   => $this->exitCode,
             'command'     => $this->command,
+            'subtype'     => $this->subtype,
+            'stop_reason' => $this->stopReason,
+            'thinking'    => $this->thinking,
+            'tools'       => $this->tools,
+            'tool_uses'   => $this->toolUses,
+            'permission_denials' => $this->permissionDenials,
+            'structured'  => $this->structured,
         ]);
     }
 }

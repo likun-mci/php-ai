@@ -15,7 +15,8 @@
 - 🧩 **任意模型 + 任意接口**：模型名不受内置清单限制，可手选协议格式（`protocol`）并指定自定义接口地址（`base_url` / `endpoint`），一套代码同时对接官方 API、第三方中转与自建网关
 - 🌊 **流式输出**：一行 `setStream(true)`，自动按 SSE 协议实时吐出数据块
 - 🧰 **Agent 循环**：挂载工具（函数）后自动完成「模型决策 → 执行工具 → 回填结果」多轮循环
-- 🤖 **Claude Code CLI**：直接调用本机 claude 程序（`Ai\Cli\ClaudeCode`），文件读写 / 工具执行 / 会话续接，路径自动检测并缓存
+- 🤖 **Claude Code CLI**：直接调用本机 claude 程序（`Ai\Cli\ClaudeCode`），文件读写 / 工具执行 / 会话续接 / 结构化输出，路径自动检测并缓存
+- 🔌 **常驻双工会话**：`Ai\Cli\ClaudeCodeSession` 复刻官方 IDE 插件的进程模式，长驻进程多轮对话 + 工具权限实时回调 PHP 决策 + 优雅中断
 - 📝 **代码编辑协议**：结构化编辑上下文 + 可校验的编辑动作，支持规划/审核/自动执行三种模式
 - 🛡️ **安全抓取**：`HttpFetch` 内置 SSRF、DNS rebinding、内网地址、协议逃逸防护
 - 📄 **多模态附件**：图片等附件按各平台格式自动适配
@@ -425,19 +426,24 @@ echo $response->getSessionId(); // 会话 ID
 echo $response->getCostUsd();   // CLI 实测费用（USD）
 ```
 
-默认参数（来自生产实践，均经实测验证）：
+默认参数（均经实测验证）：
 
 ```
 claude --print --output-format stream-json --verbose
+       --setting-sources user,project,local --no-chrome
        --allowedTools "Read Edit Write Grep Glob" --disallowedTools "Bash"
        --permission-mode acceptEdits  [--resume <会话ID>]  < prompt.txt
 ```
 
 - `--print`：非交互模式，一次查询后退出
-- `--allowedTools Read Edit Write Grep Glob`：仅放行文件类工具
-- `--disallowedTools Bash`：禁用 Bash，阻止任意命令执行（沙箱安全）
+- `--setting-sources user,project,local`：加载全部设置来源。**print 模式下 CLI 默认不加载全部来源**，不显式指定会导致项目 `CLAUDE.md`、`.claude/settings.json` 的权限规则、自定义 agent/skill 全部失效——官方 IDE 插件同样显式传这个参数
+- `--no-chrome`：关闭 Chrome 集成（服务端无浏览器）
+- `--allowedTools Read Edit Write Grep Glob`：**免权限提示白名单**（不是"可用工具集"）
+- `--disallowedTools Bash`：把 Bash 从工具集里摘掉，模型根本看不到（这才是硬性禁用）
 - `--permission-mode acceptEdits`：文件编辑免确认
 - 提示词经临时文件 + stdin 重定向传入，避开命令行长度上限（SSH exec 通道受限时尤为重要）
+
+> `--allowedTools` 与 `--tools` 语义不同：前者决定"哪些工具不用问"，后者（`setTools()`）决定"模型有哪些工具可用"。要真正限制能力范围用 `setTools()` 或 `setDisallowedTools()`。
 
 ### claude 路径：自动检测 + 缓存 + 手动指定
 
@@ -471,25 +477,106 @@ $cli
 
 参数名不区分下划线：`setFlag('permission_mode', 'plan')` 等价于 `--permission-mode plan`。
 
+多值参数会按 CLI 各自的解析规则渲染，无需自己拼串：`setting-sources`/`tools`/`fallback-model` 逗号连接，`add-dir`/`mcp-config` 一个 flag 跟多个值，`plugin-dir`/`plugin-url` 重复 flag。
+
 > **注意**：`claude` CLI 没有 `--working-dir`、`--max-budget`、`--proxy`、`--theme` 这些参数（实测会被拒绝）。工作目录用 `setWorkdir()`（内部转成 `cd ... &&`），代理走环境变量 `HTTP_PROXY`/`HTTPS_PROXY`。
+
+### 常用参数的专用方法
+
+除了通用的 `setFlag()`，常用选项都有带取值校验的专用方法：
+
+```php
+$cli
+    // 权限与工具
+    ->setPermissionMode('acceptEdits')      // acceptEdits/auto/bypassPermissions/manual/dontAsk/plan
+    ->setAllowedTools(['Read', 'Bash(git *)'])  // 免提示白名单，支持细粒度写法
+    ->setDisallowedTools(['Bash'])          // 硬性拒绝（工具从工具集移除）
+    ->setTools(['Read', 'Grep', 'Glob'])    // 限定可用工具集，传 [] 禁用全部工具
+    ->setAddDirs(['/data/shared'])          // 工作目录之外还允许访问的目录
+    ->setSkipPermissions(false)             // --dangerously-skip-permissions
+
+    // 模型与推理
+    ->setModel('claude-sonnet-5')
+    ->setFallbackModel(['sonnet', 'haiku']) // 主模型过载时按序降级
+    ->setEffort('high')                     // low/medium/high/xhigh/max
+    ->setThinkingTokens(31999)              // 思考预算（IDE 插件用的就是这个值）
+
+    // 成本与产出
+    ->setMaxBudgetUsd(0.5)                  // 超预算即终止，无人值守强烈建议设置
+    ->setJsonSchema(['type' => 'object', 'properties' => [...]])  // 结构化输出
+
+    // 提示词与扩展
+    ->setSystemPrompt('你是代码审查专家')
+    ->appendSystemPrompt('输出务必用中文')
+    ->setAgent('reviewer')
+    ->setAgents(['reviewer' => ['description' => '代码审查', 'prompt' => '...']])
+    ->setMcpConfig(['mcpServers' => ['fs' => ['command' => 'npx']]])
+    ->setStrictMcpConfig()
+
+    // 会话与配置源
+    ->setSettingSources(['user', 'project'])   // 传 [] 表示不加载任何设置文件
+    ->setSettings('/path/settings.json')
+    ->setFixedSessionId('550e8400-e29b-41d4-a716-446655440000')  // 指定新会话 ID
+    ->setForkSession()                      // 续接时分叉，不污染原会话
+    ->setContinueLast()                     // 续接当前目录最近一次会话
+    ->setSessionPersistence(false)          // 会话不落盘
+
+    // 输出与诊断
+    ->setPartialMessages()                  // token 级增量事件
+    ->setIncludeHookEvents()
+    ->setForwardSubagentText()
+    ->setDebug('api,hooks')                 // --debug + --debug-to-stderr，日志走 stderr 事件
+    ->setBare()                             // 精简模式，跳过 hooks/LSP/CLAUDE.md 自动发现
+    ->setSafeMode();                        // 禁用全部自定义配置，排查用
+```
+
+### 结构化输出
+
+`setJsonSchema()` 约束模型最终必须输出符合 schema 的 JSON，`getStructured()` 直接拿数组：
+
+```php
+$cli->setJsonSchema([
+    'type'       => 'object',
+    'properties' => [
+        'severity' => ['type' => 'string'],
+        'issues'   => ['type' => 'array', 'items' => ['type' => 'string']],
+    ],
+    'required'   => ['severity', 'issues'],
+]);
+
+$res = $cli->chat('审查 src/User.php，按 schema 输出问题清单');
+$data = $res->getStructured();   // ['severity' => 'high', 'issues' => [...]]，解析失败返回 null
+```
 
 ### 流式调用（事件回调）
 
-`runStream()` 逐事件回调，可直接转发给 SSE：
+`runStream()` 逐事件回调，事件语义与官方 IDE 插件一致，可直接转发给 SSE：
 
 ```php
 $cli->runStream('帮我重构这段代码', function ($event, $data) {
-    if ($event === 'start')   { /* ['resume' => bool] */ }
-    if ($event === 'message') { /* 原始 stream-json 事件（assistant/user/result...） */ }
-    if ($event === 'stderr')  { /* 排查日志 */ }
-    if ($event === 'result')  {
-        // ['content','session_id','model','usage','total_cost_usd','num_turns','duration_ms','exit_code']
+    switch ($event) {
+        case 'start':          break;  // ['resume' => bool]
+        case 'init':           break;  // 会话初始信息：cwd、session_id、可用工具、MCP 服务器
+        case 'text':           break;  // 助手正文文本块（string）
+        case 'thinking':       break;  // 助手思考内容（string）
+        case 'tool_use':       break;  // ['id','name','input']
+        case 'tool_result':    break;  // ['tool_use_id','content','is_error']
+        case 'text_delta':     break;  // token 级正文增量（需 setPartialMessages()）
+        case 'thinking_delta': break;  // token 级思考增量（需 setPartialMessages()）
+        case 'rate_limit':     break;  // 限流状态
+        case 'system':         break;  // 其它 system 子类型（thinking_tokens、compact_boundary…）
+        case 'error':          break;  // 本轮标记 is_error
+        case 'message':        break;  // 原始 stream-json 事件（所有事件都会先经过这里）
+        case 'stderr':         break;  // 排查日志（开 setDebug() 后调试输出走这里）
+        case 'result':         break;  // 最终汇总
+        case 'done':           break;
     }
-    if ($event === 'done')    { /* 结束 */ }
 });
 ```
 
 `result` 事件是最终汇总：文本取自 `result.result`，费用取自 `result.total_cost_usd`（CLI 实测值，无需价格表），`is_error:true` 时 `isSuccess()` 返回 `false`。
+
+响应对象除 `getContent()` / `getSessionId()` / `getCostUsd()` 外还提供：`getStructured()`、`getThinking()`、`getToolUses()`、`getTools()`、`getPermissionDenials()`、`getSubtype()`、`getStopReason()`、`getInit()`、`getNumTurns()`、`getDurationMs()`、`getExitCode()`、`getCommand()`。
 
 ### 多轮会话续接
 
@@ -521,10 +608,94 @@ $cli->setRunner(function ($cmd, $onChunk) {
 - `setPromptDir('/data/ai_prompt_tmp')`：提示词临时文件目录，容器与宿主机 1:1 挂载时指向双方可见路径（命令里的 `stdin` 重定向会在宿主机侧读取该文件）
 - 本地执行时默认自动把 nvm 下 claude 所在目录加入 PATH（`setAutoNvmPath(false)` 关闭）
 
+### 常驻双工会话（ClaudeCodeSession）
+
+`Ai\Cli\ClaudeCodeSession` 复刻官方 IDE 插件（VSCode / JetBrains）的进程工作方式：claude 以**长驻进程**运行，stdin 持续接收 JSON 消息，stdout 持续吐事件，工具权限通过 stdio 上的 `control_request` 协议实时回调给 PHP 决策。
+
+插件实测启动参数：
+
+```
+claude --output-format stream-json --verbose --input-format stream-json
+       --max-thinking-tokens 31999 --permission-prompt-tool stdio
+       --setting-sources=user,project,local --permission-mode auto
+       --debug --debug-to-stderr --enable-auth-status --no-chrome
+       --replay-user-messages
+```
+
+本类默认采用其中与服务端场景相符的部分（双工 + stdio 权限回调 + 全设置源 + 消息回显 + 禁用 Chrome）；权限模式保持更保守的 `acceptEdits`，思考预算和调试日志默认不开，需要时用 `setThinkingTokens(31999)` / `setDebug()` 打开。
+
+```php
+use Ai\Cli\ClaudeCodeSession;
+
+$s = ClaudeCodeSession::create([
+    'workdir'      => '/var/www',
+    'turn_timeout' => 300,        // 单轮等待上限（秒）
+]);
+
+// 工具权限实时决策，等价于 IDE 里弹出的"是否允许执行"
+$s->onPermission(function (array $req) {
+    // $req: tool_name / display_name / input / description / tool_use_id / permission_suggestions
+    if ($req['tool_name'] === 'Bash')  return '本环境禁止执行 shell 命令';   // 字符串 = 拒绝并说明理由
+    if ($req['tool_name'] === 'Write' && strpos($req['input']['file_path'], '/etc/') === 0) {
+        return false;                                                       // false = 拒绝
+    }
+    return true;                                                            // true = 放行
+    // 也可返回 ['behavior' => 'allow', 'updatedInput' => [...]] 放行并改写入参
+});
+
+$a = $s->send('看一下 src 目录结构');
+$b = $s->send('把刚才第一个文件的注释补全');   // 同一进程，上下文常驻，无需 --resume 重放
+$s->close();
+```
+
+**与一次性模式的区别**
+
+| | `ClaudeCode` | `ClaudeCodeSession` |
+|---|---|---|
+| 进程 | 每轮起停一次 | 长驻，多轮共用 |
+| 多轮 | `--resume` 重放历史 | 上下文常驻内存 |
+| 工具权限 | 靠 flag 静态配置 | 逐次回调 PHP 决策 |
+| 中断 | 只能 kill 进程 | `interrupt()` 优雅中断 |
+| 运行时改配置 | 不支持 | 热切权限模式 / 模型 / 思考预算 |
+| 受限 PHP 环境 | 支持自定义执行器（SSH） | 仅本地 `proc_open` |
+
+**中断与运行时控制**
+
+```php
+$fired = false;
+$res = $s->send('全量重构整个项目', function ($ev, $d) use ($s, &$fired) {
+    if ($ev === 'tool_use' && !$fired) {
+        $fired = true;
+        $s->interrupt();          // 相当于 IDE 里的"停止"按钮，进程保活可继续下一轮
+    }
+});
+echo $res->getSubtype();          // error_during_execution
+
+$s->setPermissionMode('plan');    // 已启动时热切换（未启动则只改启动参数）
+$s->switchModel('claude-haiku-4-5-20251001');
+$s->switchThinkingTokens(31999);
+$s->control(['subtype' => 'set_cwd', 'cwd' => '/srv/app']);   // 发送任意 control_request
+```
+
+**权限回调的边界（重要）**
+
+`onPermission()` 只会收到 CLI 认为"需要询问"的调用，它**不是一道完整的拦截层**。以下情况 CLI 自行放行、不问 PHP：
+
+- 设置文件（`~/.claude/settings.json`、项目 `.claude/settings.json`）里已预授权的规则 —— 用 `setSettingSources([])` 不加载
+- 当前 `permission-mode` 已自动放行的类别（如 `acceptEdits` 下的文件编辑）
+- CLI 判定为只读、在沙箱中执行的安全命令（实测 `Bash(echo hi)` 即使 `permission-mode manual` 也不会询问）
+
+要**硬性**禁止某个工具，用 `setDisallowedTools(['Bash'])`（工具从工具集移除，模型根本看不到）或 `setTools([...])` 限定可用集合，不要只依赖回调。
+
+未注册 `onPermission()` 时，默认只自动放行 `Read / Edit / Write / Grep / Glob`，其余一律拒绝；`setAutoApproveTools([...])` 改名单，`allowAllTools()` 全部交回 CLI 自己判断。
+
+其余会话方法：`start()` / `isRunning()` / `close()` / `kill()` / `sendMessage($contentBlocks)` / `getInit()` / `getAvailableTools()` / `getCommand()`。`ClaudeCode` 的全部参数方法在会话类上同样可用（需在首次 `send()` 前设置）。
+
 ### 环境要求
 
 - 已安装 Claude Code CLI（`npm install -g @anthropic-ai/claude-code` 或原生安装）
 - 本地执行需要 `proc_open`；`shell_exec` 仅用于路径兜底探测，缺失时自动跳过
+- `ClaudeCodeSession` 需要 `proc_open` 的双向管道，不支持自定义执行器
 
 ---
 
@@ -999,7 +1170,7 @@ php-ai/
 ├── src/                    # 源代码（PSR-4 命名空间 Ai\）
 │   ├── AI.php              # 主入口：配置、模型解析、对话、流式、回调
 │   ├── Agent/              # Agent 循环 + 长期记忆
-│   ├── Cli/                # ClaudeCode CLI 程序调用 + 响应对象
+│   ├── Cli/                # ClaudeCode 一次性调用 / ClaudeCodeSession 常驻双工会话 + 响应对象
 │   ├── Contracts/          # 接口定义：Model / Protocol / Transport / AIResponse
 │   ├── Editor/             # AI 代码编辑：上下文 / 协议 / 动作 / 执行器 / 工作区
 │   ├── Exceptions/         # AIException / ConfigException / RequestException / ProcessException

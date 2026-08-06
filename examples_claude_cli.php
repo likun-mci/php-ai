@@ -9,6 +9,7 @@
 require_once __DIR__ . '/autoload.php';
 
 use Ai\Cli\ClaudeCode;
+use Ai\Cli\ClaudeCodeSession;
 use Ai\Exceptions\ConfigException;
 
 // ===========================================
@@ -75,10 +76,12 @@ try {
     $cli = ClaudeCode::create(['workdir' => __DIR__]);
 
     $cli
-        ->setFlag('allowedTools', 'Read Grep Glob')        // 收紧工具权限
-        ->setFlag('model', 'claude-sonnet-4-5')            // 指定模型
-        ->setFlag('max-turns', 3)                          // 限制轮数
-        ->removeFlag('verbose')                            // 去掉默认 verbose
+        ->setTools(['Read', 'Grep', 'Glob'])               // 限定可用工具集
+        ->setModel('claude-sonnet-5')                      // 指定模型
+        ->setFallbackModel(['haiku'])                      // 过载时降级
+        ->setEffort('high')                                // 提高推理投入
+        ->setMaxBudgetUsd(0.5)                             // 花费上限，超出即终止
+        ->setFlag('max-turns', 3)                          // 未提供专用方法的参数走 setFlag
         ->setTimeout(120);                                 // 超时 120 秒
 
     // 查看最终生效的参数
@@ -111,6 +114,103 @@ try {
     $response = $cli->chat('你好');
     echo "回复: " . $response->getContent() . "\n";
     echo "会话: " . $response->getSessionId() . "\n";
+} catch (\Exception $e) {
+    echo "错误: " . $e->getMessage() . "\n\n";
+}
+
+// ===========================================
+// 示例 5: 结构化输出（--json-schema）
+// ===========================================
+echo "=== 示例 5: 结构化输出 ===\n";
+
+try {
+    $cli = ClaudeCode::create(['workdir' => __DIR__]);
+    $cli->setJsonSchema([
+        'type'       => 'object',
+        'properties' => [
+            'files' => ['type' => 'array', 'items' => ['type' => 'string']],
+            'count' => ['type' => 'integer'],
+        ],
+        'required'   => ['files', 'count'],
+    ]);
+
+    $response = $cli->chat('列出当前目录下的 PHP 文件名与数量，按 schema 输出。');
+    $data = $response->getStructured();      // 直接拿数组，解析失败返回 null
+    echo "文件数: " . ($data['count'] ?? '解析失败') . "\n";
+    print_r($data['files'] ?? []);
+} catch (\Exception $e) {
+    echo "错误: " . $e->getMessage() . "\n\n";
+}
+
+// ===========================================
+// 示例 6: 常驻双工会话（对齐官方 IDE 插件的工作方式）
+// ===========================================
+echo "\n=== 示例 6: 常驻双工会话 ===\n";
+
+try {
+    $session = ClaudeCodeSession::create([
+        'workdir'      => __DIR__,
+        'turn_timeout' => 300,
+    ]);
+
+    // 工具权限实时回调 PHP 决策，等价于 IDE 里弹出的"是否允许执行"
+    $session->onPermission(function (array $req) {
+        echo "  [权限询问] {$req['tool_name']}\n";
+        if ($req['tool_name'] === 'Bash') {
+            return '本环境禁止执行 shell 命令';        // 字符串 = 拒绝并给模型说明理由
+        }
+        return true;                                  // true = 放行；也可返回
+                                                      // ['behavior'=>'allow','updatedInput'=>[...]] 改写入参
+    });
+
+    // 第一轮：带细分事件的流式回调
+    $r1 = $session->send('看一下当前目录都有哪些文件', function ($event, $data) {
+        if ($event === 'init')        echo "  [init] 可用工具 " . count($data['tools']) . " 个\n";
+        if ($event === 'tool_use')    echo "  [工具] {$data['name']}\n";
+        if ($event === 'tool_result') echo "  [结果] " . ($data['is_error'] ? '失败' : '成功') . "\n";
+        if ($event === 'text')        echo "  [文本] " . trim($data) . "\n";
+    });
+    echo "第一轮: " . mb_substr(trim($r1->getContent()), 0, 80) . "\n";
+
+    // 第二轮：同一进程，上下文常驻，无需 --resume 重放历史
+    $r2 = $session->send('刚才第一个文件大概是做什么的？一句话说明。');
+    echo "第二轮: " . mb_substr(trim($r2->getContent()), 0, 80) . "\n";
+    echo "同一会话: " . ($r1->getSessionId() === $r2->getSessionId() ? '是' : '否') . "\n";
+    echo "累计费用: $" . ($r1->getCostUsd() + $r2->getCostUsd()) . "\n";
+
+    echo "退出码: " . $session->close() . "\n";
+} catch (\Exception $e) {
+    echo "错误: " . $e->getMessage() . "\n\n";
+}
+
+// ===========================================
+// 示例 7: 会话中断 + 运行时热切换
+// ===========================================
+echo "\n=== 示例 7: 中断与运行时控制 ===\n";
+
+try {
+    $session = ClaudeCodeSession::create(['workdir' => __DIR__, 'turn_timeout' => 300]);
+
+    // 硬性禁用 Bash：从工具集里摘掉，模型根本看不到
+    // （只靠 onPermission 拦不住 CLI 判定为安全的沙箱只读命令）
+    $session->setDisallowedTools(['Bash']);
+
+    $interrupted = false;
+    $res = $session->send('逐个读取当前目录所有文件并详细总结', function ($event, $data) use ($session, &$interrupted) {
+        if ($event === 'tool_use' && !$interrupted) {
+            $interrupted = true;
+            echo "  [中断] 相当于 IDE 里的停止按钮\n";
+            $session->interrupt();
+        }
+    });
+    echo "结束类型: " . $res->getSubtype() . "\n";       // error_during_execution
+    echo "进程仍存活: " . ($session->isRunning() ? '是' : '否') . "\n";
+
+    // 运行时热切换，无需重启进程
+    $session->setPermissionMode('plan');       // 切成只规划不改动
+    $session->switchThinkingTokens(31999);     // IDE 插件用的思考预算
+
+    $session->close();
 } catch (\Exception $e) {
     echo "错误: " . $e->getMessage() . "\n\n";
 }

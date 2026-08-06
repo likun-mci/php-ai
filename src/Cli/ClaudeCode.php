@@ -141,6 +141,12 @@ class ClaudeCode
     /** @var bool 是否已执行过进程内二进制探测（避免 getBinary 重复抛异常） */
     protected $binaryResolved = false;
 
+    /** @var string CLI 版本号缓存 */
+    protected $version = '';
+
+    /** @var array|null 模型列表缓存（null 表示尚未查询） */
+    protected $modelsCache = null;
+
     /**
      * @param array $config 支持键：
      *                      binary、binary_cache、binary_cache_path、binary_cache_ttl、
@@ -1407,7 +1413,7 @@ class ClaudeCode
      */
     protected function buildBaseCommand(string $binary, string $workdir, array $options, string $suffix = ''): string
     {
-        $cmd = $binary . ' --print' . $this->renderFlags($options);
+        $cmd = escapeshellarg($binary) . ' --print' . $this->renderFlags($options);
 
         $sessionId = isset($options['session_id']) ? (string) $options['session_id'] : $this->sessionId;
         if (!empty($options['reset'])) {
@@ -1426,6 +1432,273 @@ class ClaudeCode
             $cmd = $this->shellPrefix . ' ' . $cmd;
         }
         return $cmd;
+    }
+
+    // ---------------------------------------------------------------------
+    // 信息查询：版本 / 登录态 / 模型列表 / 额度用量 / 设置 / MCP
+    // ---------------------------------------------------------------------
+
+    /**
+     * 获取 claude CLI 版本号，如 "2.1.222"（结果缓存在实例内）
+     */
+    public function getVersion(bool $refresh = false): string
+    {
+        if ($this->version !== '' && !$refresh) {
+            return $this->version;
+        }
+        $ret = $this->runCommand(['--version'], 30);
+        if (!preg_match('/(\d+\.\d+\.\d+)/', $ret['stdout'], $m)) {
+            throw new ProcessException('无法解析 claude 版本号: ' . trim($ret['stdout'] . $ret['stderr']));
+        }
+        $this->version = $m[1];
+        return $this->version;
+    }
+
+    /**
+     * 获取登录 / 订阅状态（claude auth status --json）
+     * 返回 ['loggedIn','authMethod','apiProvider','email','orgId','orgName','subscriptionType']
+     */
+    public function getAuthStatus(): array
+    {
+        $ret = $this->runCommand(['auth', 'status', '--json'], 60);
+        $data = json_decode(trim($ret['stdout']), true);
+        if (!is_array($data)) {
+            throw new ProcessException('无法解析登录状态: ' . trim($ret['stdout'] . $ret['stderr']));
+        }
+        return $data;
+    }
+
+    /**
+     * 是否已登录
+     */
+    public function isLoggedIn(): bool
+    {
+        try {
+            $status = $this->getAuthStatus();
+        } catch (\Exception $e) {
+            return false;
+        }
+        return !empty($status['loggedIn']);
+    }
+
+    /**
+     * 获取当前账号可用的模型列表。
+     *
+     * @param bool $raw false 返回可直接传给 setModel() 的标识数组；
+     *                  true 返回完整条目（含 resolvedModel、displayName、description、
+     *                  supportsEffort、supportedEffortLevels、supportsFastMode 等）
+     */
+    public function listModels(bool $raw = false): array
+    {
+        if ($this->modelsCache === null) {
+            $resp = $this->queryControl('list_models', [], 60);
+            $this->modelsCache = isset($resp['models']) && is_array($resp['models']) ? $resp['models'] : [];
+        }
+        if ($raw) {
+            return $this->modelsCache;
+        }
+        $out = [];
+        foreach ($this->modelsCache as $model) {
+            if (isset($model['value'])) {
+                $out[] = (string) $model['value'];
+            }
+        }
+        return $out;
+    }
+
+    /**
+     * 获取额度用量与限流信息。返回结构：
+     *  - session            本次进程的花费 / 耗时 / 代码增删行数 / 分模型用量
+     *  - subscription_type  订阅类型，如 max / pro
+     *  - rate_limits        各限流窗口（five_hour、seven_day…）的 utilization 百分比与重置时间
+     *  - behaviors          近一天 / 一周的请求数、会话数等统计
+     */
+    public function getUsage(): array
+    {
+        return $this->queryControl('get_usage', [], 60);
+    }
+
+    /**
+     * 获取精简后的限流额度概览，每项含
+     * ['key','percent','severity','resets_at','resets_in','is_active']，
+     * percent 为已用百分比。未提供限流数据（如 API Key 计费）时返回空数组。
+     */
+    public function getRateLimits(): array
+    {
+        $usage = $this->getUsage();
+        if (empty($usage['rate_limits']) || !is_array($usage['rate_limits'])) {
+            return [];
+        }
+        $limits = $usage['rate_limits'];
+        $out = [];
+
+        // limits 数组是 CLI 归一化后的统一视图，优先用它
+        if (!empty($limits['limits']) && is_array($limits['limits'])) {
+            foreach ($limits['limits'] as $item) {
+                $out[] = [
+                    'key'       => (string) ($item['kind'] ?? ''),
+                    'percent'   => (float) ($item['percent'] ?? 0),
+                    'severity'  => (string) ($item['severity'] ?? ''),
+                    'resets_at' => (string) ($item['resets_at'] ?? ''),
+                    'resets_in' => self::secondsUntil($item['resets_at'] ?? ''),
+                    'is_active' => !empty($item['is_active']),
+                ];
+            }
+            return $out;
+        }
+
+        // 回退：逐个窗口字段读取
+        foreach ($limits as $key => $item) {
+            if (!is_array($item) || !isset($item['utilization'])) {
+                continue;
+            }
+            $out[] = [
+                'key'       => (string) $key,
+                'percent'   => (float) $item['utilization'],
+                'severity'  => '',
+                'resets_at' => (string) ($item['resets_at'] ?? ''),
+                'resets_in' => self::secondsUntil($item['resets_at'] ?? ''),
+                'is_active' => true,
+            ];
+        }
+        return $out;
+    }
+
+    /**
+     * 获取当前生效的设置（合并 user / project / local 之后的结果），
+     * 含 env、permissions.allow/deny、model 等
+     */
+    public function getSettings(): array
+    {
+        return $this->queryControl('get_settings', [], 90);
+    }
+
+    /**
+     * 获取 MCP 服务器状态列表
+     */
+    public function getMcpServers(): array
+    {
+        $resp = $this->queryControl('mcp_status', [], 60);
+        return isset($resp['mcpServers']) && is_array($resp['mcpServers']) ? $resp['mcpServers'] : [];
+    }
+
+    /**
+     * 获取 CLI 构建信息 ['version' => '2.1.222', 'buildTime' => '...']
+     */
+    public function getBinaryVersion(): array
+    {
+        return $this->queryControl('get_binary_version', [], 60);
+    }
+
+    /**
+     * 安装体检（claude doctor），返回原始文本报告
+     */
+    public function doctor(): string
+    {
+        $ret = $this->runCommand(['doctor'], 120);
+        return trim($ret['stdout'] . $ret['stderr']);
+    }
+
+    /**
+     * 执行任意 claude 子命令并收集完整输出。
+     * 例：runCommand(['mcp', 'list'])、runCommand(['--version'])
+     *
+     * @return array ['exit_code' => int, 'stdout' => string, 'stderr' => string]
+     */
+    public function runCommand(array $args, int $timeout = 60): array
+    {
+        $cmd = escapeshellarg($this->getBinary());
+        foreach ($args as $arg) {
+            $cmd .= ' ' . escapeshellarg((string) $arg);
+        }
+        if ($this->workdir !== '') {
+            $cmd = 'cd ' . escapeshellarg($this->workdir) . ' && ' . $cmd;
+        }
+        if ($this->shellPrefix !== '') {
+            $cmd = $this->shellPrefix . ' ' . $cmd;
+        }
+
+        $stdout = '';
+        $stderr = '';
+        $onChunk = function ($chunk, $type) use (&$stdout, &$stderr) {
+            if ($type === 'err') {
+                $stderr .= $chunk;
+            } else {
+                $stdout .= $chunk;
+            }
+        };
+
+        $saved = $this->timeout;
+        $this->timeout = max(0, $timeout);
+        try {
+            $exitCode = $this->execute($cmd, $onChunk);
+        } finally {
+            $this->timeout = $saved;
+        }
+
+        return ['exit_code' => (int) $exitCode, 'stdout' => $stdout, 'stderr' => $stderr];
+    }
+
+    /**
+     * 通过控制协议查询信息：临时起一个 claude 进程，问完即关。
+     * ClaudeCodeSession 会覆盖此方法，复用自身已运行的进程。
+     *
+     * @throws ProcessException CLI 返回失败或超时
+     */
+    protected function queryControl(string $subtype, array $extra = [], int $timeout = 60): array
+    {
+        $session = $this->newControlSession($timeout);
+        try {
+            $session->start();
+            $resp = $session->control(array_merge(['subtype' => $subtype], $extra), true, $timeout);
+        } finally {
+            $session->close();
+        }
+        return self::unwrapControlResponse($subtype, $resp);
+    }
+
+    /**
+     * 创建用于信息查询的临时会话（继承本实例的运行环境，会话不落盘）
+     */
+    protected function newControlSession(int $timeout): ClaudeCodeSession
+    {
+        $session = new ClaudeCodeSession([
+            'binary'       => $this->getBinary(),
+            'workdir'      => $this->workdir,
+            'env'          => $this->env,
+            'shell'        => $this->shellPrefix,
+            'timeout'      => $timeout,
+            'turn_timeout' => $timeout,
+        ]);
+        // 仅查询信息，不产生可续接的会话记录
+        return $session->setSessionPersistence(false);
+    }
+
+    /**
+     * 校验并取出控制响应的 response 主体
+     */
+    protected static function unwrapControlResponse(string $subtype, array $resp): array
+    {
+        if (($resp['subtype'] ?? '') !== 'success') {
+            $error = isset($resp['error']) ? (string) $resp['error'] : json_encode($resp);
+            throw new ProcessException('查询 ' . $subtype . ' 失败: ' . $error);
+        }
+        return isset($resp['response']) && is_array($resp['response']) ? $resp['response'] : [];
+    }
+
+    /**
+     * 距离给定 ISO8601 时间还有多少秒，无法解析或已过期返回 0
+     */
+    protected static function secondsUntil($isoTime): int
+    {
+        if (!is_string($isoTime) || $isoTime === '') {
+            return 0;
+        }
+        $ts = strtotime($isoTime);
+        if ($ts === false) {
+            return 0;
+        }
+        return max(0, $ts - time());
     }
 
     /**

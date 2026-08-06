@@ -16,6 +16,7 @@
 - 🌊 **流式输出**：一行 `setStream(true)`，自动按 SSE 协议实时吐出数据块
 - 🧰 **Agent 循环**：挂载工具（函数）后自动完成「模型决策 → 执行工具 → 回填结果」多轮循环
 - 🤖 **Claude Code CLI**：直接调用本机 claude 程序（`Ai\Cli\ClaudeCode`），文件读写 / 工具执行 / 会话续接 / 结构化输出，路径自动检测并缓存
+- 📊 **CLI 信息查询**：不发起对话即可读取版本、登录态、模型列表、额度用量与限流、生效设置、MCP 状态
 - 🔌 **常驻双工会话**：`Ai\Cli\ClaudeCodeSession` 复刻官方 IDE 插件的进程模式，长驻进程多轮对话 + 工具权限实时回调 PHP 决策 + 优雅中断
 - 📝 **代码编辑协议**：结构化编辑上下文 + 可校验的编辑动作，支持规划/审核/自动执行三种模式
 - 🛡️ **安全抓取**：`HttpFetch` 内置 SSRF、DNS rebinding、内网地址、协议逃逸防护
@@ -607,6 +608,80 @@ $cli->setRunner(function ($cmd, $onChunk) {
 - `setShellPrefix('export LANG=en_US.UTF-8; ')`：注入环境（如 locale、nvm PATH）
 - `setPromptDir('/data/ai_prompt_tmp')`：提示词临时文件目录，容器与宿主机 1:1 挂载时指向双方可见路径（命令里的 `stdin` 重定向会在宿主机侧读取该文件）
 - 本地执行时默认自动把 nvm 下 claude 所在目录加入 PATH（`setAutoNvmPath(false)` 关闭）
+
+### 信息查询（版本 / 登录态 / 模型列表 / 额度用量）
+
+不需要发起对话就能读取 CLI 侧的各类信息，**不消耗模型额度**：
+
+```php
+$cli = ClaudeCode::create();
+
+// —— 子命令类查询（毫秒级）——
+$cli->getVersion();       // '2.1.222'（实例内缓存）
+$cli->isLoggedIn();       // true
+$cli->getAuthStatus();    // ['loggedIn'=>true,'authMethod'=>'claude.ai','apiProvider'=>'firstParty',
+                          //  'email'=>'...','orgId'=>'...','orgName'=>'...','subscriptionType'=>'max']
+$cli->doctor();           // 安装体检报告（原始文本）
+$cli->runCommand(['mcp', 'list']);   // 任意子命令：['exit_code'=>0,'stdout'=>'...','stderr'=>'']
+
+// —— 控制协议类查询（秒级，内部临时起一个 claude 进程问完即关）——
+$cli->listModels();       // ['default','opus[1m]','claude-fable-5[1m]','sonnet','haiku','opus']
+                          // 返回值可直接传给 setModel()
+$cli->listModels(true);   // 完整条目，含 resolvedModel / displayName / description /
+                          // supportsEffort / supportedEffortLevels / supportsFastMode 等
+$cli->getUsage();         // 用量与限流全量数据
+$cli->getRateLimits();    // 精简后的额度概览（见下）
+$cli->getSettings();      // 合并 user/project/local 后实际生效的设置
+$cli->getMcpServers();    // MCP 服务器状态列表
+$cli->getBinaryVersion(); // ['version'=>'2.1.222','buildTime'=>'2026-08-04T01:24:05Z']
+```
+
+`listModels()` 与 `Ai\AI::listModels()` 保持同样的约定：默认返回可直接使用的模型标识数组，传 `true` 返回完整数据，适合后台下拉框渲染。
+
+**额度查询**
+
+```php
+foreach ($cli->getRateLimits() as $limit) {
+    printf("%-14s 已用 %5.1f%%  %s后重置\n",
+        $limit['key'],                        // session / weekly_all / weekly_scoped
+        $limit['percent'],                    // 已用百分比
+        gmdate('H:i:s', $limit['resets_in'])  // 距重置剩余秒数
+    );
+}
+// session        已用  16.0%  01:49:47后重置
+// weekly_all     已用  17.0%  06:39:47后重置
+// weekly_scoped  已用   0.0%  06:39:47后重置
+```
+
+每项还含 `severity`（`normal` / 告警级别）、`resets_at`（ISO8601）、`is_active`。按订阅计费时 `limit_dollars` 类字段为 `null`，只提供百分比；额度不可用时返回空数组。
+
+`getUsage()` 的完整结构：
+
+| 键 | 说明 |
+|---|---|
+| `session` | 当前进程的 `total_cost_usd`、耗时、代码增删行数、分模型用量 |
+| `subscription_type` | 订阅类型，如 `max` / `pro` |
+| `rate_limits` | 各限流窗口原始数据 + 归一化后的 `limits` 数组 + `extra_usage` 额度包信息 |
+| `behaviors` | 近一天 / 一周的 `request_count`、`session_count` 等统计 |
+
+**在会话中查询**：`ClaudeCodeSession` 上同名方法会复用已运行的进程，因此 `getUsage()` 拿到的 `session.total_cost_usd` 就是本会话的真实累计花费；另有 `getSessionCost()` 返回同交互式 `/cost` 的文本报告。
+
+```php
+$s = ClaudeCodeSession::create(['workdir' => '/var/www']);
+$s->send('第一问');
+$s->send('第二问');
+
+$usage = $s->getUsage();
+echo $usage['session']['total_cost_usd'];   // 两轮累计花费
+echo $s->getSessionCost();
+// Total cost:            $0.0067
+// Total duration (API):  36s
+// Total code changes:    0 lines added, 0 lines removed
+// Usage by model:
+//     claude-haiku-4-5:  10 input, 52 output, 14.1k cache read, 2.5k cache write ($0.0067)
+```
+
+> CLI 的 `get_context_usage`（上下文窗口占用）只在交互式 UI 下响应，headless 模式不回包，故本库未提供对应方法。
 
 ### 常驻双工会话（ClaudeCodeSession）
 

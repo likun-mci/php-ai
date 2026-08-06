@@ -214,3 +214,68 @@ try {
 } catch (\Exception $e) {
     echo "错误: " . $e->getMessage() . "\n\n";
 }
+
+// ===========================================
+// 示例 8: 信息查询（不发起对话，不消耗模型额度）
+// ===========================================
+echo "\n=== 示例 8: 信息查询 ===\n";
+
+try {
+    $cli = ClaudeCode::create();
+
+    // 子命令类查询（毫秒级）
+    echo "CLI 版本: " . $cli->getVersion() . "\n";
+    $auth = $cli->getAuthStatus();
+    echo "登录状态: " . ($auth['loggedIn'] ? '已登录' : '未登录')
+        . " | 方式: {$auth['authMethod']} | 订阅: {$auth['subscriptionType']}\n";
+
+    // 模型列表：返回值可直接传给 setModel()，与 AI::listModels() 约定一致
+    echo "可用模型: " . implode(', ', $cli->listModels()) . "\n";
+    foreach ($cli->listModels(true) as $model) {
+        printf("  %-20s → %-28s %s\n", $model['value'], $model['resolvedModel'], $model['displayName']);
+    }
+
+    // 额度与限流
+    echo "额度用量:\n";
+    foreach ($cli->getRateLimits() as $limit) {
+        printf("  %-14s 已用 %5.1f%%  %s  %s 后重置\n",
+            $limit['key'], $limit['percent'], $limit['severity'],
+            gmdate('H:i:s', $limit['resets_in']));
+    }
+
+    $usage = $cli->getUsage();
+    echo "订阅类型: " . $usage['subscription_type'] . "\n";
+    echo "本周请求数: " . ($usage['behaviors']['week']['request_count'] ?? '-') . "\n";
+    echo "MCP 服务器: " . count($cli->getMcpServers()) . " 个\n";
+
+    // 生效设置（user / project / local 合并后的结果）
+    $settings = $cli->getSettings();
+    echo "生效设置键: " . implode(', ', array_keys($settings['effective'] ?? [])) . "\n";
+} catch (ConfigException $e) {
+    echo "未找到 claude：" . $e->getMessage() . "\n";
+} catch (\Exception $e) {
+    echo "错误: " . $e->getMessage() . "\n\n";
+}
+
+// ===========================================
+// 示例 9: 会话内查询本次累计花费
+// ===========================================
+echo "\n=== 示例 9: 会话花费统计 ===\n";
+
+try {
+    $session = ClaudeCodeSession::create(['workdir' => __DIR__, 'turn_timeout' => 300]);
+
+    $session->send('用一句话说明什么是 PSR-4。');
+    $session->send('再举一个目录映射的例子。');
+
+    // 会话类的同名方法会复用已运行的进程，拿到的是本会话真实累计值
+    $usage = $session->getUsage();
+    echo "本会话累计花费: $" . $usage['session']['total_cost_usd'] . "\n";
+    echo "代码改动行数: +" . $usage['session']['total_lines_added']
+        . " / -" . $usage['session']['total_lines_removed'] . "\n";
+    echo "--- 花费报告 ---\n" . $session->getSessionCost() . "\n";
+
+    $session->close();
+} catch (\Exception $e) {
+    echo "错误: " . $e->getMessage() . "\n\n";
+}

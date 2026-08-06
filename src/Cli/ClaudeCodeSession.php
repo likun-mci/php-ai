@@ -458,9 +458,10 @@ class ClaudeCodeSession extends ClaudeCode
      *
      * @param array $request 请求体，必须含 subtype
      * @param bool  $wait    是否阻塞等待 CLI 回复
+     * @param int   $timeout 等待上限秒数，0 表示取 turn_timeout / timeout 配置
      * @return self|array    $wait 为 true 时返回 CLI 的回复数组，否则返回 $this
      */
-    public function control(array $request, bool $wait = false)
+    public function control(array $request, bool $wait = false, int $timeout = 0)
     {
         if (!$this->isRunning()) {
             throw new ProcessException('claude 会话进程未运行，无法发送控制指令');
@@ -475,7 +476,34 @@ class ClaudeCodeSession extends ClaudeCode
         if (!$wait) {
             return $this;
         }
-        return $this->waitControlResponse($requestId);
+        return $this->waitControlResponse($requestId, $timeout);
+    }
+
+    /**
+     * 覆盖父类：进程已在运行时直接复用，避免为一次查询多起一个进程。
+     * 这样 getUsage() 拿到的 session 花费就是本会话的真实累计值。
+     */
+    protected function queryControl(string $subtype, array $extra = [], int $timeout = 60): array
+    {
+        if (!$this->isRunning()) {
+            return parent::queryControl($subtype, $extra, $timeout);
+        }
+        $resp = $this->control(array_merge(['subtype' => $subtype], $extra), true, $timeout);
+        return self::unwrapControlResponse($subtype, $resp);
+    }
+
+    /**
+     * 获取本会话花费概览的文本报告（同交互式 /cost）
+     *
+     * 注：CLI 的 get_context_usage（上下文窗口占用）只在交互式 UI 下响应，
+     * headless 模式下不会回包，故本库未提供对应方法；确需尝试可自行调用
+     * control(['subtype' => 'get_context_usage'], true, 5)，注意超时后
+     * 同一进程的后续控制查询可能一并失效。
+     */
+    public function getSessionCost(): string
+    {
+        $resp = $this->queryControl('get_session_cost', [], 60);
+        return isset($resp['text']) ? (string) $resp['text'] : '';
     }
 
     // ---------------------------------------------------------------------
@@ -773,10 +801,14 @@ class ClaudeCodeSession extends ClaudeCode
 
     /**
      * 阻塞等待某条宿主控制请求的回复
+     *
+     * @param int $timeout 等待上限秒数，0 表示取 turn_timeout / timeout 配置
      */
-    protected function waitControlResponse(string $requestId): array
+    protected function waitControlResponse(string $requestId, int $timeout = 0): array
     {
-        $timeout = $this->turnTimeout > 0 ? $this->turnTimeout : ($this->timeout > 0 ? $this->timeout : 30);
+        if ($timeout <= 0) {
+            $timeout = $this->turnTimeout > 0 ? $this->turnTimeout : ($this->timeout > 0 ? $this->timeout : 30);
+        }
         $deadline = microtime(true) + $timeout;
         $noop = function () {
         };

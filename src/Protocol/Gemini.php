@@ -10,6 +10,8 @@ use Ai\Response\AIResponse;
  */
 class Gemini implements ProtocolInterface
 {
+    use ModelCatalog;
+
     protected $config = [];
     
     /**
@@ -194,7 +196,21 @@ class Gemini implements ProtocolInterface
     }
 
     /**
+     * 常用模型（供后台离线渲染下拉框；拉取失败时作为兜底）
+     */
+    public function knownModels(): array
+    {
+        return [
+            'gemini-2.5-pro'        => 'Gemini 2.5 Pro',
+            'gemini-2.5-flash'      => 'Gemini 2.5 Flash',
+            'gemini-2.5-flash-lite' => 'Gemini 2.5 Flash Lite',
+            'gemini-2.0-flash'      => 'Gemini 2.0 Flash',
+        ];
+    }
+
+    /**
      * 列举可用模型列表
+     * 拉取失败或为空时，若请求的正是本协议官方域名，则回退到 knownModels()
      */
     public function listModels(array $config, $transport): ?array
     {
@@ -211,7 +227,7 @@ class Gemini implements ProtocolInterface
             $response = $transport->get($endpoint, $params, $headers);
 
             if (!isset($response['models']) || !is_array($response['models'])) {
-                return null;
+                return $this->fallbackModels($config);
             }
 
             $raw = !empty($config['__models_raw']);
@@ -224,11 +240,11 @@ class Gemini implements ProtocolInterface
                 }
             }
 
-            return $models;
+            return $models ?: $this->fallbackModels($config);
 
         } catch (\Exception $e) {
-            error_log('Failed to list Gemini models: ' . $e->getMessage());
-            return null;
+            error_log('Failed to list models (' . static::class . '): ' . $e->getMessage());
+            return $this->fallbackModels($config);
         }
     }
 }

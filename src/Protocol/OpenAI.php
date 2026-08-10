@@ -10,6 +10,8 @@ use Ai\Response\AIResponse;
  */
 class OpenAI implements ProtocolInterface
 {
+    use ModelCatalog;
+
     protected $config = [];
 
     /**
@@ -172,9 +174,28 @@ class OpenAI implements ProtocolInterface
     }
 
     /**
+     * 常用模型（供后台离线渲染下拉框；平台无模型列表接口或拉取失败时作为兜底）
+     */
+    public function knownModels(): array
+    {
+        return [
+            'gpt-5.1'      => 'GPT-5.1',
+            'gpt-5'        => 'GPT-5',
+            'gpt-5-mini'   => 'GPT-5 mini',
+            'gpt-4.1'      => 'GPT-4.1',
+            'gpt-4.1-mini' => 'GPT-4.1 mini',
+            'gpt-4o'       => 'GPT-4o',
+            'gpt-4o-mini'  => 'GPT-4o mini',
+            'o3'           => 'o3（推理）',
+            'o4-mini'      => 'o4-mini（推理）',
+        ];
+    }
+
+    /**
      * 列举可用模型列表
      *
      * config 中设置 '__models_raw' => true 可返回完整的模型数据对象而非仅 id。
+     * 拉取失败或返回为空时，若请求的正是本协议官方域名，则回退到 knownModels()。
      */
     public function listModels(array $config, $transport): ?array
     {
@@ -185,7 +206,7 @@ class OpenAI implements ProtocolInterface
             $response = $transport->get($endpoint, [], $headers);
 
             if (!isset($response['data']) || !is_array($response['data'])) {
-                return null;
+                return $this->fallbackModels($config);
             }
 
             $raw = !empty($config['__models_raw']);
@@ -196,11 +217,11 @@ class OpenAI implements ProtocolInterface
                 }
             }
 
-            return $models;
+            return $models ?: $this->fallbackModels($config);
 
         } catch (\Exception $e) {
-            error_log('Failed to list OpenAI models: ' . $e->getMessage());
-            return null;
+            error_log('Failed to list models (' . static::class . '): ' . $e->getMessage());
+            return $this->fallbackModels($config);
         }
     }
 }

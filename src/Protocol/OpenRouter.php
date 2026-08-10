@@ -78,4 +78,20 @@ class OpenRouter extends OpenAI
         // 二次 apply，让 config['headers'] 中的值可以覆盖上述 OpenRouter 默认头
         return \Ai\Helpers\Headers::apply($headers, $config);
     }
+
+    /**
+     * 常用模型（供后台离线渲染下拉框；拉取失败时作为兜底）
+     * OpenRouter 自身的 /v1/models 接口很完整，正常情况下不会用到这里
+     */
+    public function knownModels(): array
+    {
+        return [
+            'openai/gpt-5.1'                    => 'GPT-5.1',
+            'anthropic/claude-opus-5'           => 'Claude Opus 5',
+            'anthropic/claude-sonnet-5'         => 'Claude Sonnet 5',
+            'google/gemini-2.5-pro'             => 'Gemini 2.5 Pro',
+            'deepseek/deepseek-chat'            => 'DeepSeek Chat',
+            'meta-llama/llama-3.3-70b-instruct' => 'Llama 3.3 70B',
+        ];
+    }
 }

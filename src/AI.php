@@ -169,7 +169,9 @@ class AI
      * 
      * 支持的配置项包括：
      * - model: 模型名称或模型实例（优先级最高；可为内置标识，也可为任意自定义模型名）
-     * - protocol: 手选协议格式，openai / claude(anthropic) / gemini / deepseek，或自定义协议类名
+     * - protocol: 手选协议格式，如 openai / claude(anthropic) / gemini / deepseek / qwen / doubao /
+     *             zhipu / moonshot / ernie / hunyuan / grok / mistral ……，或自定义协议类名。
+     *             完整清单见 listProtocols() / listProtocolGroups()
      * - base_url: 接口根地址，与协议官方路径智能拼接（接入第三方转发/中转、自建网关）
      * - endpoint: 完整对话端点，原样使用，优先级高于 base_url
      * - endpoint_models: 完整模型列表端点（仅 listModels 生效）
@@ -705,21 +707,26 @@ class AI
     
     /**
      * 平台列表
-     * 列举当前类库支持哪些平台（如 openai、gemini、deepseek 等）
-     * 根据模型映射表动态获取支持的平台列表，避免硬编码
-     * @return array 平台列表 ['platform_key' => 'Platform Name']
+     *
+     * 列举本库支持的全部平台（国内的通义千问、豆包、文心、GLM、Kimi、混元……，
+     * 海外的 OpenAI、Claude、Gemini、Grok、Mistral……，以及聚合中转与本地部署）。
+     * 平台键即业务层取密钥用的前缀，约定为 {平台}__api_key。
+     *
+     * @return array ['openai' => 'OpenAI', 'deepseek' => 'DeepSeek 深度求索', 'qwen' => '阿里云百炼（通义千问）', ...]
      */
     public function listPlatforms(): array
     {
-        $platforms = [];
+        $platforms = \Ai\Helpers\Protocols::platforms();
+
+        // 内置模型类里若有协议注册表未覆盖的平台，一并列出
         foreach ($this->modelMap as $modelClass) {
             if (class_exists($modelClass)) {
-                $modelInstance = new $modelClass();
-                $platforms[$modelInstance->getPlatform()] = ucfirst($modelInstance->getPlatform());
+                $platform = (new $modelClass())->getPlatform();
+                if (!isset($platforms[$platform])) {
+                    $platforms[$platform] = ucfirst($platform);
+                }
             }
         }
-        $platforms = array_unique($platforms);
-        asort($platforms);
         return $platforms;
     }
 
@@ -731,6 +738,37 @@ class AI
     public function listProtocols(): array
     {
         return \Ai\Helpers\Protocols::all();
+    }
+
+    /**
+     * 协议格式列表（按「中国大陆 / 海外主流 / 聚合中转 / 本地部署」分组）
+     * 用于后台下拉框的 optgroup 渲染
+     * @return array ['中国大陆' => ['deepseek' => '...', ...], ...]
+     */
+    public function listProtocolGroups(): array
+    {
+        return \Ai\Helpers\Protocols::grouped();
+    }
+
+    /**
+     * 某协议/平台内置的常用模型清单（不发请求）
+     *
+     * 与 listModels() 的区别：listModels() 实时调用平台接口（需要 Key、有网络开销），
+     * 本方法直接返回库内维护的常用模型，适合后台下拉框的默认值与离线渲染。
+     *
+     * @param string $protocol 协议标识（如 'qwen'、'zhipu'）或协议类名；留空则用当前模型的协议
+     * @return array ['模型 id' => '显示名']，无内置清单时返回空数组
+     */
+    public function listKnownModels(string $protocol = ''): array
+    {
+        $protocol = trim($protocol);
+        if ($protocol === '') {
+            if (!$this->model) {
+                return [];
+            }
+            $protocol = $this->model->getProtocol();
+        }
+        return \Ai\Helpers\Protocols::modelsOf($protocol);
     }
 
     /**

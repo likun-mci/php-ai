@@ -14,4 +14,15 @@ class DeepSeek extends OpenAI
     {
         return 'https://api.deepseek.com';
     }
+
+    /**
+     * 常用模型（供后台离线渲染下拉框；拉取失败时作为兜底）
+     */
+    public function knownModels(): array
+    {
+        return [
+            'deepseek-chat'     => 'DeepSeek Chat',
+            'deepseek-reasoner' => 'DeepSeek Reasoner（推理）',
+        ];
+    }
 }

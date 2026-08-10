@@ -1,6 +1,6 @@
 {
     "name": "likun-mci/php-ai",
-    "description": "框架无关的 PHP AI 标准库：统一 OpenAI / Claude / Gemini / DeepSeek 调用，内置流式输出、Agent 工具调用循环、AI 代码编辑协议与安全网页抓取。",
+    "description": "框架无关的 PHP AI 标准库：一套接口访问 40 个国内外主流 AI 平台（通义千问 / 豆包 / 文心一言 / 智谱 GLM / Kimi / 混元 / 星火 / DeepSeek / OpenAI / Claude / Gemini / Grok / Mistral 等），内置流式输出、Agent 工具调用循环、AI 代码编辑协议与安全网页抓取。",
     "type": "library",
     "keywords": [
         "ai",
@@ -10,6 +10,25 @@
         "anthropic",
         "gemini",
         "deepseek",
+        "qwen",
+        "tongyi",
+        "dashscope",
+        "doubao",
+        "volcengine",
+        "ernie",
+        "qianfan",
+        "zhipu",
+        "glm",
+        "moonshot",
+        "kimi",
+        "hunyuan",
+        "spark",
+        "minimax",
+        "grok",
+        "mistral",
+        "openrouter",
+        "siliconflow",
+        "ollama",
         "agent",
         "sdk",
         "stream",
@@ -47,10 +66,11 @@
         },
         "exclude-from-classmap": [
             "examples.php",
-            "examples_models.php",
-            "examples_stream.php",
+            "examples_claude_cli.php",
             "examples_custom.php",
-            "examples_claude_cli.php"
+            "examples_models.php",
+            "examples_platforms.php",
+            "examples_stream.php"
         ]
     },
     "config": {

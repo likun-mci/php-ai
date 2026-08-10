@@ -205,6 +205,25 @@ class Endpoint
     }
 
     /**
+     * 判断两个地址是否同一主机（忽略大小写与端口以外的差异）
+     *
+     * 用于「实际请求端点是不是协议官方域名」这类判断。
+     *
+     * @param string $a 完整 URL 或 host
+     * @param string $b 完整 URL 或 host
+     * @return bool 任一方解析不出主机名时返回 false
+     */
+    public static function sameHost(string $a, string $b): bool
+    {
+        $hostA = parse_url(self::withScheme(trim($a)), PHP_URL_HOST);
+        $hostB = parse_url(self::withScheme(trim($b)), PHP_URL_HOST);
+        if (!$hostA || !$hostB) {
+            return false;
+        }
+        return strcasecmp($hostA, $hostB) === 0;
+    }
+
+    /**
      * 补全 scheme（缺省按 https）
      */
     public static function withScheme(string $url): string

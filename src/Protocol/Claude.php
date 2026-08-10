@@ -10,6 +10,8 @@ use Ai\Response\AIResponse;
  */
 class Claude implements ProtocolInterface
 {
+    use ModelCatalog;
+
     protected $config = [];
     
     /**
@@ -190,8 +192,25 @@ class Claude implements ProtocolInterface
     }
 
     /**
+     * 常用模型（供后台离线渲染下拉框；接口不可用时作为兜底）
+     */
+    public function knownModels(): array
+    {
+        return [
+            'claude-opus-5'     => 'Claude Opus 5',
+            'claude-sonnet-5'   => 'Claude Sonnet 5',
+            'claude-fable-5'    => 'Claude Fable 5',
+            'claude-opus-4-8'   => 'Claude Opus 4.8',
+            'claude-opus-4-7'   => 'Claude Opus 4.7',
+            'claude-sonnet-4-6' => 'Claude Sonnet 4.6',
+            'claude-haiku-4-5'  => 'Claude Haiku 4.5',
+        ];
+    }
+
+    /**
      * 列举可用模型列表
-     * Anthropic 已提供 GET /v1/models，第三方兼容网关不一定实现，失败时回退到内置列表
+     * Anthropic 已提供 GET /v1/models，第三方兼容网关不一定实现，
+     * 失败时若请求的正是本协议官方域名，则回退到 knownModels()
      */
     public function listModels(array $config, $transport): ?array
     {
@@ -211,17 +230,10 @@ class Claude implements ProtocolInterface
                 }
             }
         } catch (\Exception $e) {
-            error_log('Failed to list Claude models: ' . $e->getMessage());
+            error_log('Failed to list models (' . static::class . '): ' . $e->getMessage());
         }
 
-        // 回退：常用模型标识（接口不可用时仍可让业务层渲染下拉框）
-        return [
-            'claude-sonnet-4-5'        => 'Claude Sonnet 4.5',
-            'claude-opus-4-1'          => 'Claude Opus 4.1',
-            'claude-3-7-sonnet-latest' => 'Claude 3.7 Sonnet',
-            'claude-3-5-haiku-latest'  => 'Claude 3.5 Haiku',
-            'claude-3-opus-20240229'   => 'Claude 3 Opus',
-        ];
+        return $this->fallbackModels($config);
     }
 }
 

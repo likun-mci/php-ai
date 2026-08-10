@@ -1,6 +1,6 @@
 # PHP AI 标准库
 
-一个框架无关的 PHP AI 调用标准库，用统一接口屏蔽 OpenAI / Claude(Anthropic) / Gemini / DeepSeek / OpenRouter 等平台在**鉴权方式、请求协议、返回格式、流式协议**上的差异。
+一个框架无关的 PHP AI 调用标准库，用统一接口屏蔽 **40 个国内外主流 AI 平台**在**鉴权方式、请求协议、返回格式、流式协议**上的差异——国内的通义千问、豆包、文心一言、智谱 GLM、Kimi、腾讯混元、讯飞星火、DeepSeek……，海外的 OpenAI、Claude、Gemini、Grok、Mistral……，以及 OpenRouter、硅基流动等聚合中转与 Ollama 等本地部署。切换平台只需换一个配置项。
 
 除对话能力外，还内置了 **Agent 工具调用循环**、**AI 代码编辑协议**、**带 SSRF 防护的网页抓取工具**与 **Agent 长期记忆**，可直接用于构建后台 AI 助手、代码编辑助手、内容翻译等实际业务。
 
@@ -10,8 +10,9 @@
 
 ## 特性
 
-- 🔌 **多平台**：OpenAI、Claude(Anthropic)、Gemini、DeepSeek、OpenRouter，含 DeepSeek 的 Anthropic 兼容端点
-- 🎯 **统一接口**：`AI::create()->chat()`，切换平台只需换 `model`
+- 🔌 **多平台**：内置 40 个平台协议——国内 20 家（通义千问 / 豆包 / 文心一言 / 智谱 GLM / Kimi / 混元 / 星火 / MiniMax / 阶跃星辰 / 零一万物 / 百川 / 商汤 / 360 智脑 / 华为云 MaaS / DeepSeek 等）、海外 12 家（OpenAI / Claude / Gemini / Grok / Mistral / Cohere / Perplexity / Meta Llama / Azure OpenAI 等）、聚合中转 8 家（OpenRouter / 硅基流动 / 魔搭 / Groq / Together / Fireworks / DeepInfra / NVIDIA NIM 等）与本地部署（Ollama / LM Studio / vLLM）
+- 🎯 **统一接口**：`AI::create()->chat()`，切换平台只需换 `protocol` 或 `model`，业务代码一行不用改
+- 🧰 **国产模型跑工具调用**：智谱、Kimi、百炼、DeepSeek 都提供了 Anthropic 兼容端点，可用国产价格跑 Agent 的 tools 协议
 - 🧩 **任意模型 + 任意接口**：模型名不受内置清单限制，可手选协议格式（`protocol`）并指定自定义接口地址（`base_url` / `endpoint`），一套代码同时对接官方 API、第三方中转与自建网关
 - 🌊 **流式输出**：一行 `setStream(true)`，自动按 SSE 协议实时吐出数据块
 - 🧰 **Agent 循环**：挂载工具（函数）后自动完成「模型决策 → 执行工具 → 回填结果」多轮循环
@@ -77,6 +78,20 @@ echo $response->getContent();          // 回复文本
 echo $response->tokens();              // 总消耗 tokens
 ```
 
+换成国产平台，只需改配置——业务代码一行不用动：
+
+```php
+$ai = AI::create(['protocol' => 'qwen',     'model' => 'qwen-plus',  'api_key' => 'sk-xxx']);  // 通义千问
+$ai = AI::create(['protocol' => 'zhipu',    'model' => 'glm-4.6',    'api_key' => 'xxx']);     // 智谱 GLM
+$ai = AI::create(['protocol' => 'doubao',   'model' => 'doubao-seed-1-6', 'api_key' => 'xxx']);// 豆包
+$ai = AI::create(['protocol' => 'moonshot', 'model' => 'kimi-latest','api_key' => 'sk-xxx']);  // Kimi
+
+// 模型名能识别出平台时，protocol 也可以省略
+$ai = AI::create(['model' => 'qwen-plus', 'api_key' => 'sk-xxx']);
+```
+
+完整的平台清单见 [支持的平台与模型](#支持的平台与模型)，可运行的示例见 `examples_platforms.php`。
+
 `chat()` 接受字符串（自动包装为一条 user 消息）或完整 payload 数组：
 
 ```php
@@ -96,9 +111,89 @@ $response = $ai->chat([
 
 ---
 
-## 支持的模型
+## 支持的平台与模型
 
-`model` 传下表中的**模型标识**即可，库会自动解析出平台、协议与端点：
+### 平台一览
+
+`protocol` 传下表中的取值，`api_key` 传该平台控制台的密钥，其余写法所有平台完全一致：
+
+```php
+// 换平台只改这两行，业务代码不动
+$ai = AI::create([
+    'protocol' => 'qwen',          // 见下表
+    'model'    => 'qwen-plus',
+    'api_key'  => 'sk-xxx',
+]);
+echo $ai->chat('你好')->getContent();
+```
+
+#### 中国大陆主流平台
+
+| 平台 | `protocol` 取值 | 默认端点 | 模型名自动识别 |
+|------|----------------|---------|---------------|
+| DeepSeek 深度求索 | `deepseek` <br><sub>别名 `deepseek-ai`</sub> | `api.deepseek.com/v1/chat/completions` | `deepseek-*` |
+| 阿里云百炼（通义千问） | `qwen` <br><sub>别名 `dashscope` / `bailian` / `tongyi` / `aliyun`</sub> | `dashscope.aliyuncs.com/compatible-mode/v1/chat/completions` | `qwen*`、`qwq*` |
+| 阿里云百炼（通义千问） | `qwen-anthropic` <br><sub>别名 `qwen-claude` / `dashscope-anthropic`</sub> | `dashscope.aliyuncs.com/api/v2/apps/claude-code-proxy/v1/messages` | — |
+| 火山方舟（豆包） | `doubao` <br><sub>别名 `ark` / `volcengine` / `volces` / `volc`</sub> | `ark.cn-beijing.volces.com/api/v3/chat/completions` | `doubao-*` |
+| 百度千帆（文心一言） | `ernie` <br><sub>别名 `qianfan` / `baidu` / `wenxin` / `yiyan`</sub> | `qianfan.baidubce.com/v2/chat/completions` | `ernie-*` |
+| 智谱 AI（GLM） | `zhipu` <br><sub>别名 `glm` / `bigmodel` / `chatglm` / `zhipuai`</sub> | `open.bigmodel.cn/api/paas/v4/chat/completions` | `glm-*`、`cogview-*` |
+| 智谱 AI（GLM） | `zhipu-anthropic` <br><sub>别名 `glm-anthropic` / `zhipu-claude`</sub> | `open.bigmodel.cn/api/anthropic/v1/messages` | — |
+| 月之暗面（Kimi） | `moonshot` <br><sub>别名 `kimi` / `yuezhianmian`</sub> | `api.moonshot.cn/v1/chat/completions` | `kimi-*`、`moonshot-*` |
+| 月之暗面（Kimi） | `moonshot-anthropic` <br><sub>别名 `kimi-anthropic` / `moonshot-claude`</sub> | `api.moonshot.cn/anthropic/v1/messages` | — |
+| 腾讯混元 | `hunyuan` <br><sub>别名 `tencent` / `tencent-hunyuan`</sub> | `api.hunyuan.cloud.tencent.com/v1/chat/completions` | `hunyuan-*` |
+| 讯飞星火 | `spark` <br><sub>别名 `xunfei` / `iflytek` / `xfyun` / `xinghuo`</sub> | `spark-api-open.xf-yun.com/v1/chat/completions` | `spark*`、`4.0Ultra` |
+| MiniMax（稀宇科技） | `minimax` <br><sub>别名 `xiyu` / `minimaxi`</sub> | `api.minimaxi.com/v1/text/chatcompletion_v2` | `MiniMax-*`、`abab*` |
+| 阶跃星辰（Step） | `stepfun` <br><sub>别名 `step` / `jieyue`</sub> | `api.stepfun.com/v1/chat/completions` | `step-*` |
+| 零一万物（Yi） | `yi` <br><sub>别名 `lingyiwanwu` / `01ai` / `01-ai` / `zeroone`</sub> | `api.lingyiwanwu.com/v1/chat/completions` | `yi-*` |
+| 百川智能 | `baichuan` <br><sub>别名 `baichuan-inc`</sub> | `api.baichuan-ai.com/v1/chat/completions` | `Baichuan*` |
+| 商汤日日新（SenseNova） | `sensenova` <br><sub>别名 `sensetime` / `sensechat` / `shangtang`</sub> | `api.sensenova.cn/compatible-mode/v1/chat/completions` | `SenseChat-*` |
+| 360 智脑 | `zhinao` <br><sub>别名 `360` / `qihoo` / `360ai`</sub> | `api.360.cn/v1/chat/completions` | `360gpt*` |
+| 华为云 ModelArts（盘古 / MaaS） | `modelarts` <br><sub>别名 `huawei` / `maas` / `pangu`</sub> | `api.modelarts-maas.com/v1/chat/completions` | — |
+
+#### 海外主流平台
+
+| 平台 | `protocol` 取值 | 默认端点 | 模型名自动识别 |
+|------|----------------|---------|---------------|
+| OpenAI | `openai` <br><sub>别名 `oai` / `openai-compatible` / `compatible` / `chat_completions`</sub> | `api.openai.com/v1/chat/completions` | `gpt-*`、`o3` |
+| Anthropic Claude | `claude` <br><sub>别名 `anthropic` / `claude-messages` / `messages`</sub> | `api.anthropic.com/v1/messages` | `claude-*` |
+| Google Gemini | `gemini` <br><sub>别名 `google`</sub> | `generativelanguage.googleapis.com/v1beta/openai/chat/completions` | `gemini-*` |
+| Z.ai（智谱国际站） | `zai` <br><sub>别名 `z-ai` / `zhipu-global`</sub> | `api.z.ai/api/paas/v4/chat/completions` | — |
+| xAI（Grok） | `grok` <br><sub>别名 `xai` / `x-ai` / `x.ai`</sub> | `api.x.ai/v1/chat/completions` | `grok-*` |
+| Mistral AI | `mistral` <br><sub>别名 `mistralai`</sub> | `api.mistral.ai/v1/chat/completions` | `mistral-*`、`codestral-*` |
+| Meta（Llama API） | `llama` <br><sub>别名 `meta` / `meta-llama`</sub> | `api.llama.com/compat/v1/chat/completions` | — |
+| Cohere | `cohere` <br><sub>别名 `command`</sub> | `api.cohere.ai/compatibility/v1/chat/completions` | `command-*` |
+| Perplexity | `perplexity` <br><sub>别名 `pplx` / `sonar`</sub> | `api.perplexity.ai/chat/completions` | `sonar*` |
+| Azure OpenAI | `azure` <br><sub>别名 `azure-openai` / `azureopenai`</sub> | `需自填 `base_url`` | — |
+
+#### 聚合中转平台
+
+| 平台 | `protocol` 取值 | 默认端点 | 模型名自动识别 |
+|------|----------------|---------|---------------|
+| OpenRouter | `openrouter` <br><sub>别名 `or` / `open-router` / `open_router`</sub> | `openrouter.ai/api/v1/chat/completions` | — |
+| 硅基流动（SiliconCloud） | `siliconflow` <br><sub>别名 `silicon` / `siliconcloud` / `guiji`</sub> | `api.siliconflow.cn/v1/chat/completions` | — |
+| 魔搭社区（ModelScope） | `modelscope` <br><sub>别名 `moda` / `damo`</sub> | `api-inference.modelscope.cn/v1/chat/completions` | — |
+| Groq | `groq` <br><sub>别名 `groqcloud`</sub> | `api.groq.com/openai/v1/chat/completions` | — |
+| Together AI | `together` <br><sub>别名 `togetherai` / `together-ai`</sub> | `api.together.xyz/v1/chat/completions` | — |
+| Fireworks AI | `fireworks` <br><sub>别名 `fireworksai`</sub> | `api.fireworks.ai/inference/v1/chat/completions` | — |
+| DeepInfra | `deepinfra` | `api.deepinfra.com/v1/openai/chat/completions` | — |
+| Cerebras | `cerebras` | `api.cerebras.ai/v1/chat/completions` | — |
+| NVIDIA NIM | `nvidia` <br><sub>别名 `nim` / `nvidia-nim` / `build-nvidia`</sub> | `integrate.api.nvidia.com/v1/chat/completions` | — |
+
+#### 本地 / 自建部署
+
+| 平台 | `protocol` 取值 | 默认端点 | 模型名自动识别 |
+|------|----------------|---------|---------------|
+| Ollama（本地） | `ollama` | `localhost:11434/v1/chat/completions` | — |
+| LM Studio（本地） | `lmstudio` <br><sub>别名 `lm-studio`</sub> | `localhost:1234/v1/chat/completions` | — |
+| vLLM（自建） | `vllm` <br><sub>别名 `sglang` / `xinference`</sub> | `localhost:8000/v1/chat/completions` | — |
+
+> 表格由 `$ai->listProtocols()` / `listProtocolGroups()` 提供程序化版本，可直接渲染后台下拉框；
+> `$ai->listKnownModels('qwen')` 返回该平台的常用模型清单（不发请求）。
+> **别名**只是同一协议的另一种写法，效果完全相同（`protocol => 'kimi'` 等价于 `protocol => 'moonshot'`）。
+
+### 内置模型标识（快捷方式）
+
+下列**模型标识**可直接传给 `model`，无需 `protocol`，库会解析出平台、协议与端点：
 
 | 平台 | 模型标识 | 实际协议 | 端点 |
 |------|---------|---------|------|
@@ -119,36 +214,31 @@ $response = $ai->chat([
 
 上表只是「开箱即用的快捷标识」，**`model` 并不限于表内的值**：
 
-- 官方新模型（如 `claude-sonnet-4-5`、`gpt-5.1`、`gemini-3-pro`、`deepseek-v3`）：库按模型名识别出协议家族与官方端点，直接可用，不必等库更新；
-- 其它平台/第三方中转/自建网关的模型（如 `qwen-max`、`glm-4.6`、`llama3`）：加上 `base_url`（或 `endpoint`）即可，必要时用 `protocol` 手选协议格式。
+- 官方新模型（如 `claude-opus-5`、`gpt-5.1`、`qwen3-max`、`glm-4.6`、`kimi-k2-turbo-preview`）：库按模型名识别出协议家族与官方端点，直接可用，不必等库更新；
+- 被多家平台托管的开源模型（如 `llama3`、`mixtral`）或第三方中转/自建网关的模型：加上 `protocol` 或 `base_url` 即可。
 
 ```php
 // 官方新模型：识别出 claude 家族，自动使用 api.anthropic.com/v1/messages
-$ai = AI::create(['model' => 'claude-sonnet-4-5', 'api_key' => 'sk-ant-xxx']);
+$ai = AI::create(['model' => 'claude-opus-5', 'api_key' => 'sk-ant-xxx']);
 
-// 第三方接口：任意模型名 + 手选协议 + 自定义地址
+// 国产新模型：识别出 zhipu 家族，自动使用 open.bigmodel.cn/api/paas/v4/chat/completions
+$ai = AI::create(['model' => 'glm-4.6', 'api_key' => 'xxx']);
+
+// 开源模型 / 第三方接口：任意模型名 + 手选协议 + 自定义地址
 $ai = AI::create([
-    'model'    => 'qwen-max',
-    'protocol' => 'openai',                                              // 手选协议格式
-    'base_url' => 'https://dashscope.aliyuncs.com/compatible-mode/v1',   // 自定义接口地址
-    'api_key'  => 'sk-xxx',
+    'model'    => 'llama3',
+    'protocol' => 'openai',                    // 手选协议格式
+    'base_url' => 'http://10.0.0.9:11434/v1',  // 自定义接口地址
 ]);
 ```
 
 > 模型名无法归属官方平台、又没给 `base_url` / `endpoint` 时，请求前会抛 `ConfigException`，而不是把 Key 发到不相干的官方域名。
 
-可选的协议格式（`protocol`）：
+`protocol` 除了上面平台表里的取值，还可以传实现了 `Ai\Contracts\ProtocolInterface` 的**自定义协议类名**（见「扩展开发」）。
 
-| 取值 | 说明 | 默认路径 |
-|------|------|---------|
-| `openai`（默认） | OpenAI Chat Completions，绝大多数国产/中转接口都兼容它 | `/v1/chat/completions` |
-| `claude` / `anthropic` | Anthropic Messages，**工具调用（Agent）必须用它** | `/v1/messages` |
-| `gemini` | Gemini 的 OpenAI 兼容端点 | `/v1beta/openai/chat/completions` |
-| `deepseek` | DeepSeek（OpenAI 兼容），仅默认地址不同 | `/v1/chat/completions` |
-| `openrouter` / `or` | **OpenRouter 聚合中转**（OpenAI 兼容），自动拼接默认地址 | `/v1/chat/completions` |
-| 自定义协议类名 | 实现 `Ai\Contracts\ProtocolInterface` 的类，见「扩展开发」 | 由该类决定 |
+不传 `protocol` 时按模型名推断（见平台表「模型名自动识别」列），也识别 `厂商/模型` 写法（如 `qwen/qwen-max`）。推断不出时按 `openai` 协议处理，此时必须给 `base_url` 或 `endpoint`。
 
-不传 `protocol` 时按模型名推断（`gpt-*`→openai、`claude-*`→claude、`gemini-*`→gemini、`deepseek-*`→deepseek，也识别 `厂商/模型` 写法），推断不出则按 `openai` 处理。`$ai->listProtocols()` 可取到上表用于后台下拉框。
+> **只对厂商自有模型名做推断**。`llama3`、`mixtral` 这类被多家平台托管的开源模型名不参与推断（无法判断你想连哪一家），需要显式给 `protocol` 或 `base_url`。
 
 ### 协议差异（重要）
 
@@ -166,27 +256,50 @@ $ai = AI::create([
 
 - **OpenAI / Gemini** 的系统提示词要写进 `messages` 的 `role: system`；
 - **Claude** 的系统提示词要写在顶层 `system` 键；
-- **Agent / 工具调用只能用 Claude 协议的模型**（`claude-3-opus`、`deepseek-anthropic`）。
+- **Agent / 工具调用只能用 Claude 协议**。除 Anthropic 官方外，以下国产平台提供了 Anthropic 兼容端点，可以用国产模型的价格跑 Agent：
+
+| `protocol` | 平台 | 鉴权用的密钥 |
+|-----------|------|------------|
+| `deepseek-anthropic`（模型标识） | DeepSeek | `deepseek__api_key` |
+| `zhipu-anthropic` | 智谱 GLM | `zhipu__api_key` |
+| `moonshot-anthropic` | 月之暗面 Kimi | `moonshot__api_key` |
+| `qwen-anthropic` | 阿里云百炼 | `qwen__api_key` |
+
+```php
+// 用 GLM-4.6 跑工具调用：协议是 Claude 的，价格与密钥是智谱的
+$ai = AI::create([
+    'protocol' => 'zhipu-anthropic',
+    'model'    => 'glm-4.6',
+    'api_key'  => $config['zhipu__api_key'],
+]);
+```
 
 ### 运行时查询平台与模型
 
 ```php
 $ai = new AI();
 
-$ai->listPlatforms();   // ['claude'=>'Claude','deepseek'=>'Deepseek','gemini'=>'Gemini','openai'=>'Openai']
-$ai->listProtocols();   // ['openai'=>'OpenAI 兼容（Chat Completions）', 'claude'=>..., 'gemini'=>..., 'deepseek'=>...]
-$ai->listModels();      // 未设置 model 时：返回本库内置的模型标识列表
-$ai->platformOfModel('qwen-max');   // 'custom'（设置模型前即可安全调用，无法归属官方平台时返回 custom）
+// —— 不发请求的元信息查询（适合渲染后台下拉框） ——
+$ai->listPlatforms();        // 37 个平台：['deepseek'=>'DeepSeek 深度求索','qwen'=>'阿里云百炼（通义千问）',...]
+                             // 键即业务层约定的密钥前缀 {平台}__api_key
+$ai->listProtocols();        // 40 个协议：['openai'=>'OpenAI 兼容（Chat Completions）','qwen'=>'阿里云百炼 / 通义千问（OpenAI 兼容）',...]
+$ai->listProtocolGroups();   // 同上，但按「中国大陆 / 海外主流 / 聚合中转 / 本地部署」分组，可直接渲染 optgroup
+$ai->listKnownModels('qwen');// 该平台的常用模型：['qwen3-max'=>'通义千问 3 Max','qwen-max'=>'通义千问 Max',...]
+$ai->platformOfModel('qwen-max');   // 'qwen'（设置模型前即可安全调用，无法归属官方平台时返回 custom）
 
-$ai->setConfig(['model' => 'gpt-4o', 'api_key' => 'sk-xxx']);
-$ai->getPlatform();     // 'openai'
-$ai->getProtocolKey();  // 'openai'，当前实际使用的协议
-$ai->resolveEndpoint(); // 'https://api.openai.com/v1/chat/completions'，当前实际请求端点
-$ai->listModels();      // 已设置 model 时：调用平台接口拉取该平台真实可用模型
-                        // 端点跟随 base_url / endpoint 走，接第三方网关时列的就是网关的模型
-                        // OpenAI / Gemini / DeepSeek 实时拉取；Claude 拉取失败时回退内置列表；不支持则返回 null
+// —— 设置模型后的当前状态 ——
+$ai->setConfig(['model' => 'glm-4.6', 'api_key' => 'xxx']);
+$ai->getPlatform();     // 'zhipu'
+$ai->getProtocolKey();  // 'zhipu'，当前实际使用的协议
+$ai->resolveEndpoint(); // 'https://open.bigmodel.cn/api/paas/v4/chat/completions'，当前实际请求端点
+$ai->listKnownModels(); // 不传参数时取当前协议的内置清单
+
+// —— 实时调用平台接口拉取模型 ——
+$ai->listModels();      // 端点跟随 base_url / endpoint 走，接第三方网关时列的就是网关的模型
+                        // 拉取失败或平台无此接口时：若请求的是官方域名，回退到内置常用清单；
+                        // 接的是第三方网关则返回 null（避免把官方清单误当成网关的能力）
 $ai->listModels(true);  // 传入 true 返回完整模型数据（含 id / created / owned_by / pricing 等）
-                        // 适用于 OpenRouter、Requesty 等需要展示模型价格/能力标签的场景
+                        // 适用于 OpenRouter、硅基流动等需要展示模型价格/能力标签的场景
 ```
 
 **真实用例**——按平台分组拉取模型列表并本地缓存一周，供后台下拉框渲染：
@@ -201,8 +314,10 @@ foreach ($platforms as $platform => $platformName) {
 
     try {
         $ai = new AI();
+        // 该平台任一模型即可（用于确定协议），直接取库内置清单的第一个
+        $known = $ai->listKnownModels(\Ai\Helpers\Protocols::platformProtocols($platform)[0] ?? '');
         $ai->setConfig([
-            'model'   => $this->platformDefaultModels[$platform],  // 该平台任一模型，用于确定协议
+            'model'   => (string)array_key_first($known),
             'api_key' => $apiKey,
         ]);
         $models = $ai->listModels();
@@ -221,7 +336,7 @@ foreach ($platforms as $platform => $platformName) {
 $ai->setConfig([
     'model'        => 'gpt-4o',      // 模型标识（必填），内置标识或任意自定义模型名
     'api_key'      => 'sk-xxx',      // API 密钥（自建/内网接口可不填）
-    'protocol'     => '',            // 手选协议格式：openai / claude(anthropic) / gemini / deepseek / 自定义协议类名
+    'protocol'     => '',            // 手选协议格式：见「平台一览」，或自定义协议类名
     'base_url'     => '',            // 接口根地址，与协议官方路径智能拼接，见「自定义接口地址」
     'endpoint'     => '',            // 完整对话端点，原样使用，优先级高于 base_url
     'endpoint_models' => '',         // 完整模型列表端点（仅 listModels 生效）
@@ -366,7 +481,7 @@ $models = $ai->setModel('openai/gpt-4o')->listModels(true);
 
 ### 其他常见 AI 中转/聚合服务
 
-以下中转站和网关均使用 OpenAI 兼容协议（`protocol=openai`），只需配置 `base_url` 或 `endpoint`：
+OpenRouter、硅基流动、魔搭、Groq、Together、Fireworks、DeepInfra、NVIDIA NIM 已内置为协议（见「平台一览」），直接 `protocol` 指定即可。其余中转站与自建网关走 OpenAI 兼容协议（`protocol=openai`），配置 `base_url` 或 `endpoint`：
 
 ```php
 // API2D（国内 OpenAI 中转）
@@ -391,9 +506,9 @@ AI::create(['model'=>'llama3', 'protocol'=>'openai',
             'base_url'=>'http://10.0.0.9:11434/v1',
             'headers' =>['Authorization'=>null, 'X-Internal-Token'=>'t']]);
 
-// 阿里云百炼（OpenAI 兼容模式）
-AI::create(['model'=>'qwen-max', 'protocol'=>'openai', 'api_key'=>'sk-xxx',
-            'base_url'=>'https://dashscope.aliyuncs.com/compatible-mode/v1']);
+// 内置协议 + 自定义地址：走自己的代理，但仍按该平台的协议与鉴权方式通信
+AI::create(['model'=>'qwen-plus', 'protocol'=>'qwen', 'api_key'=>'sk-xxx',
+            'base_url'=>'https://my-proxy.example.com/dashscope']);
 ```
 
 以上所有接入方式均支持流式输出、附件、回调等完整功能。
@@ -1224,11 +1339,42 @@ class GPT4Turbo extends BaseModel
 
 > 只是想临时接一个新模型/新接口，**不必写模型类**——直接用 `model` + `protocol` + `base_url` 配置即可，库会在运行时构造 `Ai\Models\CustomModel`。也可以自己 `new CustomModel([...])` 传给 `setModel()`。
 
-### 新增平台
+**绝大多数新平台都是 OpenAI 兼容的**，继承 `Ai\Protocol\OpenAI` 改一个地址即可——库内 30 多个平台协议都是这么实现的：
+
+```php
+namespace Ai\Protocol;
+
+/**
+ * 某某云（OpenAI 兼容）
+ */
+class MyCloud extends OpenAI
+{
+    public function defaultBaseUrl(): string
+    {
+        return 'https://api.mycloud.com';
+    }
+
+    // 路径与 OpenAI 官方不同时才需要覆盖
+    public function chatPath(): string   { return '/v2/chat/completions'; }
+    public function modelsPath(): string { return '/v2/models'; }
+
+    // 鉴权方式不是 Authorization: Bearer 时覆盖 buildHeaders()
+
+    /** 常用模型：供后台离线渲染下拉框，也是拉取失败时的兜底 */
+    public function knownModels(): array
+    {
+        return ['my-model-pro' => 'MyCloud Pro'];
+    }
+}
+```
+
+然后在 `Ai\Helpers\Protocols::$map` 注册标识（顺带在 `$alias` / `$detect` 里加别名与模型名识别规则），`protocol => 'mycloud'` 就能用了。
+
+**协议格式本身不同**（既不是 OpenAI 也不是 Anthropic / Gemini）时：
 
 1. 实现 `Ai\Contracts\ProtocolInterface`：`buildRequest`、`parseResponse`、`buildHeaders`、`parseStreamChunk`、`isStreamEnd`、`listModels`；
-   可选实现 `defaultBaseUrl()` / `chatPath()` / `modelsPath()`，供自定义模型自动组装端点；
-2. 创建该平台的模型类，`$protocol` 指向新协议；或直接把协议类名传给 `protocol` 配置项：
+   可选实现 `defaultBaseUrl()` / `chatPath()` / `modelsPath()` 供自动组装端点，`use ModelCatalog` 获得常用模型清单与兜底能力；
+2. 创建该平台的模型类，`$protocol` 指向新协议；或直接把协议类名传给 `protocol` 配置项（无需改动本库）：
    ```php
    AI::create(['model'=>'x', 'protocol'=>'App\\Protocol\\MyApi', 'base_url'=>'https://api.my.com']);
    ```
@@ -1254,13 +1400,20 @@ php-ai/
 │   │   ├── BaseModel.php
 │   │   ├── CustomModel.php # 通用模型：任意模型名 + 手选协议 + 自定义接口地址
 │   │   ├── OpenAI/  Claude/  Gemini/  DeepSeek/
-│   ├── Protocol/           # 协议层：OpenAI / Claude / Gemini / DeepSeek / OpenRouter
+│   ├── Protocol/           # 协议层：40 个平台协议
+│   │                       #   ModelCatalog.php   常用模型清单 + 拉取失败兜底（trait）
+│   │                       #   OpenAI / Claude / Gemini  三种基础协议格式
+│   │                       #   国内：Qwen / Doubao / Ernie / Zhipu / Moonshot / Hunyuan / Spark /
+│   │                       #        MiniMax / StepFun / Yi / Baichuan / SenseNova / Zhinao / ModelArts …
+│   │                       #   海外：Grok / Mistral / Cohere / Perplexity / Llama / Azure …
+│   │                       #   聚合：OpenRouter / SiliconFlow / ModelScope / Groq / Together / Fireworks …
+│   │                       #   本地：Ollama / LMStudio / VLLM
 │   ├── Response/           # 统一响应对象
 │   ├── Tools/              # HttpFetch（SSRF 防护）、WebContent（格式化）
 │   └── Transport/          # cURL 传输层（含 SSE 解析、代理、超时）
 ├── autoload.php            # PSR-4 加载器（不用 Composer 时引入）
 ├── composer.json
-├── examples*.php           # 使用示例
+├── examples*.php           # 使用示例（examples_platforms.php 为多平台接入示例）
 ├── LICENSE
 ├── README.md
 └── .gitignore
@@ -1273,7 +1426,9 @@ php-ai/
 ## 已知限制
 
 - `setSessionId()` 与配置项 `rounds` 目前**只是占位**，库内部不会据此保存或拼接历史对话，多轮上下文需业务层自行维护；
-- 工具调用（`tools`）仅 Claude 协议实现，OpenAI 的 function calling 尚未接入；
+- 工具调用（`tools`）仅 Claude 协议实现，OpenAI 的 function calling 尚未接入（国产平台可用 `zhipu-anthropic` / `moonshot-anthropic` / `qwen-anthropic` / `deepseek-anthropic` 走 Claude 协议）；
+- 各平台的 `knownModels()` 常用模型清单是库内维护的静态快照，仅用于离线渲染下拉框与拉取失败兜底，最新可用模型请以 `listModels()` 的实时结果为准；
+- Azure OpenAI 只覆盖了新版 `/openai/v1` 路由，旧版「部署名 + api-version」路由需自行用 `endpoint` 配置完整 URL；AWS Bedrock、Google Vertex AI 因需要 SigV4 / OAuth 签名，暂未内置；
 - 自定义模型的 `supports()` 能力是乐观默认值（对方接口实际支持什么库无从得知），需要准确值时用 `features` 配置项自行声明；
 - `Ai\Protocol\Gemini::convertMessages()` 未被调用——Gemini 走的是 OpenAI 兼容端点，消息直接透传；
 - `cost()` 需自行传入价格表，库不内置各平台价格；

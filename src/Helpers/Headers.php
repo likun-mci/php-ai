@@ -45,7 +45,10 @@ class Headers
             if ($value === null || $value === false) {
                 continue;
             }
-            $headers[$name] = is_scalar($value) ? (string)$value : json_encode($value);
+            // json_encode 失败（含非法 UTF-8 等）会返回 false，直接塞进请求头
+            // 会变成空值；这里退回一个可辨认的占位，避免悄悄发出残缺的头
+            $encoded = is_scalar($value) ? (string) $value : json_encode($value);
+            $headers[$name] = ($encoded === false) ? '' : $encoded;
         }
 
         return $headers;

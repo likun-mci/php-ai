@@ -472,7 +472,9 @@ class ClaudeCodeSession extends ClaudeCode
      * @param array<string, mixed> $request 请求体，必须含 subtype
      * @param bool  $wait    是否阻塞等待 CLI 回复
      * @param int   $timeout 等待上限秒数，0 表示取 turn_timeout / timeout 配置
-     * @return $this|array<string, mixed> $wait 为 true 时返回 CLI 的回复数组，否则返回 $this
+     * @return ($wait is true ? array<string, mixed> : $this)
+     *         $wait 为 true 时返回 CLI 的回复数组，否则返回 $this 以便链式调用。
+     *         写成条件返回类型而非联合类型，调用方按 true 调用时静态分析才能确定拿到的是数组
      */
     public function control(array $request, bool $wait = false, int $timeout = 0)
     {

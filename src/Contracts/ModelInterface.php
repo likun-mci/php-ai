@@ -20,7 +20,7 @@ interface ModelInterface
     
     /**
      * 获取使用的协议
-     * @return string 协议类名
+     * @return class-string<\Ai\Contracts\ProtocolInterface> 协议类的完整类名
      */
     public function getProtocol(): string;
 

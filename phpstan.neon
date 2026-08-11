@@ -8,9 +8,14 @@
 # 过程中确实抓到了几处我原本猜错的类型（如 EditExecutor::applyStrReplace()
 # 实际返回数组而非字符串），说明这一级不只是形式功夫。
 #
-# 下一级是 7（约 37 条，主要是联合类型上的成员访问）。
+# 6 → 7 这一步查的是联合类型上的成员访问，抓到了几个真会炸的边界：
+# base64_encode(file_get_contents()) 在文件读不到时返回 false，PHP 8 上直接
+# TypeError；json_encode 失败返回 false 被当字符串用；curl_exec 的 bool 分支
+# 被喂给 json_decode。这些都不是形式问题，是线上真会遇到的路径。
+#
+# 下一级是 8（严格 null 检查），届时再评估收益。
 parameters:
-    level: 6
+    level: 7
     paths:
         - src
 
@@ -21,6 +26,13 @@ parameters:
     treatPhpDocTypesAsCertain: false
 
     ignoreErrors:
+        # curl 句柄在 PHP 7.2 是 resource、8.0+ 是 CurlHandle。本库两者都要支持，
+        # 因此 buildHandle() 的返回类型如实标成联合类型；PHPStan 按 PHP 8 语义分析，
+        # 会认为 resource 分支不合法。这是跨版本兼容的必然结果，不是缺陷。
+        -
+            message: '#expects CurlHandle, CurlHandle\|resource given#'
+            path: src/Transport/CurlTransport.php
+
         # create() 是文档化的工厂方法，子类沿用同样的构造签名，new static() 是刻意为之
         -
             message: '#Unsafe usage of new static\(\)#'

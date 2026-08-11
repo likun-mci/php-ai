@@ -373,7 +373,11 @@ class Tools
             }
         }
         // 结构化结果（如图片块）无法降级为纯文本时，原样序列化，避免丢信息
-        return $text !== '' ? $text : json_encode($content, JSON_UNESCAPED_UNICODE);
+        if ($text !== '') {
+            return $text;
+        }
+        $encoded = json_encode($content, JSON_UNESCAPED_UNICODE);
+        return $encoded === false ? '' : $encoded;
     }
 
     /**

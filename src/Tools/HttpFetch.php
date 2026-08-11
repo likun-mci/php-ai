@@ -124,8 +124,8 @@ class HttpFetch
     }
 
     /** 校验协议/端口/userinfo，并确保所有解析 IP 均为公网
-     * @param string $url
-     * @return array{ok: bool, error?: string, parts?: array{scheme: string, host: string, port: int}, ip?: string}
+     * @param string $url * @return array{ok: bool, error?: string, parts?: array{scheme: string, host: string, port: int}, ip?: string}
+     * @return array{ok: true, parts: array{scheme: string, host: string, port: int}, ip: string}|array{ok: false, error: string}
      */
     protected function validateUrl($url)
     {
@@ -233,6 +233,9 @@ class HttpFetch
         $hex = bin2hex($packed);
         $last4 = substr($hex, 24);                       // 末 32 位（4 字节）
         $ipv4  = long2ip((int) hexdec($last4));
+        if ($ipv4 === false) {                           // 理论上不会发生，兜住以免返回 false
+            return null;
+        }
 
         // ::ffff:a.b.c.d / ::a.b.c.d —— 前 80 位全 0（后者要求非全零，排除 :: 与 ::1）
         if (substr($hex, 0, 20) === str_repeat('0', 20)) {
@@ -306,11 +309,13 @@ class HttpFetch
         return true;
     }
 
-    /** 单次请求：钉死已校验 IP、协议白名单、不自动跟随重定向、超限中断
+    /**
+     * 单次请求：钉死已校验 IP、协议白名单、不自动跟随重定向、超限中断
+     *
      * @param string $url
      * @param array{scheme: string, host: string, port: int} $parts
      * @param string $ip
-     * @return array{ok: bool, status?: int, error?: string, content_type?: string, body?: string, location?: string}
+     * @return array{ok: true, status: int, content_type: string, body: string, location: string}|array{ok: false, status: int, error: string}
      */
     protected function curlOnce($url, $parts, $ip)
     {

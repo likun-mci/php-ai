@@ -245,6 +245,34 @@ PHP
 @unlink($memFile);
 
 // ===============================================================
+// 二之二、附件读取失败不得炸掉整个请求
+// ===============================================================
+echo "\n=== 二之二、附件读取失败 ===\n\n";
+
+// fromPath() 构造时文件存在，读取时已被清理（临时文件被回收是真实场景）。
+// 旧实现直接把 file_get_contents() 的 false 喂给 base64_encode()，
+// PHP 8 上是 TypeError，PHP 7 上则静默编码成空串。
+$tmpFile = sys_get_temp_dir() . '/ai_attach_' . getmypid() . '.txt';
+file_put_contents($tmpFile, 'hello');
+$file = \Ai\Helpers\AIFile::fromPath($tmpFile);
+check($file->getBase64Content() === base64_encode('hello'), '正常文件能正确编码');
+
+unlink($tmpFile);
+$logged = [];
+Log::setLogger(function ($l, $m, array $c) use (&$logged) { $logged[] = $m; });
+$survived = true;
+$out = '';
+try {
+    $out = $file->getBase64Content();
+} catch (\Throwable $e) {
+    $survived = false;
+}
+Log::setLogger(null);
+check($survived, '文件在读取前消失时不抛异常/不 Fatal');
+check($out === '', '读取失败返回空串而不是垃圾数据', var_export($out, true));
+check(!empty($logged), '读取失败会记录原因，不静默吞掉');
+
+// ===============================================================
 // 三、cost() 计价
 // ===============================================================
 echo "\n=== 三、cost() 计价 ===\n\n";

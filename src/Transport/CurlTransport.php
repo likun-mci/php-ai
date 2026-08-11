@@ -11,9 +11,12 @@ class CurlTransport implements TransportInterface
 {
     /**
      * 超时时间（秒）
+     *
+     * 默认 120：推理类模型（o3 / DeepSeek-Reasoner / GLM 思考模式 / Claude 思考）
+     * 单次响应经常跑到一两分钟，60 秒会在正常场景下误杀。
      * @var int
      */
-    protected $timeout = 60;
+    protected $timeout = 120;
 
     /**
      * 连接超时时间（秒），null 表示与 $timeout 相同
@@ -82,6 +85,31 @@ class CurlTransport implements TransportInterface
     protected $lastInfo = [];
 
     /**
+     * 可重试的 HTTP 状态码：429 限流，5xx 服务端临时故障
+     * 529 是 Anthropic 的过载码，一并纳入
+     * @var array
+     */
+    protected $retryStatuses = [408, 409, 429, 500, 502, 503, 504, 529];
+
+    /**
+     * 最大重试次数（不含首次请求）。设为 0 关闭重试
+     * @var int
+     */
+    protected $maxRetries = 2;
+
+    /**
+     * 退避基数（毫秒），实际等待 = base * 2^(次数-1) + 抖动
+     * @var int
+     */
+    protected $retryBaseMs = 500;
+
+    /**
+     * 单次退避的等待上限（毫秒），避免 Retry-After 给出超长值时把进程挂死
+     * @var int
+     */
+    protected $retryMaxDelayMs = 20000;
+
+    /**
      * 发送 POST 请求
      */
     public function post(string $url, array $data, array $headers = []): array
@@ -92,10 +120,24 @@ class CurlTransport implements TransportInterface
         $this->streamLastUsage = [];
         $this->streamError = '';
 
+        // 先编码再发：json_encode 失败（最常见是内容含非 UTF-8 字节，
+        // 如从 GBK 库表里读出来的旧数据）会返回 false，直接塞给 CURLOPT_POSTFIELDS
+        // 会被当成空 body 发出去，拿到一个语义完全错误的响应且全程无报错
+        $payload = json_encode($data, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+        if ($payload === false) {
+            throw new RequestException(
+                '请求体 JSON 编码失败：' . json_last_error_msg()
+                . '（常见原因：消息内容含非 UTF-8 字节，请先转成 UTF-8）',
+                '',
+                'json_encode_failed',
+                []
+            );
+        }
+
         $ch = curl_init($url);
 
         curl_setopt($ch, CURLOPT_POST, true);
-        curl_setopt($ch, CURLOPT_POSTFIELDS, json_encode($data));
+        curl_setopt($ch, CURLOPT_POSTFIELDS, $payload);
         curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
         curl_setopt($ch, CURLOPT_TIMEOUT, $this->timeout);
         if ($this->connectTimeout !== null) {
@@ -133,18 +175,44 @@ class CurlTransport implements TransportInterface
         }
         curl_setopt($ch, CURLOPT_FORBID_REUSE, true);
 
-        // 非流式：对连接级瞬时错误（SSL eof / recv 错误 / 空响应等）自动重试，提升多轮 Agent 稳定性
-        $maxTries = ($this->streamCallback !== null) ? 1 : 3;
-        $response = false; $errno = 0; $error = '';
+        // 自动重试：连接级瞬时错误 + 可重试的 HTTP 状态码（429 限流、5xx 临时故障）。
+        // 流式请求已经把分片吐给调用方了，重试会造成重复输出，因此只发一次。
+        $maxTries = ($this->streamCallback !== null) ? 1 : ($this->maxRetries + 1);
+        $response = false; $errno = 0; $error = ''; $httpCode = 0;
+        $respHeaders = '';
+
         for ($try = 1; $try <= $maxTries; $try++) {
+            $respHeaders = '';
+            if ($maxTries > 1) {
+                // 只在需要读 Retry-After 时才收响应头
+                curl_setopt($ch, CURLOPT_HEADERFUNCTION, function ($c, $line) use (&$respHeaders) {
+                    $respHeaders .= $line;
+                    return strlen($line);
+                });
+            }
+
             $response = curl_exec($ch);
-            $errno = curl_errno($ch);
-            $error = curl_error($ch);
-            if ($response !== false) break;
-            // 35=SSL connect, 52=empty reply, 55=send error, 56=recv error(含 unexpected eof)
-            if (!in_array($errno, [35, 52, 55, 56], true) || $try >= $maxTries) break;
-            usleep(400000 * $try);
+            $errno    = curl_errno($ch);
+            $error    = curl_error($ch);
+            $info     = curl_getinfo($ch);
+            $httpCode = $info['http_code'] ?? 0;
+
+            if ($try >= $maxTries) {
+                break;
+            }
+
+            // 连接级瞬时错误：35=SSL connect, 52=empty reply, 55=send error, 56=recv error(含 unexpected eof)
+            $retryableError  = ($response === false && in_array($errno, [35, 52, 55, 56], true));
+            // 服务端明确表示「稍后再来」
+            $retryableStatus = ($response !== false && in_array((int)$httpCode, $this->retryStatuses, true));
+
+            if (!$retryableError && !$retryableStatus) {
+                break;
+            }
+
+            usleep($this->retryDelayMs($try, $respHeaders) * 1000);
         }
+
         $this->lastInfo = curl_getinfo($ch);
         $httpCode = $this->lastInfo['http_code'] ?? 0;
         if (function_exists('curl_close') && version_compare(PHP_VERSION, '8.0.0', '<')) {
@@ -193,6 +261,65 @@ class CurlTransport implements TransportInterface
 
         $decoded = json_decode($response, true);
         return $decoded ?: [];
+    }
+
+    /**
+     * 计算第 $attempt 次失败后的退避等待时长（毫秒）
+     *
+     * 优先采纳服务端 Retry-After（秒数或 HTTP 日期两种写法都支持），
+     * 没有则用指数退避 + 抖动——抖动是为了避免多个进程同时被限流后
+     * 又在同一时刻齐刷刷重试，把服务端再打垮一次。
+     *
+     * @param int    $attempt     已失败的次数，从 1 开始
+     * @param string $respHeaders 原始响应头文本
+     */
+    protected function retryDelayMs(int $attempt, string $respHeaders): int
+    {
+        if ($respHeaders !== '' && preg_match('/^retry-after:\s*(.+)$/im', $respHeaders, $m)) {
+            $value = trim($m[1]);
+            if (is_numeric($value)) {
+                $ms = (int) round((float) $value * 1000);
+            } else {
+                $ts = strtotime($value);
+                $ms = ($ts !== false) ? (int) max(0, ($ts - time()) * 1000) : 0;
+            }
+            if ($ms > 0) {
+                return min($ms, $this->retryMaxDelayMs);
+            }
+        }
+
+        $ms = $this->retryBaseMs * (1 << ($attempt - 1));   // 指数退避
+        $ms += random_int(0, (int) ($this->retryBaseMs / 2)); // 抖动
+        return min($ms, $this->retryMaxDelayMs);
+    }
+
+    /**
+     * 配置重试策略
+     *
+     * @param int      $maxRetries 最大重试次数（不含首次），0 表示关闭
+     * @param int|null $baseMs     退避基数（毫秒），null 保持不变
+     * @param int|null $maxDelayMs 单次等待上限（毫秒），null 保持不变
+     */
+    public function setRetry(int $maxRetries, ?int $baseMs = null, ?int $maxDelayMs = null): TransportInterface
+    {
+        $this->maxRetries = max(0, $maxRetries);
+        if ($baseMs !== null) {
+            $this->retryBaseMs = max(0, $baseMs);
+        }
+        if ($maxDelayMs !== null) {
+            $this->retryMaxDelayMs = max(0, $maxDelayMs);
+        }
+        return $this;
+    }
+
+    /**
+     * 自定义哪些 HTTP 状态码需要重试
+     * @param array $statuses 状态码数组，传空数组表示只重试连接级错误
+     */
+    public function setRetryStatuses(array $statuses): TransportInterface
+    {
+        $this->retryStatuses = array_values(array_map('intval', $statuses));
+        return $this;
     }
 
     /**

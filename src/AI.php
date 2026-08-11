@@ -680,6 +680,47 @@ class AI
     }
     
     /**
+     * 替换传输层
+     *
+     * 默认使用 Ai\Transport\CurlTransport。业务层可换成自己的实现来：
+     *   - 接入连接池 / HTTP 客户端（Guzzle 等）
+     *   - 单元测试里注入假传输层，不发真实请求（见 tests/）
+     *   - 统一加埋点、审计日志、企业代理策略
+     */
+    public function setTransport(TransportInterface $transport): self
+    {
+        $this->transport = $transport;
+        return $this;
+    }
+
+    /**
+     * 获取当前传输层实例
+     */
+    public function transport(): TransportInterface
+    {
+        return $this->transport;
+    }
+
+    /**
+     * 配置自动重试策略
+     *
+     * 默认对 429（限流）与 5xx（服务端临时故障）重试 2 次，指数退避 + 抖动，
+     * 服务端给了 Retry-After 时优先采纳。流式请求不重试（分片已经吐给调用方，
+     * 重试会造成重复输出）。
+     *
+     * @param int      $maxRetries 最大重试次数（不含首次），0 关闭
+     * @param int|null $baseMs     退避基数（毫秒）
+     * @param int|null $maxDelayMs 单次等待上限（毫秒）
+     */
+    public function setRetry(int $maxRetries, ?int $baseMs = null, ?int $maxDelayMs = null): self
+    {
+        if (method_exists($this->transport, 'setRetry')) {
+            $this->transport->setRetry($maxRetries, $baseMs, $maxDelayMs);
+        }
+        return $this;
+    }
+
+    /**
      * 设置超时时间
      */
     public function setTimeout(int $timeout): self

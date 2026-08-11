@@ -60,9 +60,7 @@ function replayAI(array $config, string $body, bool $stream): AI
     $ai = AI::create($config);
     $tr = new ReplayTransport();
     $tr->body = $body;
-    $p = new ReflectionProperty(AI::class, 'transport');
-    $p->setAccessible(true);
-    $p->setValue($ai, $tr);
+    $ai->setTransport($tr);          // 公开 API 注入，无需反射
     if ($stream) {
         // 注册回调，避免测试时把 SSE 直接 echo 到标准输出
         $ai->setStream(true)->setStreamCallback(function ($event) {});

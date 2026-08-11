@@ -273,7 +273,8 @@ class OpenAI implements ProtocolInterface
 
             return $models ?: $this->fallbackModels($config);
 
-        } catch (\Exception $e) {
+        } catch (\Throwable $e) {
+            // 列模型是「尽力而为」的旁路操作，任何异常都该降级到兜底清单而不是中断调用方
             \Ai\Helpers\Log::warning('拉取模型列表失败', ['protocol' => static::class, 'error' => $e->getMessage()]);
             return $this->fallbackModels($config);
         }

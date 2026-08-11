@@ -23,6 +23,11 @@ interface ModelInterface
      * @return string 协议类名
      */
     public function getProtocol(): string;
+
+    /**
+     * 获取模型的默认 API 端点，无默认端点时返回空串
+     */
+    public function getEndpoint(): string;
     
     /**
      * 检查是否支持某功能

@@ -1,0 +1,28 @@
+# 静态分析配置
+#
+# level 定在 5：这是一个 10k 行、为兼容 PHP 7.2 而不能用类型化属性的既有代码库，
+# 一上来拉到 8 只会得到几百条噪音而没人看。先在 5 上保持全绿，后续逐级往上爬——
+# 能长期维持绿灯的等级才有意义。
+parameters:
+    level: 5
+    paths:
+        - src
+
+    # 不把 phpdoc 里的类型当成铁定事实。
+    # 本库大量属性只在 @var 里标了类型（PHP 7.2 不支持类型化属性），
+    # 而运行时它们在被赋值前确实是 null，`if (!$this->model)` 这类保护是必要的。
+    # 打开这个开关后 PHPStan 才不会把这些防御性判断报成「永远为假」。
+    treatPhpDocTypesAsCertain: false
+
+    ignoreErrors:
+        # create() 是文档化的工厂方法，子类沿用同样的构造签名，new static() 是刻意为之
+        -
+            message: '#Unsafe usage of new static\(\)#'
+            path: src/Cli/ClaudeCode.php
+
+        # drainPipes() 内部会把 turnDone 置为 true（见 handleLine），
+        # PHPStan 不跟踪被调方法对属性的写入，这里是误报
+        -
+            message: '#If condition is always false#'
+            path: src/Cli/ClaudeCodeSession.php
+

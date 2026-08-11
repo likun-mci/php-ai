@@ -5,6 +5,10 @@ namespace Ai\Agent;
  * Agent 长期记忆（通用）
  *
  * 把一个 Markdown 文件当作 Agent 的持久记忆：读取后注入对话、按需追加/覆盖。
+ *
+ * 文件操作一律用 @ 抑制 warning 并显式检查返回值——这是「失败在预期内、由代码
+ * 自己处理」的正确写法。但记忆写不进去等于丢数据，所以每个失败分支都会把
+ * 真实原因写进 Ai\Helpers\Log，不做静默吞掉。
  * 类似 CLAUDE.md 的记忆机制。文件存放位置由业务层决定——库本身不认识
  * 任何具体路径（与 [[ai-editor-decouple]] 的设计原则一致）。
  *
@@ -34,9 +38,25 @@ class Memory
     public function ensure()
     {
         $dir = dirname($this->file);
-        if (!is_dir($dir)) @mkdir($dir, 0755, true);
-        if (!is_file($this->file)) @file_put_contents($this->file, '');
+        if (!is_dir($dir) && !@mkdir($dir, 0755, true) && !is_dir($dir)) {
+            // 再判一次 is_dir 是因为并发下可能已被别的进程建好，那不算失败
+            \Ai\Helpers\Log::error('记忆目录创建失败', [
+                'dir' => $dir, 'reason' => $this->lastError(),
+            ]);
+        }
+        if (!is_file($this->file) && @file_put_contents($this->file, '') === false) {
+            \Ai\Helpers\Log::error('记忆文件创建失败', [
+                'file' => $this->file, 'reason' => $this->lastError(),
+            ]);
+        }
         return $this;
+    }
+
+    /** 取最近一次 PHP 文件操作的错误描述，用于把失败原因写进日志 */
+    protected function lastError()
+    {
+        $err = error_get_last();
+        return isset($err['message']) ? $err['message'] : '未知原因';
     }
 
     /** 读取原始内容（文件不存在返回空串） */
@@ -71,7 +91,16 @@ class Memory
         $tmp = $this->file . '.tmp.' . getmypid() . '.' . mt_rand(1000, 9999);
         if (@file_put_contents($tmp, $content, LOCK_EX) === false) {
             // 临时文件写不了（目录只读等），退回直接写，至少不丢功能
-            return @file_put_contents($this->file, $content, LOCK_EX) !== false;
+            \Ai\Helpers\Log::warning('记忆临时文件写入失败，退回直接覆盖写', [
+                'tmp' => $tmp, 'reason' => $this->lastError(),
+            ]);
+            $ok = @file_put_contents($this->file, $content, LOCK_EX) !== false;
+            if (!$ok) {
+                \Ai\Helpers\Log::error('记忆写入失败', [
+                    'file' => $this->file, 'reason' => $this->lastError(),
+                ]);
+            }
+            return $ok;
         }
         // 尽量沿用原文件权限，避免 rename 后权限变成 umask 默认值
         if (is_file($this->file)) {
@@ -81,8 +110,17 @@ class Memory
             }
         }
         if (!@rename($tmp, $this->file)) {
+            \Ai\Helpers\Log::warning('记忆文件 rename 失败，退回直接覆盖写', [
+                'file' => $this->file, 'reason' => $this->lastError(),
+            ]);
             @unlink($tmp);
-            return @file_put_contents($this->file, $content, LOCK_EX) !== false;
+            $ok = @file_put_contents($this->file, $content, LOCK_EX) !== false;
+            if (!$ok) {
+                \Ai\Helpers\Log::error('记忆写入失败', [
+                    'file' => $this->file, 'reason' => $this->lastError(),
+                ]);
+            }
+            return $ok;
         }
         return true;
     }
@@ -102,10 +140,16 @@ class Memory
         $this->ensure();
         $fp = @fopen($this->file, 'a');
         if ($fp === false) {
+            \Ai\Helpers\Log::error('记忆文件无法打开，本次追加丢失', [
+                'file' => $this->file, 'reason' => $this->lastError(),
+            ]);
             return false;
         }
         // 阻塞直到拿到独占锁，避免并发交错
         if (!@flock($fp, LOCK_EX)) {
+            \Ai\Helpers\Log::error('记忆文件加锁失败，本次追加丢失', [
+                'file' => $this->file, 'reason' => $this->lastError(),
+            ]);
             @fclose($fp);
             return false;
         }
@@ -126,6 +170,11 @@ class Memory
         }
 
         $ok = @fwrite($fp, $sep . $content . "\n") !== false;
+        if (!$ok) {
+            \Ai\Helpers\Log::error('记忆追加写入失败', [
+                'file' => $this->file, 'reason' => $this->lastError(),
+            ]);
+        }
         @fflush($fp);
         @flock($fp, LOCK_UN);
         @fclose($fp);

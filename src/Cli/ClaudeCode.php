@@ -890,7 +890,7 @@ class ClaudeCode
             return '';
         }
         if (is_array($value)) {
-            $items = array_values(array_filter(array_map('strval', $value), 'strlen'));
+            $items = array_values(array_filter(array_map('strval', $value), function ($s) { return $s !== ''; }));
             if (!$items) {
                 return '';
             }
@@ -1475,7 +1475,8 @@ class ClaudeCode
     {
         try {
             $status = $this->getAuthStatus();
-        } catch (\Exception $e) {
+        } catch (\Throwable $e) {
+            // 探测登录态失败一律当作未登录，不该把异常抛给调用方
             return false;
         }
         return !empty($status['loggedIn']);
@@ -1671,7 +1672,9 @@ class ClaudeCode
             'turn_timeout' => $timeout,
         ]);
         // 仅查询信息，不产生可续接的会话记录
-        return $session->setSessionPersistence(false);
+        // 分两句写：链式返回会因父类声明的返回类型是 self 而丢掉子类类型
+        $session->setSessionPersistence(false);
+        return $session;
     }
 
     /**
@@ -1763,7 +1766,8 @@ class ClaudeCode
                 $onChunk($err, 'err');
             }
             $status = @proc_get_status($proc);
-            if ($status === false || !$status['running']) {
+            // proc_get_status() 只返回数组；保留 is_array 判断只为兼容极端环境
+            if (!is_array($status) || !$status['running']) {
                 $exitCode = is_array($status) ? (int) $status['exitcode'] : -1;
                 break;
             }

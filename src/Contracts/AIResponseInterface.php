@@ -35,4 +35,30 @@ interface AIResponseInterface
      * @return bool
      */
     public function isSuccess(): bool;
+
+    /**
+     * 模型发起的工具调用（已跨平台归一）
+     * @return array [['id'=>'调用ID','name'=>'工具名','input'=>[参数]], ...]
+     */
+    public function getToolCalls(): array;
+
+    /**
+     * 本轮是否要求调用工具
+     */
+    public function hasToolCalls(): bool;
+
+    /**
+     * 结束原因（已归一）：end_turn / tool_use / max_tokens / content_filter / refusal
+     */
+    public function getStopReason(): string;
+
+    /**
+     * 转成可回填进 messages 的 assistant 回合
+     */
+    public function toAssistantMessage(): array;
+
+    /**
+     * 失败原因（仅 chatBatch() 等不抛异常的场景会填充）
+     */
+    public function getError(): string;
 }

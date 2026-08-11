@@ -112,6 +112,82 @@ check($serialTr->calls === 2 && $r2['a']->getContent() === '串行:甲',
       '传输层不支持并发时自动降级为串行');
 
 // ===============================================================
+// 一之二、多轮上下文（rounds / 会话隔离）
+// ===============================================================
+echo "\n=== 一之二、多轮上下文 ===\n\n";
+
+/** 记录每次请求携带的 messages */
+class HistoryTransport implements TransportInterface
+{
+    public $seen = [];
+    public function post(string $u, array $d, array $h = []): array
+    {
+        $this->seen[] = $d['messages'];
+        $n = count($this->seen);
+        return ['choices' => [['message' => ['content' => "答{$n}"], 'finish_reason' => 'stop']]];
+    }
+    public function get(string $u, array $p = [], array $h = []): array { return []; }
+    public function setTimeout(int $t): TransportInterface { return $this; }
+    public function setProxy(string $p): TransportInterface { return $this; }
+    public function setStreamCallback(?callable $c): TransportInterface { return $this; }
+}
+
+// 默认 rounds=0：库完全不碰历史，与旧版本一致
+$h0 = new HistoryTransport();
+$off = AI::create(['protocol' => 'openai', 'model' => 'm', 'api_key' => 'k']);
+$off->setTransport($h0);
+$off->chat('第一问');
+$off->chat('第二问');
+check(count($h0->seen[1]) === 1, 'rounds=0（默认）不拼接历史，行为与旧版本一致',
+      '第二次携带 ' . count($h0->seen[1]) . ' 条');
+check($off->getHistory() === [], 'rounds=0 时不记录历史');
+
+// rounds>0：自动拼接
+$h1 = new HistoryTransport();
+$on = AI::create(['protocol' => 'openai', 'model' => 'm', 'api_key' => 'k', 'rounds' => 5]);
+$on->setTransport($h1);
+$on->chat('第一问');
+$on->chat('第二问');
+$on->chat('第三问');
+check(count($h1->seen[0]) === 1, '第 1 次请求只带本次提问');
+check(count($h1->seen[1]) === 3, '第 2 次请求带上「问1+答1+问2」', (string) count($h1->seen[1]));
+check(count($h1->seen[2]) === 5, '第 3 次请求带上前两轮', (string) count($h1->seen[2]));
+check(count($on->getHistory()) === 6, '历史累计 3 问 3 答', (string) count($on->getHistory()));
+
+// rounds 裁剪：只保留最近 N 轮
+$h2 = new HistoryTransport();
+$trim = AI::create(['protocol' => 'openai', 'model' => 'm', 'api_key' => 'k', 'rounds' => 2]);
+$trim->setTransport($h2);
+foreach (['问1', '问2', '问3', '问4'] as $q) { $trim->chat($q); }
+check(count($trim->getHistory()) === 4, 'rounds=2 时历史被裁到最近 2 轮（4 条）',
+      (string) count($trim->getHistory()));
+$first = $trim->getHistory()[0];
+$firstText = is_array($first['content']) ? ($first['content'][0]['text'] ?? '') : $first['content'];
+check($firstText === '问3', '裁剪后最早一条是「问3」', (string) $firstText);
+
+// 会话隔离
+$h3 = new HistoryTransport();
+$multi = AI::create(['protocol' => 'openai', 'model' => 'm', 'api_key' => 'k', 'rounds' => 5]);
+$multi->setTransport($h3);
+$multi->setSessionId('userA')->chat('A的问题');
+$multi->setSessionId('userB')->chat('B的问题');
+check(count($multi->getHistory()) === 2, 'userB 只有自己的历史', (string) count($multi->getHistory()));
+$multi->setSessionId('userA');
+check(count($multi->getHistory()) === 2, '切回 userA 历史还在');
+check(count($multi->exportHistory()) === 2, 'exportHistory 导出 2 个会话');
+
+// 导入导出往返
+$dump = $multi->exportHistory();
+$restored = AI::create(['protocol' => 'openai', 'model' => 'm', 'api_key' => 'k', 'rounds' => 5]);
+$restored->importHistory($dump)->setSessionId('userA');
+check($restored->getHistory() === $multi->getHistory(), 'export → import 往返一致');
+
+$multi->clearHistory();
+check($multi->getHistory() === [], 'clearHistory 清当前会话');
+$multi->clearHistory(true);
+check($multi->exportHistory() === [], 'clearHistory(true) 清全部会话');
+
+// ===============================================================
 // 二、Memory 并发追加
 // ===============================================================
 echo "\n=== 二、Memory 并发安全 ===\n\n";

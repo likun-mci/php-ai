@@ -107,7 +107,7 @@ class Endpoint
         }
 
         $origin = ($up['scheme'] ?? 'https') . '://' . $up['host'] . (isset($up['port']) ? ':' . $up['port'] : '');
-        $segs   = array_values(array_filter(explode('/', trim($up['path'] ?? '', '/')), 'strlen'));
+        $segs   = array_values(array_filter(explode('/', trim($up['path'] ?? '', '/')), function ($s) { return $s !== ''; }));
 
         // 剥离各协议的对话动作后缀
         $suffixes = [
@@ -152,8 +152,8 @@ class Endpoint
             $origin .= ':' . $bp['port'];
         }
 
-        $baseSegs = array_values(array_filter(explode('/', trim($bp['path'] ?? '', '/')), 'strlen'));
-        $pathSegs = array_values(array_filter(explode('/', trim($path, '/')), 'strlen'));
+        $baseSegs = array_values(array_filter(explode('/', trim($bp['path'] ?? '', '/')), function ($s) { return $s !== ''; }));
+        $pathSegs = array_values(array_filter(explode('/', trim($path, '/')), function ($s) { return $s !== ''; }));
 
         if (!$baseSegs) {
             return $origin . ($pathSegs ? '/' . implode('/', $pathSegs) : '');

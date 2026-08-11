@@ -111,10 +111,33 @@ class Agent
     {
         $toolDefs = $this->toolDefs();
 
+        // 工具调用必须走非流式：流式响应里的 tool_calls 是分片下发的，
+        // 本库尚未重组（见 AI::chat 的流式分支）。这里临时关掉，
+        // 跑完在 finally 里恢复——否则调用方本来开着的流式会被永久关掉，
+        // 后续无关的 chat() 也跟着不流式了。
+        $streamWasOn = $this->ai->isStreaming();
+        $this->ai->setStream(false);
+
+        try {
+            $this->loop($messages, $toolDefs);
+        } finally {
+            $this->ai->setStream($streamWasOn);
+        }
+    }
+
+    /**
+     * 实际的迭代循环
+     *
+     * @param array<int, array<string, mixed>> $messages
+     * @param array<int, array<string, mixed>> $toolDefs
+     * @return void
+     */
+    protected function loop(array $messages, array $toolDefs)
+    {
         for ($iter = 0; $iter < $this->maxIter; $iter++) {
             $this->fire(['type' => 'thinking', 'iter' => $iter + 1]);
             try {
-                $resp = $this->ai->setStream(false)->chat([
+                $resp = $this->ai->chat([
                     'system'   => $this->system,
                     'messages' => $messages,
                     'tools'    => $toolDefs,

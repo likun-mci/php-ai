@@ -241,6 +241,23 @@ class Claude implements ProtocolInterface
     }
 
     /**
+     * 从流式数据块中解析结束原因（已归一）
+     *
+     * Anthropic 把 stop_reason 放在 message_delta 帧的 delta 下。
+     *
+     * @param array<string, mixed> $chunk
+     * @return string|null 该帧不含结束原因时返回 null
+     */
+    public function parseStreamStopReason(array $chunk): ?string
+    {
+        $reason = $chunk['delta']['stop_reason'] ?? ($chunk['message']['stop_reason'] ?? null);
+        if ($reason === null || $reason === '') {
+            return null;
+        }
+        return \Ai\Helpers\Tools::normalizeStopReason($reason);
+    }
+
+    /**
      * 判断流式数据是否结束
      * @param array<string, mixed> $chunk
      */

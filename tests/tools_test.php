@@ -305,6 +305,39 @@ check(!empty($toolMsg) && strpos($toolMsg[0]['content'] ?? '', 'ERROR:') === 0,
       '错误信息被回填给模型，供其换个思路');
 
 // ---------------------------------------------------------------
+// 五之二、Agent 不得留下副作用
+// ---------------------------------------------------------------
+echo "\n=== 五之二、Agent 的 stream 副作用 ===\n\n";
+
+// 工具调用必须走非流式，但 Agent 只应「借用」调用方的 AI 实例，跑完还回去。
+// 否则调用方本来开着的流式会被永久关掉，后续无关的 chat() 也跟着不流式。
+$sideTr = new ScriptedTransport();
+$sideTr->responses = $scripts['openai'];
+$sideAi = AI::create(['protocol' => 'openai', 'model' => 'm', 'api_key' => 'k']);
+$sideAi->setTransport($sideTr)->setStream(true);
+
+check($sideAi->isStreaming() === true, '前置条件：调用方开着流式');
+(new Agent($sideAi))
+    ->setTools(['get_weather' => ['description' => 'x', 'input_schema' => ['type' => 'object'],
+                                  'handler' => function (array $in) { return 'ok'; }]])
+    ->onEvent(function ($e) {})
+    ->run([['role' => 'user', 'content' => 'x']]);
+check($sideAi->isStreaming() === true, 'Agent 跑完后流式状态被还原');
+
+$sentStream = false;
+foreach ($sideTr->requests as $req) {
+    if (!empty($req['stream'])) { $sentStream = true; }
+}
+check(!$sentStream, 'Agent 的请求确实以非流式发出');
+
+// 空响应/异常路径下同样要还原
+$emptyTr = new ScriptedTransport();
+$emptyAi = AI::create(['protocol' => 'openai', 'model' => 'm', 'api_key' => 'k']);
+$emptyAi->setTransport($emptyTr)->setStream(true);
+(new Agent($emptyAi))->setTools([])->onEvent(function ($e) {})->run([['role' => 'user', 'content' => 'x']]);
+check($emptyAi->isStreaming() === true, '空响应路径下同样还原');
+
+// ---------------------------------------------------------------
 // 六、全部 40 个协议都能构造出带工具的请求
 // ---------------------------------------------------------------
 echo "\n=== 六、40 个协议均可发出工具请求 ===\n\n";

@@ -1679,7 +1679,7 @@ php-ai/
 ## 已知限制
 
 - 会话历史存在内存里，进程退出即失，跨请求需用 `exportHistory()` / `importHistory()` 自行落库；
-- 工具调用仅支持**非流式**：流式响应里 OpenAI 系的 `tool_calls` 是按分片累积的，尚未做重组，`getToolCalls()` 在流式下返回空数组。Agent 内部已固定用非流式，不受影响；
+- 工具调用仅支持**非流式**：流式响应里的 `tool_calls` 是按分片下发的（OpenAI 系按 `delta.tool_calls[].index` 累积 `arguments` 字符串，Anthropic 系按 `content_block_start` + `input_json_delta` 累积），本库尚未做重组。带 `tools` 的请求若开了流式且模型真的发起了工具调用，**会抛出 `stream_tool_calls_unsupported` 异常**而不是静默返回空响应；Agent 内部固定用非流式，不受影响；
 - 流式输出只提取正文增量，推理模型的思维链（`reasoning_content` / `thinking` 块）不计入 `getContent()`，需要时从 `stream_chunk` 事件的 `raw` 字段自取；
 - 各平台的 `knownModels()` 常用模型清单是库内维护的静态快照，仅用于离线渲染下拉框与拉取失败兜底，最新可用模型请以 `listModels()` 的实时结果为准；
 - Azure OpenAI 只覆盖了新版 `/openai/v1` 路由，旧版「部署名 + api-version」路由需自行用 `endpoint` 配置完整 URL；AWS Bedrock、Google Vertex AI 因需要 SigV4 / OAuth 签名，暂未内置；

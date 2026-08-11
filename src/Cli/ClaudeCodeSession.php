@@ -415,8 +415,16 @@ class ClaudeCodeSession extends ClaudeCode
 
     /**
      * 切换权限模式。进程未启动时只改启动参数，已启动则同时热切换。
+     *
+     * 返回类型必须写成父类的 ClaudeCode 而不是 self：两边都写 self 时，
+     * 父类的 self 解析为 ClaudeCode、子类的解析为 ClaudeCodeSession，
+     * 属于返回类型协变——PHP 7.4 才允许，7.2 上会直接 Fatal error 导致本类无法加载。
+     * 本库声明兼容 PHP >= 7.2，因此这里保持与父类完全一致的返回类型，
+     * 由 @return static 让 IDE 与静态分析仍能推断出链式调用的实际类型。
+     *
+     * @return static
      */
-    public function setPermissionMode(string $mode): self
+    public function setPermissionMode(string $mode): ClaudeCode
     {
         parent::setPermissionMode($mode);
         if ($this->isRunning()) {

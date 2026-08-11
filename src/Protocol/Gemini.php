@@ -169,6 +169,38 @@ class Gemini implements ProtocolInterface
     }
     
     /**
+     * 从流式数据块中解析 usage（走的是 OpenAI 兼容端点，收尾帧顶层带 usage）
+     * @return array|null 该帧不含 usage 时返回 null
+     */
+    public function parseStreamUsage(array $chunk): ?array
+    {
+        if (!empty($chunk['usage']) && is_array($chunk['usage'])) {
+            return $chunk['usage'];
+        }
+        // 原生 Gemini 结构兜底
+        if (!empty($chunk['usageMetadata']) && is_array($chunk['usageMetadata'])) {
+            return $chunk['usageMetadata'];
+        }
+        return null;
+    }
+
+    /**
+     * 从流式数据块中解析平台错误
+     * @return string|null 该帧不含错误时返回 null
+     */
+    public function parseStreamError(array $chunk): ?string
+    {
+        if (!isset($chunk['error'])) {
+            return null;
+        }
+        $err = $chunk['error'];
+        if (is_array($err)) {
+            return (string)($err['message'] ?? json_encode($err, JSON_UNESCAPED_UNICODE));
+        }
+        return (string)$err;
+    }
+
+    /**
      * 判断流式数据是否结束
      */
     public function isStreamEnd(array $chunk): bool

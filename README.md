@@ -991,6 +991,33 @@ $full = $ai->chat($messages)->getContent();   // 返回值不受影响，仍是�
 
 传 `null`（`setStreamCallback(null)`）恢复默认的直接输出。
 
+### 平台兼容性：40 个协议均已覆盖
+
+「普通对话 + 流式输出 + token 统计」是每个协议的基础能力，`tests/stream_test.php`
+用各平台真实的 SSE 报文逐个回放校验，不联网、不需要 Key：
+
+```bash
+php tests/stream_test.php
+```
+
+覆盖的报文差异（都踩过坑，已在传输层统一处理）：
+
+| 差异 | 说明 |
+|------|------|
+| `data:` 后**不带空格** | SSE 规范里冒号后的空格是可选的，讯飞星火等平台就不带；只认带空格的写法会导致整个流为空 |
+| CRLF 行尾 | 部分网关/代理会改写换行符 |
+| 末尾无换行符 | 最后一帧（往往正是带 `usage` 的收尾帧）没有换行时不能被丢弃 |
+| 夹杂 `event:` / `id:` 等字段 | Anthropic 协议每帧都带 `event:`，需正确跳过 |
+| 用量分帧下发 | Anthropic 把 `input_tokens` 放在 `message_start`、`output_tokens` 放在 `message_delta`，需跨帧合并 |
+| HTTP 200 但流里报错 | MiniMax（`base_resp`）、OpenAI 系（`error`）等出错时状态码仍是 200，需抛异常而不是返回空内容 |
+
+`usage` 中的 `prompt_tokens` / `completion_tokens` / `total_tokens` 三个标准字段在所有平台一致可用
+（Anthropic 系的 `input_tokens` / `output_tokens` 已自动映射），平台特有字段原样保留。
+
+> **自定义协议**可选实现两个钩子来接入上述能力（不实现也能正常流式，只是拿不到用量/错误）：
+> `parseStreamUsage(array $chunk): ?array` 返回该帧的用量（AI 层会逐帧合并）、
+> `parseStreamError(array $chunk): ?string` 返回该帧的错误信息（非空即抛异常）。
+
 ---
 
 ## 附件（多模态）
@@ -1443,6 +1470,8 @@ php-ai/
 │   └── Transport/          # cURL 传输层（含 SSE 解析、代理、超时）
 ├── autoload.php            # PSR-4 加载器（不用 Composer 时引入）
 ├── composer.json
+├── tests/                  # 回归测试（纯 PHP，无需 PHPUnit 与网络）
+│   └── stream_test.php     # 40 个协议 × 普通对话 / 流式 / token 统计
 ├── examples*.php           # 使用示例（examples_platforms.php 为多平台接入示例）
 ├── LICENSE
 ├── README.md
@@ -1457,6 +1486,7 @@ php-ai/
 
 - `setSessionId()` 与配置项 `rounds` 目前**只是占位**，库内部不会据此保存或拼接历史对话，多轮上下文需业务层自行维护；
 - 工具调用（`tools`）仅 Claude 协议实现，OpenAI 的 function calling 尚未接入（国产平台可用 `zhipu-anthropic` / `moonshot-anthropic` / `qwen-anthropic` / `deepseek-anthropic` 走 Claude 协议）；
+- 流式输出只提取正文增量，推理模型的思维链（`reasoning_content` / `thinking` 块）不计入 `getContent()`，需要时从 `stream_chunk` 事件的 `raw` 字段自取；
 - 各平台的 `knownModels()` 常用模型清单是库内维护的静态快照，仅用于离线渲染下拉框与拉取失败兜底，最新可用模型请以 `listModels()` 的实时结果为准；
 - Azure OpenAI 只覆盖了新版 `/openai/v1` 路由，旧版「部署名 + api-version」路由需自行用 `endpoint` 配置完整 URL；AWS Bedrock、Google Vertex AI 因需要 SigV4 / OAuth 签名，暂未内置；
 - 自定义模型的 `supports()` 能力是乐观默认值（对方接口实际支持什么库无从得知），需要准确值时用 `features` 配置项自行声明；

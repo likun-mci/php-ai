@@ -67,6 +67,21 @@ class MiniMax extends OpenAI
     }
 
     /**
+     * 从流式数据块中解析平台错误
+     *
+     * 与非流式一样，MiniMax 出错时 HTTP 状态码仍是 200，错误码在 base_resp 里。
+     * @return string|null 该帧无错误时返回 null
+     */
+    public function parseStreamError(array $chunk): ?string
+    {
+        $status = $chunk['base_resp']['status_code'] ?? 0;
+        if ((int)$status !== 0) {
+            return (string)($chunk['base_resp']['status_msg'] ?? 'MiniMax request failed');
+        }
+        return parent::parseStreamError($chunk);
+    }
+
+    /**
      * 常用模型（供后台离线渲染下拉框；平台无模型列表接口或拉取失败时作为兜底）
      */
     public function knownModels(): array

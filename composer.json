@@ -77,5 +77,8 @@
         "sort-packages": true,
         "optimize-autoloader": true
     },
-    "minimum-stability": "stable"
+    "minimum-stability": "stable",
+    "scripts": {
+        "test": "php tests/stream_test.php"
+    }
 }

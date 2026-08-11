@@ -4,6 +4,7 @@ on:
   push:
     tags:
       - 'v*'
+  workflow_dispatch:        # 也可手动触发，用于补同步
 
 jobs:
   update-packagist:
@@ -11,8 +12,53 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Notify Packagist
-        uses: packagist/packagist-publish@v1
-        with:
-          username: ${{ secrets.PACKAGIST_USERNAME }}
-          api_token: ${{ secrets.PACKAGIST_API_TOKEN }}
+      # 直接打 Packagist 官方 API，不依赖第三方 action。
+      # 原先引用的 packagist/packagist-publish@v1 并不存在，workflow 在
+      # "Set up job" 阶段就失败——自 v1.0.0 起 17 次运行全挂。
+      # 好在 Packagist 自带的 GitHub 集成一直在正常同步，包本身没受影响，
+      # 但每次发版都留一个红叉，会掩盖真正的失败。
+      - name: 通知 Packagist 拉取新版本
+        env:
+          PACKAGIST_USERNAME:  ${{ secrets.PACKAGIST_USERNAME }}
+          PACKAGIST_API_TOKEN: ${{ secrets.PACKAGIST_API_TOKEN }}
+        run: |
+          set -uo pipefail
+
+          if [ -z "${PACKAGIST_USERNAME:-}" ] || [ -z "${PACKAGIST_API_TOKEN:-}" ]; then
+            echo "::notice::未配置 PACKAGIST_USERNAME / PACKAGIST_API_TOKEN，跳过主动通知。"
+            echo "Packagist 自带的 GitHub 集成通常已能自动同步；下一步的校验会确认是否收录。"
+            exit 0
+          fi
+
+          echo "通知 Packagist 更新 ${GITHUB_REPOSITORY}（标签 ${GITHUB_REF_NAME}）"
+          code=$(curl -sS -o /tmp/pk.json -w '%{http_code}' -X POST \
+            -H 'Content-Type: application/json' \
+            "https://packagist.org/api/update-package?username=${PACKAGIST_USERNAME}&apiToken=${PACKAGIST_API_TOKEN}" \
+            -d "{\"repository\":{\"url\":\"https://github.com/${GITHUB_REPOSITORY}\"}}")
+          echo "HTTP ${code} 响应：$(cat /tmp/pk.json)"
+          if [ "$code" != "200" ] && [ "$code" != "202" ]; then
+            echo "::warning::主动通知失败（HTTP ${code}），将依赖 Packagist 自带集成；下一步校验收录情况。"
+          fi
+
+      # 真正重要的是「这个标签到底有没有被 Packagist 收录」，直接查 API 确认。
+      # 抓取是异步的，轮询一会儿再判定。
+      - name: 校验该版本已被 Packagist 收录
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          set -uo pipefail
+          pkg=$(echo "${GITHUB_REPOSITORY}" | tr '[:upper:]' '[:lower:]')
+          tag="${GITHUB_REF_NAME}"
+
+          for i in 1 2 3 4 5 6; do
+            body=$(curl -sS "https://repo.packagist.org/p2/${pkg}.json" || echo '')
+            if echo "$body" | grep -q "\"version\":\"${tag}\""; then
+              echo "✓ Packagist 已收录 ${tag}"
+              exit 0
+            fi
+            echo "第 ${i} 次未查到 ${tag}，20 秒后重试…"
+            sleep 20
+          done
+
+          echo "::warning::两分钟内 Packagist 仍未收录 ${tag}。"
+          echo "请到 https://packagist.org/packages/${pkg} 手动点 Update，"
+          echo "或检查仓库的 Packagist GitHub 集成是否仍然有效。"

@@ -148,10 +148,120 @@ class HttpFetch
         return array_values(array_unique($ips));
     }
 
-    /** 公网 = 既非私有也非保留（覆盖 127/10/172/192/169.254、::1、fc00::/7、fe80::/10 等） */
+    /**
+     * 判断是否为可安全访问的公网地址
+     *
+     * 不能只靠 filter_var 的 NO_PRIV_RANGE|NO_RES_RANGE：它有几类已知空档，
+     * 攻击者把自己域名的 A/AAAA 记录指过去即可绕过——
+     *   ::ffff:127.0.0.1        IPv4-mapped IPv6，实际连的是本机
+     *   ::ffff:169.254.169.254  同上，直达云元数据接口
+     *   64:ff9b::7f00:1         NAT64，同样映射回 IPv4
+     *   100.64.0.0/10           CGNAT 共享地址段，多家云厂商内网在用
+     * 因此先把「内嵌 IPv4 的 IPv6 形式」还原成 IPv4 再判，并显式补齐网段黑名单。
+     */
     protected function isPublicIp($ip)
     {
-        return (bool) filter_var($ip, FILTER_VALIDATE_IP, FILTER_FLAG_NO_PRIV_RANGE | FILTER_FLAG_NO_RES_RANGE);
+        $ip = trim((string) $ip, '[]');
+        if (!filter_var($ip, FILTER_VALIDATE_IP)) {
+            return false;
+        }
+
+        // IPv6 里内嵌 IPv4 的几种写法，统一还原成 IPv4 后按 IPv4 规则判定
+        $embedded = $this->extractEmbeddedIpv4($ip);
+        if ($embedded !== null) {
+            return $this->isPublicIpv4($embedded);
+        }
+
+        if (filter_var($ip, FILTER_VALIDATE_IP, FILTER_FLAG_IPV4)) {
+            return $this->isPublicIpv4($ip);
+        }
+        return $this->isPublicIpv6($ip);
+    }
+
+    /**
+     * 取出 IPv6 地址里内嵌的 IPv4
+     * 覆盖 ::ffff:a.b.c.d（IPv4-mapped）、::a.b.c.d（IPv4-compatible，已废弃但仍可路由）
+     * 与 64:ff9b::/96、64:ff9b:1::/48（NAT64）
+     * @return string|null 不含内嵌 IPv4 时返回 null
+     */
+    protected function extractEmbeddedIpv4($ip)
+    {
+        if (!filter_var($ip, FILTER_VALIDATE_IP, FILTER_FLAG_IPV6)) {
+            return null;
+        }
+        $packed = @inet_pton($ip);
+        if ($packed === false || strlen($packed) !== 16) {
+            return null;
+        }
+
+        $hex = bin2hex($packed);
+        $last4 = substr($hex, 24);                       // 末 32 位（4 字节）
+        $ipv4  = long2ip((int) hexdec($last4));
+
+        // ::ffff:a.b.c.d / ::a.b.c.d —— 前 80 位全 0（后者要求非全零，排除 :: 与 ::1）
+        if (substr($hex, 0, 20) === str_repeat('0', 20)) {
+            $marker = substr($hex, 20, 4);
+            if ($marker === 'ffff' || ($marker === '0000' && $last4 !== '00000000' && $last4 !== '00000001')) {
+                return $ipv4;
+            }
+        }
+        // NAT64：64:ff9b::/96 与 64:ff9b:1::/48
+        if (strpos($hex, '0064ff9b') === 0) {
+            return $ipv4;
+        }
+        return null;
+    }
+
+    /** IPv4 是否公网：filter_var 之外补齐 CGNAT 与其它保留段 */
+    protected function isPublicIpv4($ip)
+    {
+        if (!filter_var($ip, FILTER_VALIDATE_IP, FILTER_FLAG_IPV4 | FILTER_FLAG_NO_PRIV_RANGE | FILTER_FLAG_NO_RES_RANGE)) {
+            return false;
+        }
+        $long = ip2long($ip);
+        if ($long === false) {
+            return false;
+        }
+        // filter_var 未覆盖的保留段
+        $blocked = [
+            ['100.64.0.0',  10],   // CGNAT / 共享地址空间，云厂商内网常用
+            ['192.0.0.0',   24],   // IETF 协议专用
+            ['192.0.2.0',   24],   // TEST-NET-1
+            ['198.18.0.0',  15],   // 基准测试
+            ['198.51.100.0', 24],  // TEST-NET-2
+            ['203.0.113.0', 24],   // TEST-NET-3
+            ['224.0.0.0',    4],   // 组播
+            ['240.0.0.0',    4],   // 保留（含 255.255.255.255）
+        ];
+        foreach ($blocked as [$net, $bits]) {
+            $mask = -1 << (32 - $bits);
+            if ((ip2long($net) & $mask) === ($long & $mask)) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    /** IPv6 是否公网：只放行全球单播 2000::/3，其余（含 ULA/链路本地/回环/未指定）一律拒绝 */
+    protected function isPublicIpv6($ip)
+    {
+        $packed = @inet_pton($ip);
+        if ($packed === false || strlen($packed) !== 16) {
+            return false;
+        }
+        // 白名单式判定：2000::/3 之外的 IPv6 都不是公网可路由的全球单播地址
+        $firstByte = ord($packed[0]);
+        if (($firstByte & 0xE0) !== 0x20) {
+            return false;
+        }
+        // 2000::/3 内部仍有几段不应访问：文档用地址与已退回 IANA 的 6bone
+        $hex = bin2hex($packed);
+        foreach (['20010db8', '3ffe'] as $prefix) {   // 2001:db8::/32、3ffe::/16
+            if (strpos($hex, $prefix) === 0) {
+                return false;
+            }
+        }
+        return true;
     }
 
     /** 单次请求：钉死已校验 IP、协议白名单、不自动跟随重定向、超限中断 */
@@ -181,7 +291,16 @@ class HttpFetch
             curl_setopt($ch, CURLOPT_REDIR_PROTOCOLS, CURLPROTO_HTTP | CURLPROTO_HTTPS);
         }
         // IP 钉死，curl 不再重新解析（防 DNS rebinding）
-        curl_setopt($ch, CURLOPT_RESOLVE, [$parts['host'] . ':' . $parts['port'] . ':' . $ip]);
+        // CURLOPT_RESOLVE 的格式是 HOST:PORT:ADDRESS；HOST 与 ADDRESS 若是 IPv6
+        // 都必须带方括号，否则冒号会和分隔符混淆，导致这条 RESOLVE 静默失效、
+        // curl 退回自行解析——DNS rebinding 防线也就跟着失效了
+        $resolveHost = filter_var($parts['host'], FILTER_VALIDATE_IP, FILTER_FLAG_IPV6)
+            ? '[' . $parts['host'] . ']'
+            : $parts['host'];
+        $resolveAddr = filter_var($ip, FILTER_VALIDATE_IP, FILTER_FLAG_IPV6)
+            ? '[' . $ip . ']'
+            : $ip;
+        curl_setopt($ch, CURLOPT_RESOLVE, [$resolveHost . ':' . $parts['port'] . ':' . $resolveAddr]);
 
         curl_setopt($ch, CURLOPT_HEADERFUNCTION, function ($c, $line) use (&$headerData) {
             $headerData .= $line;

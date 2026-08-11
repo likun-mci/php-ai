@@ -1711,6 +1711,137 @@ php-ai/
 
 ---
 
+## 扩展能力：图像 / 语音 / 视频 / 向量
+
+> **v1.14.0 交付的是骨架，不是能力本身。**
+> 这一版把入口、响应对象、异步任务、传输层的二进制与表单支持都铺好了，
+> 但**还没有任何平台声明支持这些能力**——调用它们会抛
+> `UnsupportedCapabilityException` 并说明原因，不会静默返回空结果。
+> 各能力按 v1.15.0（向量）→ v1.16.0（文生图）→ v1.17.0（语音）
+> → v1.18.0（WebSocket）→ v1.19.0（视频）逐版交付。
+>
+> 对话（`chat()`）功能完全不受影响，本版对已有接口没有任何行为改动。
+
+### 入口
+
+对话之外的能力都走子门面，与 `chat()` 共享同一份配置：
+`setProxy()` / `setRetry()` / `setTimeout()` / `setLogger()` 配一次，各能力自动生效。
+
+```php
+$ai = new AI(['api_key' => '...', 'model' => '...']);
+
+$ai->embeddings();   // 文本向量化
+$ai->images();       // 图像生成
+$ai->audio();        // 语音合成 / 识别（HTTP）
+$ai->video();        // 视频生成（异步任务）
+$ai->realtime();     // WebSocket 通道，默认关闭
+```
+
+### 先判断再调用
+
+```php
+use Ai\Helpers\Capabilities;
+
+if ($ai->supports(Capabilities::IMAGE)) {
+    $img = $ai->images()->generate('一只在看书的猫', ['size' => '1024x1024']);
+    $paths = $img->saveTo('/var/www/uploads');   // 返回实际写入的绝对路径
+}
+
+$ai->capabilities();   // 当前模型支持的能力清单，如 ['embedding', 'image']
+```
+
+不判断直接调也可以，不支持时会抛出带原因的异常，而不是返回空值让你猜：
+
+```
+当前模型使用的协议不支持「图像生成」能力。本协议目前只支持对话（chat）
+```
+
+### 异步任务：视频生成不要阻塞等待
+
+视频接口全都是「提交 → 轮询 → 取结果」三段式，一次生成动辄几分钟。
+所以 `generate()` **返回任务而不是结果，立即返回**：
+
+```php
+// Web 请求里：提交完存库就结束，不占着 PHP-FPM worker
+$task = $ai->video()->generate('日落的海边');
+$db->save(['task' => json_encode($task->toArray())]);
+
+// 定时任务 / 队列 worker 里：恢复后继续查
+$task = Ai\Task\AsyncTask::fromArray(json_decode($row['task'], true), $ai);
+if ($task->refresh()->isSucceeded()) {
+    $task->getResult()->saveTo('/var/www/videos/x.mp4');
+}
+```
+
+`wait()` 是阻塞版本，**只适合 CLI 脚本和队列 worker**，不要放进 Web 请求。
+它超时后**不抛异常**——任务在平台侧还在跑，抛异常会诱导调用方当失败处理，
+白丢一次已经付费的生成：
+
+```php
+$task->wait(300);              // 最多等 5 分钟
+if ($task->isTimeout()) {
+    echo $task->getMessage();  // 「任务仍在平台侧处理中……请保存 task_id 稍后再查」
+    // isDone() 仍为 false，所以 if ($task->isDone()) 的写法天然不会误判
+}
+```
+
+### 媒体结果要及时落地
+
+多数平台返回的图片/视频 URL **有效期只有几小时到 24 小时**，
+只把 URL 存进库，第二天就会全部失效。用 `saveTo()` 及时取回：
+
+```php
+$img->saveTo('/var/www/uploads');          // 图片，返回路径数组
+$audio->saveTo('/tmp/hello.mp3');          // 音频
+$video->saveTo('/var/www/v.mp4');          // 视频，默认上限 64MB
+```
+
+下载走库内带 SSRF 防护的抓取器（IP 钉死、逐跳重校验），不是裸 `file_get_contents()`。
+目标目录**必须已存在**——库不会自动创建，避免路径写错时在磁盘上散落一堆空目录。
+
+### WebSocket 通道默认关闭
+
+讯飞等平台的语音能力只提供 WebSocket。本库会集成（v1.18.0），
+但**必须显式启用**，因为 WS 是长连接，超时与错误语义都和普通 HTTP 请求不同：
+
+```php
+$ai->realtime()->useWebSocket()->speech('你好世界');
+```
+
+不启用直接调用会得到明确提示，而不是含糊的连接失败。
+
+### 自定义网关
+
+把 `base_url` 指向自建网关或中转服务时，图像/语音端点会**自动跟着走同一个网关**，
+不会回落到官方地址（那意味着把数据发到你没指定的服务器上）。
+需要单独指定某个能力的完整地址时，用 `<能力名>_endpoint` 配置项：
+
+```php
+$ai = new AI([
+    'api_key'        => '...',
+    'base_url'       => 'https://my-gateway.com/v1',
+    'image_endpoint' => 'https://another-host.com/v1/images/generations',  // 可选
+]);
+```
+
+### 给自定义协议类的迁移说明
+
+`ProtocolInterface` 在 v1.14.0 新增了 4 个能力方法。
+
+- **继承内置协议的（`extends OpenAI` / `extends Claude` 等）：无需任何改动。**
+  README「扩展开发」一节教的就是这种写法，库内 38 个厂商协议类也都是这么写的。
+- **裸实现接口的（`implements ProtocolInterface`）：加一行即可。**
+
+```php
+class MyProtocol implements ProtocolInterface
+{
+    use \Ai\Protocol\Concerns\CapabilityDefaults;   // ← 只需加这一行
+    // ……原有 6 个方法一字不用改……
+}
+```
+
+---
+
 ## 已知限制
 
 - 会话历史存在内存里，进程退出即失，跨请求需用 `exportHistory()` / `importHistory()` 自行落库；
@@ -1723,6 +1854,9 @@ php-ai/
 - `chatBatch()` 并发批量不支持流式，也不走 `setAttachments()`（附件请写在各自 payload 里）；
 - `cost()` 需自行传入价格表，库不内置各平台价格（价格变动频繁，内置必然过期）；
 - `Ai\Cli\ClaudeCode` 依赖本机已安装 claude 程序；`proc_open` / `shell_exec` 被禁用的受限 PHP 环境需改用自定义执行器（如 SSH/SFTP）。
+- 图像 / 语音 / 视频 / 向量能力目前**只有骨架**：入口、响应对象、异步任务与传输层支持已就位，但尚无平台声明支持，调用会抛 `UnsupportedCapabilityException`。各能力按 v1.15.0 起逐版交付；
+- WebSocket 通道（讯飞语音）计划在 v1.18.0 交付，当前调用 `realtime()->useWebSocket()` 后会明确提示尚未实现；
+- 视频生成一律异步，`AsyncTask::wait()` 会阻塞，不可在 Web 请求中使用；跨请求恢复需自行把 `toArray()` 的结果落库。
 
 ---
 

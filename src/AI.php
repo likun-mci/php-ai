@@ -180,6 +180,16 @@ class AI
     }
 
     /**
+     * 扩展能力子门面的实例缓存
+     *
+     * 必须缓存：RealtimeFacade 上的通道选择（useWebSocket）是有状态的，
+     * 每次调用都新建一个门面会让这个选择在下一次调用时凭空消失
+     *
+     * @var array<string, \Ai\Facade\BaseFacade>
+     */
+    protected $facades = [];
+
+    /**
      * 模型名称到类名的映射表
      * @var array<string, class-string<ModelInterface>>
      */
@@ -1363,6 +1373,143 @@ class AI
             $config['__models_raw'] = true;
         }
         return $this->protocol->listModels($config, $this->transport);
+    }
+
+
+    // =================================================================
+    // 扩展能力入口（图像 / 语音 / 视频 / 向量 / 实时通道）
+    //
+    // AI 类只提供入口，具体逻辑在 Facade\ 下。这样后续新增能力时
+    // 本文件不再变动，改动面始终限制在新文件里
+    // =================================================================
+
+    /**
+     * 图像生成
+     *
+     * ```php
+     * $ai->images()->generate('一只在看书的猫', ['size' => '1024x1024']);
+     * ```
+     */
+    public function images(): \Ai\Facade\ImageFacade
+    {
+        /** @var \Ai\Facade\ImageFacade $facade */
+        $facade = $this->facade('images', 'Ai\\Facade\\ImageFacade');
+        return $facade;
+    }
+
+    /**
+     * 语音合成与识别（HTTP 通道）
+     *
+     * ```php
+     * $ai->audio()->speech('你好世界')->saveTo('/tmp/hello.mp3');
+     * $ai->audio()->transcribe('/tmp/record.wav')->getText();
+     * ```
+     */
+    public function audio(): \Ai\Facade\AudioFacade
+    {
+        /** @var \Ai\Facade\AudioFacade $facade */
+        $facade = $this->facade('audio', 'Ai\\Facade\\AudioFacade');
+        return $facade;
+    }
+
+    /**
+     * 视频生成（异步任务）
+     *
+     * ```php
+     * $task = $ai->video()->generate('日落的海边');   // 立即返回，不阻塞
+     * ```
+     */
+    public function video(): \Ai\Facade\VideoFacade
+    {
+        /** @var \Ai\Facade\VideoFacade $facade */
+        $facade = $this->facade('video', 'Ai\\Facade\\VideoFacade');
+        return $facade;
+    }
+
+    /**
+     * 文本向量化
+     *
+     * ```php
+     * $ai->embeddings()->create(['文本一', '文本二'])->getVector(0);
+     * ```
+     */
+    public function embeddings(): \Ai\Facade\EmbeddingFacade
+    {
+        /** @var \Ai\Facade\EmbeddingFacade $facade */
+        $facade = $this->facade('embeddings', 'Ai\\Facade\\EmbeddingFacade');
+        return $facade;
+    }
+
+    /**
+     * 实时通道（WebSocket），默认关闭，需显式 useWebSocket() 启用
+     *
+     * ```php
+     * $ai->realtime()->useWebSocket()->speech('你好世界');
+     * ```
+     */
+    public function realtime(): \Ai\Facade\RealtimeFacade
+    {
+        /** @var \Ai\Facade\RealtimeFacade $facade */
+        $facade = $this->facade('realtime', 'Ai\\Facade\\RealtimeFacade');
+        return $facade;
+    }
+
+    /**
+     * 取（或创建）子门面实例
+     *
+     * @param string $key   缓存键
+     * @param class-string<\Ai\Facade\BaseFacade> $class
+     */
+    protected function facade(string $key, string $class): \Ai\Facade\BaseFacade
+    {
+        if (!isset($this->facades[$key])) {
+            $this->facades[$key] = new $class($this);
+        }
+        return $this->facades[$key];
+    }
+
+    /**
+     * 当前协议实例，未设置模型时为 null
+     *
+     * 供子门面与 AsyncTask 取用。只读，不提供 setter——协议由模型决定
+     */
+    public function protocolInstance(): ?ProtocolInterface
+    {
+        return $this->protocol;
+    }
+
+    /**
+     * 当前配置的只读副本
+     *
+     * @return array<string, mixed>
+     */
+    public function getConfig(): array
+    {
+        return $this->config;
+    }
+
+    /**
+     * 当前模型支持的扩展能力
+     *
+     * 用于在调用前判断，避免直接撞异常：
+     *
+     * ```php
+     * if ($ai->supports(\Ai\Helpers\Capabilities::IMAGE)) { ... }
+     * ```
+     *
+     * @return array<int, string>
+     */
+    public function capabilities(): array
+    {
+        return $this->protocol !== null ? $this->protocol->capabilities() : [];
+    }
+
+    /**
+     * 当前模型是否支持某项扩展能力
+     */
+    public function supports(string $capability): bool
+    {
+        return in_array($capability, $this->capabilities(), true);
     }
 
 }

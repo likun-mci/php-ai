@@ -10,6 +10,8 @@ use Ai\Response\AIResponse;
  */
 class Gemini implements ProtocolInterface
 {
+    use \Ai\Protocol\Concerns\CapabilityDefaults;
+
     use ModelCatalog;
 
     /**

@@ -10,6 +10,8 @@ use Ai\Response\AIResponse;
  */
 class Claude implements ProtocolInterface
 {
+    use \Ai\Protocol\Concerns\CapabilityDefaults;
+
     use ModelCatalog;
 
     /**

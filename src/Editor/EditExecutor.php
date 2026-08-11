@@ -15,8 +15,14 @@ namespace Ai\Editor;
  */
 class EditExecutor
 {
+    /**
+     * @var string 沙箱根目录绝对路径
+     */
     protected $rootDir;
 
+    /**
+     * @param string $rootDir
+     */
     public function __construct($rootDir)
     {
         $this->rootDir = rtrim(str_replace('\\', '/', (string) $rootDir), '/') . '/';
@@ -26,6 +32,7 @@ class EditExecutor
      * 解析 target_file（相对沙箱根的路径）为绝对路径，并强制限制在沙箱根内
      * @return string 绝对路径
      * @throws \InvalidArgumentException 非法/越界路径
+     * @param string $targetFile 沙箱内的相对路径
      */
     public function resolveAbsolute($targetFile)
     {
@@ -60,7 +67,8 @@ class EditExecutor
 
     /**
      * 计算某动作作用于给定内容后的结果（不写盘）
-     * @return array ['op'=>'write|create|delete', 'content'=>?string, 'error'=>string]
+     * @return array{op: string, content: string|null, error: string} ['op'=>'write|create|delete', 'content'=>?string, 'error'=>string]
+     * @param string $content
      */
     public function computeContent($content, EditAction $a)
     {
@@ -85,9 +93,16 @@ class EditExecutor
         }
     }
 
-    /** 统一换行为 \n，消除 \r\n / \r 导致的匹配失败 */
+    /** 统一换行为 \n，消除 \r\n / \r 导致的匹配失败
+     * @param mixed $s
+     * @return string 统一为 \n 换行
+     */
     public static function nl($s) { return str_replace(["\r\n", "\r"], "\n", (string) $s); }
 
+    /**
+     * @param string $content * @return string
+     * @return array{op: string, content: string|null, error: string}
+     */
     protected function applyStrReplace($content, EditAction $a)
     {
         // 按 \n 规范化后匹配：模型几乎总是用 \n，而文件可能是 \r\n
@@ -107,6 +122,10 @@ class EditExecutor
         return ['op' => 'write', 'content' => $result, 'error' => ''];
     }
 
+    /**
+     * @param string $content * @return string
+     * @return array{op: string, content: string|null, error: string}
+     */
     protected function applyReplaceRange($content, EditAction $a)
     {
         $content = self::nl($content);
@@ -120,6 +139,12 @@ class EditExecutor
         return ['op' => 'write', 'content' => $result, 'error' => ''];
     }
 
+    /**
+     * @param string $haystack
+     * @param string $needle
+     * @param string $replace
+     * @return string
+     */
     protected static function str_replace_first($haystack, $needle, $replace)
     {
         $pos = strpos($haystack, $needle);

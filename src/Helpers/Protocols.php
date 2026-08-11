@@ -23,7 +23,9 @@ use Ai\Exceptions\ConfigException;
  */
 class Protocols
 {
-    /** 协议表：标识 => [类名, 显示名, 平台显示名, 平台键, 分组, 文档地址] */
+    /** 协议表：标识 => [类名, 显示名, 平台显示名, 平台键, 分组, 文档地址]
+     * @var array<string, array<string, string>>
+     */
     protected static $map = [
         'openai' => [
             'class'    => 'Ai\\Protocol\\OpenAI',
@@ -347,7 +349,9 @@ class Protocols
         ],
     ];
 
-    /** 协议标识别名 */
+    /** 协议标识别名
+     * @var array<string, string>
+     */
     protected static $alias = [
         'oai'                 => 'openai',
         'openai-compatible'   => 'openai',
@@ -447,6 +451,7 @@ class Protocols
     /**
      * 由模型名称推断协议标识的正则（顺序敏感）
      * 命中后同时决定「未配置接口地址时」使用哪个官方地址
+     * @var array<string, string>
      */
     protected static $detect = [
         'openai'     => '/^(gpt|chatgpt|o[1-9]|text-davinci|dall-e|omni)/i',
@@ -474,7 +479,7 @@ class Protocols
 
     /**
      * 列举内置协议（用于后台下拉框）
-     * @return array ['openai' => 'OpenAI 兼容（Chat Completions）', ...]
+     * @return array<mixed> ['openai' => 'OpenAI 兼容（Chat Completions）', ...]
      */
     public static function all(): array
     {
@@ -623,7 +628,7 @@ class Protocols
     /**
      * 按分组列举内置协议（用于后台下拉框分组渲染）
      *
-     * @return array ['中国大陆' => ['deepseek' => 'DeepSeek 深度求索（OpenAI 兼容）', ...], ...]
+     * @return array<mixed> ['中国大陆' => ['deepseek' => 'DeepSeek 深度求索（OpenAI 兼容）', ...], ...]
      */
     public static function grouped(): array
     {
@@ -649,7 +654,7 @@ class Protocols
      *
      * 多个协议共用一个平台时（如 zhipu 与 zhipu-anthropic）只出现一次。
      *
-     * @return array ['deepseek' => 'DeepSeek 深度求索', 'qwen' => '阿里云百炼（通义千问）', ...]
+     * @return array<mixed> ['deepseek' => 'DeepSeek 深度求索', 'qwen' => '阿里云百炼（通义千问）', ...]
      */
     public static function platforms(): array
     {
@@ -695,7 +700,7 @@ class Protocols
      *
      * 例：platformProtocols('zhipu') => ['zhipu', 'zhipu-anthropic']
      *
-     * @return array 协议标识数组
+     * @return array<mixed> 协议标识数组
      */
     public static function platformProtocols(string $platform): array
     {
@@ -713,7 +718,7 @@ class Protocols
      * 协议内置的常用模型清单（不发请求，供后台离线渲染下拉框）
      *
      * @param string $protocol 协议标识或协议类名
-     * @return array ['模型 id' => '显示名']，协议未提供清单时返回空数组
+     * @return array<mixed> ['模型 id' => '显示名']，协议未提供清单时返回空数组
      */
     public static function modelsOf(string $protocol): array
     {

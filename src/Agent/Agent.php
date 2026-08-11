@@ -36,10 +36,25 @@ class Agent
 {
     /** @var AI */
     protected $ai;
+    /**
+     * @var array<string, array<string, mixed>>
+     */
     protected $tools = [];
+    /**
+     * @var string
+     */
     protected $system = '';
+    /**
+     * @var callable|null
+     */
     protected $emit = null;
+    /**
+     * @var int
+     */
     protected $maxIter = 25;
+    /**
+     * @var string
+     */
     protected $lastText = '';
 
     public function __construct(AI $ai)
@@ -47,13 +62,33 @@ class Agent
         $this->ai = $ai;
     }
 
+    /**
+     * @param mixed $system
+     * @return $this
+     */
     public function setSystem($system) { $this->system = (string) $system; return $this; }
+    /**
+     * @param array<string, array{description?: string, input_schema?: array<mixed>, handler?: callable}> $tools
+     * @return $this
+     */
     public function setTools(array $tools) { $this->tools = $tools; return $this; }
+    /**
+     * @return $this
+     */
     public function onEvent(callable $emit) { $this->emit = $emit; return $this; }
+    /**
+     * @param mixed $n
+     * @return $this
+     */
     public function setMaxIter($n) { $this->maxIter = max(1, (int) $n); return $this; }
+    /**
+     * @return string
+     */
     public function lastText() { return $this->lastText; }
 
-    /** Anthropic tools 定义（去掉 handler） */
+    /** Anthropic tools 定义（去掉 handler）
+     * @return array<int, array<string, mixed>>
+     */
     protected function toolDefs()
     {
         $defs = [];
@@ -69,7 +104,8 @@ class Agent
 
     /**
      * 运行循环
-     * @param array $messages 初始消息（通常 [['role'=>'user','content'=>...]]）
+     * @param array<mixed> $messages 初始消息（通常 [['role'=>'user','content'=>...]]）
+     * @return void
      */
     public function run(array $messages)
     {
@@ -147,6 +183,10 @@ class Agent
         $this->fire(['type' => 'error', 'message' => '已达最大迭代步数（' . $this->maxIter . '）']);
     }
 
+    /**
+     * @param array<mixed> $event
+     * @return void
+     */
     protected function fire(array $event)
     {
         if ($this->emit) call_user_func($this->emit, $event);

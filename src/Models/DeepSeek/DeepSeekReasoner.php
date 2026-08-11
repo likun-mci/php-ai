@@ -12,7 +12,13 @@ class DeepSeekReasoner extends BaseModel
     protected $platform = 'deepseek';
     protected $protocol = 'Ai\\Protocol\\DeepSeek';
     protected $endpoint = 'https://api.deepseek.com/v1/chat/completions';
+    /**
+     * @var array<mixed>
+     */
     protected $features = ['chat', 'stream'];
+    /**
+     * @var array<mixed>
+     */
     protected $config = [
         'max_tokens' => 1024*256,
         'temperature' => 1.0,
@@ -21,6 +27,9 @@ class DeepSeekReasoner extends BaseModel
     /**
      * 处理附件
      * DeepSeek Reasoner 不支持多模态输入，将附件信息以JSON格式附加到消息文本中
+     * @param array<mixed> $attachments
+     * @param array<mixed> $payload
+     * @return array<mixed>
      */
     public function processAttachments(array $payload, array $attachments): array
     {

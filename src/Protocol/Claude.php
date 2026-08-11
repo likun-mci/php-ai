@@ -12,10 +12,14 @@ class Claude implements ProtocolInterface
 {
     use ModelCatalog;
 
+    /**
+     * @var array<string, mixed>
+     */
     protected $config = [];
     
     /**
      * 设置配置
+     * @param array<string, mixed> $config
      */
     public function setConfig(array $config): self
     {
@@ -49,6 +53,7 @@ class Claude implements ProtocolInterface
 
     /**
      * 透传白名单：buildRequest 放行的 Anthropic Messages 参数
+     * @var string[]
      */
     protected static $passthroughKeys = [
         'max_tokens', 'temperature', 'top_p', 'top_k', 'stop_sequences',
@@ -57,6 +62,8 @@ class Claude implements ProtocolInterface
 
     /**
      * 构建请求数据
+     * @param array<string, mixed> $payload 已合并的请求负载
+     * @return array<string, mixed> 发给平台的请求体
      */
     public function buildRequest(array $payload): array
     {
@@ -93,6 +100,8 @@ class Claude implements ProtocolInterface
     
     /**
      * 转换消息格式
+     * @param array<int, array<string, mixed>> $messages
+     * @return array<int, array<string, mixed>>
      */
     protected function convertMessages(array $messages): array
     {
@@ -112,6 +121,7 @@ class Claude implements ProtocolInterface
     
     /**
      * 解析响应数据
+     * @param array<string, mixed> $response 平台返回的原始数据
      */
     public function parseResponse(array $response): AIResponseInterface
     {
@@ -154,6 +164,8 @@ class Claude implements ProtocolInterface
     
     /**
      * 构建请求头
+     * @param array<string, mixed> $config
+     * @return array<string, string> 请求头名 => 值
      */
     public function buildHeaders(array $config): array
     {
@@ -173,6 +185,7 @@ class Claude implements ProtocolInterface
     /**
      * 解析流式数据块
      * Claude 格式: {"type":"content_block_delta","delta":{"type":"text_delta","text":"text"}}
+     * @param array<string, mixed> $chunk 单个 SSE 分片
      */
     public function parseStreamChunk(array $chunk): ?string
     {
@@ -197,7 +210,8 @@ class Claude implements ProtocolInterface
      *   message_start —— usage 嵌在 message 下，含 input_tokens
      *   message_delta —— usage 在顶层，只有 output_tokens
      * 只认顶层 usage 会漏掉 input_tokens，AI 层会把两帧的结果合并。
-     * @return array|null 该帧不含 usage 时返回 null
+     * @return array<mixed> 该帧不含 usage 时返回 null
+     * @param array<string, mixed> $chunk
      */
     public function parseStreamUsage(array $chunk): ?array
     {
@@ -212,6 +226,7 @@ class Claude implements ProtocolInterface
      * 从流式数据块中解析平台错误
      * Anthropic 的流式错误帧形如 {"type":"error","error":{"type":...,"message":...}}
      * @return string|null 该帧不含错误时返回 null
+     * @param array<string, mixed> $chunk
      */
     public function parseStreamError(array $chunk): ?string
     {
@@ -227,6 +242,7 @@ class Claude implements ProtocolInterface
 
     /**
      * 判断流式数据是否结束
+     * @param array<string, mixed> $chunk
      */
     public function isStreamEnd(array $chunk): bool
     {
@@ -237,6 +253,7 @@ class Claude implements ProtocolInterface
     /**
      * 解析模型列表端点
      * 优先级：endpoint_models > base_url > 由实际对话端点推导 > 官方地址
+     * @param array<string, mixed> $config
      */
     public function modelsEndpoint(array $config): string
     {
@@ -249,6 +266,7 @@ class Claude implements ProtocolInterface
 
     /**
      * 常用模型（供后台离线渲染下拉框；接口不可用时作为兜底）
+     * @return array<string, string> 模型 id => 显示名
      */
     public function knownModels(): array
     {
@@ -267,6 +285,9 @@ class Claude implements ProtocolInterface
      * 列举可用模型列表
      * Anthropic 已提供 GET /v1/models，第三方兼容网关不一定实现，
      * 失败时若请求的正是本协议官方域名，则回退到 knownModels()
+     * @param array<string, mixed> $config
+     * @param \Ai\Contracts\TransportInterface $transport
+     * @return array<string, mixed>|null 模型 id => 名称或完整数据
      */
     public function listModels(array $config, $transport): ?array
     {

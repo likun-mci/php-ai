@@ -51,6 +51,7 @@ class MiniMax extends OpenAI
      * MiniMax 出错时仍返回 HTTP 200，错误信息放在 base_resp 里（status_code 非 0），
      * 不特殊处理会得到一个「成功但内容为空」的响应，这里统一抛成异常，
      * 与其它平台的错误处理方式保持一致。
+     * @param array<string, mixed> $response
      */
     public function parseResponse(array $response): AIResponseInterface
     {
@@ -71,6 +72,7 @@ class MiniMax extends OpenAI
      *
      * 与非流式一样，MiniMax 出错时 HTTP 状态码仍是 200，错误码在 base_resp 里。
      * @return string|null 该帧无错误时返回 null
+     * @param array<string, mixed> $chunk
      */
     public function parseStreamError(array $chunk): ?string
     {
@@ -83,6 +85,7 @@ class MiniMax extends OpenAI
 
     /**
      * 常用模型（供后台离线渲染下拉框；平台无模型列表接口或拉取失败时作为兜底）
+     * @return array<string, string> 模型 id => 显示名
      */
     public function knownModels(): array
     {

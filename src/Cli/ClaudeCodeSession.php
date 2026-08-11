@@ -53,7 +53,9 @@ use Ai\Exceptions\ProcessException;
  */
 class ClaudeCodeSession extends ClaudeCode
 {
-    /** 默认 CLI 参数：双工 stream-json + stdio 权限回调（对齐 IDE 插件） */
+    /** 默认 CLI 参数：双工 stream-json + stdio 权限回调（对齐 IDE 插件）
+     * @var array<string, mixed>
+     */
     protected static $defaultFlags = [
         'output-format'          => 'stream-json',
         'input-format'           => 'stream-json',
@@ -68,7 +70,7 @@ class ClaudeCodeSession extends ClaudeCode
     /** @var resource|null 子进程句柄 */
     protected $proc = null;
 
-    /** @var array 子进程管道 [0=>stdin, 1=>stdout, 2=>stderr] */
+    /** @var array<int, resource> 子进程管道 [0=>stdin, 1=>stdout, 2=>stderr] */
     protected $pipes = [];
 
     /** @var string stdout 行缓冲 */
@@ -80,22 +82,22 @@ class ClaudeCodeSession extends ClaudeCode
     /** @var string 实际执行的命令 */
     protected $command = '';
 
-    /** @var array system/init 事件原文 */
+    /** @var array<string, mixed> system/init 事件原文 */
     protected $init = [];
 
-    /** @var array 本次会话可用工具名列表 */
+    /** @var string[] 本次会话可用工具名列表 */
     protected $availableTools = [];
 
     /** @var callable|null 权限决策回调 function(array $request): bool|string|array */
     protected $permissionHandler = null;
 
-    /** @var array|null 未注册回调时自动放行的工具名；null 表示全部放行 */
+    /** @var string[]|null 未注册回调时自动放行的工具名；null 表示全部放行 */
     protected $autoApproveTools = ['Read', 'Edit', 'Write', 'Grep', 'Glob'];
 
-    /** @var array 宿主发起、等待 CLI 回复的 control_request：request_id => true */
+    /** @var array<string, mixed> 宿主发起、等待 CLI 回复的 control_request：request_id => true */
     protected $pendingRequests = [];
 
-    /** @var array 宿主发起的请求收到的回复：request_id => response */
+    /** @var array<string, mixed> 宿主发起的请求收到的回复：request_id => response */
     protected $requestResults = [];
 
     /** @var bool 当前这一轮是否已收到 result 事件 */
@@ -108,7 +110,7 @@ class ClaudeCodeSession extends ClaudeCode
     protected $requestSeq = 0;
 
     /**
-     * @param array $config 除 ClaudeCode 支持的键外，额外支持：
+     * @param array<mixed> $config 除 ClaudeCode 支持的键外，额外支持：
      *                      on_permission（权限回调）、auto_approve_tools（自动放行工具名数组）、
      *                      turn_timeout（单轮超时秒数）
      */
@@ -166,6 +168,7 @@ class ClaudeCodeSession extends ClaudeCode
     /**
      * 未注册 onPermission 回调时，自动放行的工具名单（默认与 ClaudeCode 的白名单一致）。
      * 名单外的工具会被拒绝。
+     * @param array<mixed> $tools
      */
     public function setAutoApproveTools(array $tools): self
     {
@@ -324,6 +327,7 @@ class ClaudeCodeSession extends ClaudeCode
 
     /**
      * chat 别名，与 ClaudeCode::chat() 保持一致的调用习惯
+     * @param array<mixed> $options
      */
     public function chat(string $prompt, array $options = []): ClaudeCodeResponse
     {
@@ -334,7 +338,7 @@ class ClaudeCodeSession extends ClaudeCode
     /**
      * 发送任意内容块数组（可混合 text 与图片等块），阻塞直到本轮结束
      *
-     * @param array         $content 内容块数组，如 [['type'=>'text','text'=>'...']]
+     * @param array<mixed> $content 内容块数组，如 [['type'=>'text','text'=>'...']]
      * @param callable|null $onEvent 逐事件回调
      */
     public function sendMessage(array $content, $onEvent = null): ClaudeCodeResponse
@@ -407,6 +411,7 @@ class ClaudeCodeSession extends ClaudeCode
     /**
      * 中断当前正在进行的回合，等价于 IDE 插件里的"停止"按钮。
      * 通常在 send() 的事件回调中根据条件调用。
+     * @return $this
      */
     public function interrupt(): self
     {
@@ -464,10 +469,10 @@ class ClaudeCodeSession extends ClaudeCode
     /**
      * 发送一条自定义 control_request。
      *
-     * @param array $request 请求体，必须含 subtype
+     * @param array<string, mixed> $request 请求体，必须含 subtype
      * @param bool  $wait    是否阻塞等待 CLI 回复
      * @param int   $timeout 等待上限秒数，0 表示取 turn_timeout / timeout 配置
-     * @return self|array    $wait 为 true 时返回 CLI 的回复数组，否则返回 $this
+     * @return $this|array<string, mixed> $wait 为 true 时返回 CLI 的回复数组，否则返回 $this
      */
     public function control(array $request, bool $wait = false, int $timeout = 0)
     {
@@ -490,6 +495,8 @@ class ClaudeCodeSession extends ClaudeCode
     /**
      * 覆盖父类：进程已在运行时直接复用，避免为一次查询多起一个进程。
      * 这样 getUsage() 拿到的 session 花费就是本会话的真实累计值。
+     * @param array<mixed> $extra
+     * @return array<mixed>
      */
     protected function queryControl(string $subtype, array $extra = [], int $timeout = 60): array
     {
@@ -520,6 +527,7 @@ class ClaudeCodeSession extends ClaudeCode
 
     /**
      * 获取 system/init 事件原文（cwd、可用工具、MCP 服务器、斜杠命令等）
+     * @return array<mixed>
      */
     public function getInit(): array
     {
@@ -528,6 +536,7 @@ class ClaudeCodeSession extends ClaudeCode
 
     /**
      * 获取本次会话可用的工具名列表
+     * @return array<mixed>
      */
     public function getAvailableTools(): array
     {
@@ -548,6 +557,7 @@ class ClaudeCodeSession extends ClaudeCode
 
     /**
      * 本轮采集容器初始值
+     * @return array<mixed>
      */
     protected function newCollect(): array
     {
@@ -574,6 +584,7 @@ class ClaudeCodeSession extends ClaudeCode
 
     /**
      * 写一行 JSON 到子进程 stdin
+     * @param array<mixed> $message
      */
     protected function writeLine(array $message): void
     {
@@ -599,6 +610,7 @@ class ClaudeCodeSession extends ClaudeCode
 
     /**
      * 事件循环：读取输出并派发，直到本轮 result 事件到达
+     * @param array<mixed> $collect
      */
     protected function pump(callable $emit, array &$collect): void
     {
@@ -633,6 +645,7 @@ class ClaudeCodeSession extends ClaudeCode
 
     /**
      * 读取当前可读的 stdout/stderr 数据并派发，返回是否读到内容
+     * @param array<mixed> $collect
      */
     protected function drainPipes(callable $emit, array &$collect = null): bool
     {
@@ -687,6 +700,7 @@ class ClaudeCodeSession extends ClaudeCode
 
     /**
      * 覆盖父类：先处理双工模式特有的 control 消息，其余交给父类的事件分派
+     * @param array<mixed> $collect
      */
     protected function handleLine(string $line, array &$collect, callable $emit): void
     {
@@ -719,6 +733,7 @@ class ClaudeCodeSession extends ClaudeCode
 
     /**
      * 处理 CLI 发来的 control_request（主要是 can_use_tool 权限询问）
+     * @param array<mixed> $ev
      */
     protected function handleControlRequest(array $ev, callable $emit): void
     {
@@ -756,6 +771,8 @@ class ClaudeCodeSession extends ClaudeCode
 
     /**
      * 把回调返回值归一化为 CLI 要求的权限响应结构
+     * @param array<mixed> $request
+     * @return array<mixed>
      */
     protected function decidePermission(array $request): array
     {
@@ -794,6 +811,7 @@ class ClaudeCodeSession extends ClaudeCode
     /**
      * 处理 control_response：只认宿主自己发出过的 request_id，
      * 其余（--replay-user-messages 把宿主写入的响应原样回显）直接忽略
+     * @param array<mixed> $ev
      */
     protected function handleControlResponse(array $ev, callable $emit): void
     {
@@ -811,6 +829,7 @@ class ClaudeCodeSession extends ClaudeCode
      * 阻塞等待某条宿主控制请求的回复
      *
      * @param int $timeout 等待上限秒数，0 表示取 turn_timeout / timeout 配置
+     * @return array<mixed>
      */
     protected function waitControlResponse(string $requestId, int $timeout = 0): array
     {

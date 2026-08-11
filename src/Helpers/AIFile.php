@@ -6,8 +6,17 @@ namespace Ai\Helpers;
  */
 class AIFile
 {
+    /**
+     * @var string
+     */
     protected $type; // 'path' or 'url'
+    /**
+     * @var string
+     */
     protected $source;
+    /**
+     * @var string
+     */
     protected $mimeType;
     
     protected function __construct(string $type, string $source, string $mimeType = '')
@@ -78,6 +87,7 @@ class AIFile
     
     /**
      * 转为数组
+     * @return array<mixed>
      */
     public function toArray(): array
     {

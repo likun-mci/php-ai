@@ -25,11 +25,17 @@ class CustomModel extends BaseModel
     protected $platform = 'custom';
     protected $protocol = 'Ai\\Protocol\\OpenAI';
     protected $endpoint = '';
+    /**
+     * @var array<mixed>
+     */
     protected $features = ['chat', 'stream'];
+    /**
+     * @var array<mixed>
+     */
     protected $config   = [];
 
     /**
-     * @param array $options 支持的键：
+     * @param array<mixed> $options 支持的键：
      *   string name      模型名称（原样提交给接口）
      *   string protocol  协议标识或协议类名
      *   string endpoint  完整对话端点
@@ -68,6 +74,9 @@ class CustomModel extends BaseModel
     /**
      * 处理附件
      * Claude 协议用 Anthropic 的 image block，其余走 OpenAI 的 image_url（BaseModel 默认实现）
+     * @param array<mixed> $attachments
+     * @param array<mixed> $payload
+     * @return array<mixed>
      */
     public function processAttachments(array $payload, array $attachments): array
     {

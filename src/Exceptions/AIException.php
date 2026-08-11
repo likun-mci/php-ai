@@ -8,15 +8,24 @@ use Exception;
  */
 class AIException extends Exception
 {
+    /**
+     * @var string
+     */
     protected $platform;
+    /**
+     * @var string
+     */
     protected $errorCode;
+    /**
+     * @var array<mixed>
+     */
     protected $rawResponse;
     
     /**
      * @param string          $message     错误信息
      * @param string          $platform    平台标识
      * @param string          $errorCode   平台错误码或 HTTP 状态码
-     * @param array           $rawResponse 平台原始错误响应
+     * @param array<mixed> $rawResponse 平台原始错误响应
      * @param \Throwable|null $previous    原始异常。库内部把 Error 类异常
      *                                     （TypeError 等）包装成 AIException 时会带上，
      *                                     这样调用方拿到统一错误类型的同时，
@@ -53,6 +62,7 @@ class AIException extends Exception
     
     /**
      * 获取原始响应
+     * @return array<mixed>
      */
     public function getRawResponse(): array
     {

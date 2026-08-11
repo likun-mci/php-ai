@@ -26,6 +26,7 @@ class Tools
 {
     /**
      * 是否为 OpenAI 原生的工具定义（{type:'function', function:{...}}）
+     * @param array<string, mixed> $tool
      */
     public static function isOpenAiToolDef(array $tool): bool
     {
@@ -35,8 +36,8 @@ class Tools
     /**
      * 工具定义 → OpenAI 格式
      *
-     * @param array $tools 统一格式或 OpenAI 原生格式的工具定义数组
-     * @return array OpenAI 的 tools 数组
+     * @param array<int, array<string, mixed>> $tools 统一格式或 OpenAI 原生格式的工具定义数组
+     * @return array<int, array<string, mixed>> OpenAI 的 tools 数组
      */
     public static function toOpenAiDefs(array $tools): array
     {
@@ -70,8 +71,8 @@ class Tools
     /**
      * 工具定义 → Anthropic 格式
      *
-     * @param array $tools 统一格式或 OpenAI 原生格式的工具定义数组
-     * @return array Anthropic 的 tools 数组
+     * @param array<int, array<string, mixed>> $tools 统一格式或 OpenAI 原生格式的工具定义数组
+     * @return array<int, array<string, mixed>> Anthropic 的 tools 数组
      */
     public static function toClaudeDefs(array $tools): array
     {
@@ -101,6 +102,8 @@ class Tools
      *
      * Anthropic: {type:'auto'|'any'|'tool', name?}
      * OpenAI:    'auto' | 'required' | 'none' | {type:'function', function:{name}}
+     * @param mixed $choice
+     * @return mixed
      */
     public static function toOpenAiToolChoice($choice)
     {
@@ -134,8 +137,8 @@ class Tools
      *   2) user 里的 tool_result 块要拆成独立的 role:'tool' 消息，
      *      且必须紧跟在对应的 assistant 回合之后（OpenAI 会校验这个顺序）
      *
-     * @param array $messages 统一格式（或已是 OpenAI 格式）的消息数组
-     * @return array OpenAI 的 messages 数组
+     * @param array<int, array<string, mixed>> $messages 统一格式（或已是 OpenAI 格式）的消息数组
+     * @return array<int, array<string, mixed>> OpenAI 的 messages 数组
      */
     public static function toOpenAiMessages(array $messages): array
     {
@@ -222,6 +225,8 @@ class Tools
      * 反向处理 OpenAI 原生写法：role:'tool' 合并回 user 的 tool_result 块，
      * assistant.tool_calls 合并回 content 的 tool_use 块。
      * 已是统一格式时原样返回。
+     * @param array<int, array<string, mixed>> $messages
+     * @return array<int, array<string, mixed>>
      */
     public static function toClaudeMessages(array $messages): array
     {
@@ -276,7 +281,8 @@ class Tools
 
     /**
      * OpenAI 响应的 message → 统一格式的工具调用数组
-     * @return array [['id'=>..,'name'=>..,'input'=>array], ...]
+     * @return array<int, array{id: string, name: string, input: array<string, mixed>}> [['id'=>..,'name'=>..,'input'=>array], ...]
+     * @param array<string, mixed> $message
      */
     public static function fromOpenAiToolCalls(array $message): array
     {
@@ -299,7 +305,8 @@ class Tools
 
     /**
      * Anthropic 响应的 content 块数组 → 统一格式的工具调用数组
-     * @return array [['id'=>..,'name'=>..,'input'=>array], ...]
+     * @return array<int, array{id: string, name: string, input: array<string, mixed>}> [['id'=>..,'name'=>..,'input'=>array], ...]
+     * @param array<int, array<string, mixed>> $content
      */
     public static function fromClaudeContent(array $content): array
     {
@@ -321,6 +328,7 @@ class Tools
      *
      * 统一取值：end_turn（正常结束）、tool_use（要调工具）、max_tokens（长度截断）、
      * stop_sequence（命中停止词）、content_filter（被内容审核拦下）、refusal（模型拒答）
+     * @param mixed $reason
      */
     public static function normalizeStopReason($reason): string
     {
@@ -346,6 +354,7 @@ class Tools
     /**
      * 工具结果内容扁平化为字符串
      * Anthropic 允许 tool_result 的 content 是块数组，OpenAI 的 role:'tool' 只收字符串
+     * @param mixed $content
      */
     protected static function flattenToolResult($content): string
     {
@@ -369,6 +378,8 @@ class Tools
 
     /**
      * 只剩纯文本块时降级为字符串，否则保留数组（多模态附件仍需数组形式）
+     * @param array<int, array<string, mixed>> $blocks
+     * @return string|array<int, array<string, mixed>>
      */
     protected static function simplifyContent(array $blocks)
     {

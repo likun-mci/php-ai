@@ -12,7 +12,7 @@ class EditPlan
     /** @var string JSON 之外的自然语言解释 */
     public $explanation = '';
 
-    /** @var EditAction[] */
+    /** @var array<int, \Ai\Editor\EditAction> */
     public $actions = [];
 
     /** @var string 原始 AI 文本 */
@@ -21,11 +21,17 @@ class EditPlan
     /** @var string 解析/校验错误（空表示正常） */
     public $error = '';
 
+    /**
+     * @return bool
+     */
     public function hasActions()
     {
         return !empty($this->actions);
     }
 
+    /**
+     * @return array<string, mixed>
+     */
     public function toArray()
     {
         return [

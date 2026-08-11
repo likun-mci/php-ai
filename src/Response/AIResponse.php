@@ -8,15 +8,42 @@ use Ai\Contracts\AIResponseInterface;
  */
 class AIResponse implements AIResponseInterface
 {
+    /**
+     * @var string
+     */
     protected $content;
+    /**
+     * @var string
+     */
     protected $model;
+    /**
+     * @var array<string, mixed>
+     */
     protected $usage;
+    /**
+     * @var array<string, mixed>
+     */
     protected $raw;
+    /**
+     * @var bool
+     */
     protected $success;
+    /**
+     * @var array<int, array{id: string, name: string, input: array<string, mixed>}>
+     */
     protected $toolCalls;
+    /**
+     * @var string
+     */
     protected $stopReason;
+    /**
+     * @var string
+     */
     protected $error;
 
+    /**
+     * @param array<string, mixed> $data
+     */
     public function __construct(array $data)
     {
         $this->content = $data['content'] ?? '';
@@ -43,7 +70,7 @@ class AIResponse implements AIResponseInterface
     /**
      * 模型发起的工具调用（已归一，各平台格式一致）
      *
-     * @return array [['id'=>'调用ID', 'name'=>'工具名', 'input'=>[参数数组]], ...]
+     * @return array<mixed> [['id'=>'调用ID', 'name'=>'工具名', 'input'=>[参数数组]], ...]
      *               模型没有调用工具时返回空数组
      */
     public function getToolCalls(): array
@@ -75,6 +102,7 @@ class AIResponse implements AIResponseInterface
      *
      * 多轮工具调用时把模型这一轮的输出（文本 + tool_use 块）原样接回上下文，
      * 格式为库的统一格式，协议层会按目标平台改写。
+     * @return array{role: string, content: array<int, array<string, mixed>>}
      */
     public function toAssistantMessage(): array
     {
@@ -103,6 +131,7 @@ class AIResponse implements AIResponseInterface
     
     /**
      * 获取原始响应数据
+     * @return array<string, mixed>
      */
     public function getRaw(): array
     {
@@ -111,6 +140,7 @@ class AIResponse implements AIResponseInterface
     
     /**
      * 获取使用情况统计
+     * @return array<string, mixed>
      */
     public function getUsage(): array
     {
@@ -158,7 +188,7 @@ class AIResponse implements AIResponseInterface
      * `cache_read_input_tokens`）。传了 `cached` 价格时，这部分会从
      * 普通输入里扣除后单独按缓存价计算；不传则全按普通输入价算。
      *
-     * @param array $pricing ['prompt'=>输入价, 'completion'=>输出价, 'cached'=>缓存输入价]
+     * @param array<mixed> $pricing ['prompt'=>输入价, 'completion'=>输出价, 'cached'=>缓存输入价]
      * @param int   $perTokens 计价基数，**默认 1000（每千 token）**，保持与旧版本一致。
      *                         各家官网现在都按每百万标价，直接抄官网数字请用
      *                         costPerMillion()，或显式传 1000000
@@ -211,7 +241,7 @@ class AIResponse implements AIResponseInterface
      * `cache_read_input_tokens`）。传了 `cached` 价时这部分从普通输入里
      * 扣除后单独计算；不传则全按普通输入价算。
      *
-     * @param array $pricing ['prompt'=>每百万输入价, 'completion'=>每百万输出价, 'cached'=>每百万缓存输入价]
+     * @param array<mixed> $pricing ['prompt'=>每百万输入价, 'completion'=>每百万输出价, 'cached'=>每百万缓存输入价]
      */
     public function costPerMillion(array $pricing = []): float
     {
@@ -220,6 +250,7 @@ class AIResponse implements AIResponseInterface
 
     /**
      * 转为数组
+     * @return array<string, mixed>
      */
     public function toArray(): array
     {

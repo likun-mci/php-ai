@@ -12,10 +12,14 @@ class OpenAI implements ProtocolInterface
 {
     use ModelCatalog;
 
+    /**
+     * @var array<string, mixed>
+     */
     protected $config = [];
 
     /**
      * 设置配置
+     * @param array<string, mixed> $config
      */
     public function setConfig(array $config): self
     {
@@ -49,6 +53,7 @@ class OpenAI implements ProtocolInterface
 
     /**
      * 透传白名单：buildRequest 放行的 OpenAI Chat Completions 参数
+     * @var string[]
      */
     protected static $passthroughKeys = [
         'temperature', 'max_tokens', 'max_completion_tokens', 'top_p', 'top_k',
@@ -59,6 +64,8 @@ class OpenAI implements ProtocolInterface
 
     /**
      * 构建请求数据
+     * @param array<string, mixed> $payload 已合并的请求负载
+     * @return array<string, mixed> 发给平台的请求体
      */
     public function buildRequest(array $payload): array
     {
@@ -101,6 +108,7 @@ class OpenAI implements ProtocolInterface
     
     /**
      * 解析响应数据
+     * @param array<string, mixed> $response 平台返回的原始数据
      */
     public function parseResponse(array $response): AIResponseInterface
     {
@@ -139,6 +147,8 @@ class OpenAI implements ProtocolInterface
     
     /**
      * 构建请求头
+     * @param array<string, mixed> $config
+     * @return array<string, string> 请求头名 => 值
      */
     public function buildHeaders(array $config): array
     {
@@ -165,6 +175,7 @@ class OpenAI implements ProtocolInterface
     /**
      * 解析流式数据块
      * OpenAI 格式: {"choices":[{"delta":{"content":"text"}}]}
+     * @param array<string, mixed> $chunk 单个 SSE 分片
      */
     public function parseStreamChunk(array $chunk): ?string
     {
@@ -178,7 +189,8 @@ class OpenAI implements ProtocolInterface
      * 从流式数据块中解析 usage
      *
      * OpenAI 系开启 stream_options.include_usage 后，在收尾帧的顶层返回完整 usage。
-     * @return array|null 该帧不含 usage 时返回 null
+     * @return array<mixed> 该帧不含 usage 时返回 null
+     * @param array<string, mixed> $chunk
      */
     public function parseStreamUsage(array $chunk): ?array
     {
@@ -191,6 +203,7 @@ class OpenAI implements ProtocolInterface
      * 有些平台出错时 HTTP 状态码仍是 200，错误信息混在流里，
      * 不识别就会得到一个「成功但内容为空」的响应。
      * @return string|null 该帧不含错误时返回 null
+     * @param array<string, mixed> $chunk
      */
     public function parseStreamError(array $chunk): ?string
     {
@@ -206,6 +219,7 @@ class OpenAI implements ProtocolInterface
 
     /**
      * 判断流式数据是否结束
+     * @param array<string, mixed> $chunk
      */
     public function isStreamEnd(array $chunk): bool
     {
@@ -217,6 +231,7 @@ class OpenAI implements ProtocolInterface
     /**
      * 解析模型列表端点
      * 优先级：endpoint_models > base_url > 由实际对话端点推导 > 官方地址
+     * @param array<string, mixed> $config
      */
     public function modelsEndpoint(array $config): string
     {
@@ -229,6 +244,7 @@ class OpenAI implements ProtocolInterface
 
     /**
      * 常用模型（供后台离线渲染下拉框；平台无模型列表接口或拉取失败时作为兜底）
+     * @return array<string, string> 模型 id => 显示名
      */
     public function knownModels(): array
     {
@@ -250,6 +266,9 @@ class OpenAI implements ProtocolInterface
      *
      * config 中设置 '__models_raw' => true 可返回完整的模型数据对象而非仅 id。
      * 拉取失败或返回为空时，若请求的正是本协议官方域名，则回退到 knownModels()。
+     * @param array<string, mixed> $config
+     * @param \Ai\Contracts\TransportInterface $transport
+     * @return array<string, mixed>|null 模型 id => 名称或完整数据
      */
     public function listModels(array $config, $transport): ?array
     {

@@ -26,21 +26,44 @@ class EditAction
     public $reason = '';
 
     // str_replace
+    /**
+     * @var string|null
+     */
     public $oldString = null;
+    /**
+     * @var string|null
+     */
     public $newString = null;
+    /**
+     * @var bool
+     */
     public $replaceAll = false;
 
     // replace_selection / insert_* / replace_range
+    /**
+     * @var string|null
+     */
     public $replacement = null;
 
     // replace_range
+    /**
+     * @var int|null
+     */
     public $startOffset = null;
+    /**
+     * @var int|null
+     */
     public $endOffset = null;
 
     // replace_file / create_file
+    /**
+     * @var string|null
+     */
     public $content = null;
 
-    /** 全部合法动作类型 */
+    /** 全部合法动作类型
+     * @return string[] 合法的 action 取值
+     */
     public static function types()
     {
         return [
@@ -52,6 +75,8 @@ class EditAction
 
     /**
      * 从 AI 返回的数组构造（非法返回 null）
+     * @param array<string, mixed> $a * @return self
+     * @return self|null 非法输入返回 null
      */
     public static function fromArray($a)
     {
@@ -77,6 +102,7 @@ class EditAction
 
     /**
      * 基础字段合法性校验，返回错误信息（空串表示通过）
+     * @return string 校验通过返回空串，否则返回错误说明
      */
     public function validate()
     {
@@ -105,6 +131,9 @@ class EditAction
         return '';
     }
 
+    /**
+     * @return array<string, mixed>
+     */
     public function toArray()
     {
         $out = ['action' => $this->action, 'reason' => $this->reason];

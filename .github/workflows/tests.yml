@@ -65,7 +65,7 @@ jobs:
           exit $fail
 
       # 静态分析只在较新的 PHP 上跑一次即可，避免 5 个版本重复跑
-      - name: 静态分析（PHPStan level 7）
+      - name: 静态分析（PHPStan level 8）
         if: matrix.php == '8.2'
         run: vendor/bin/phpstan analyse --memory-limit=512M --no-progress
 

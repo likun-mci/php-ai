@@ -1009,7 +1009,7 @@ php tests/cli_test.php      # CLI 参数渲染与命令注入防护
 php tests/ssrf_test.php     # SSRF 防护的全部已知绕过向量
 
 composer test               # 依次跑上面全部六套
-composer analyse            # PHPStan level 7 静态分析（全绿）
+composer analyse            # PHPStan level 8 静态分析（全绿）
 ```
 
 CI 会在 **PHP 7.2 / 7.4 / 8.0 / 8.2 / 8.4** 上跑同样的检查，并在 8.2 上额外跑一次静态分析。

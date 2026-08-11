@@ -81,8 +81,9 @@ class WebContent
             $text = strip_tags($html);
         }
         $text = html_entity_decode($text, ENT_QUOTES | ENT_HTML5, 'UTF-8');
-        $text = preg_replace('/[ \t]+/', ' ', $text);
-        $text = preg_replace('/\n\s*\n\s*\n+/', "\n\n", $text);
+        // preg_replace 在 PCRE 回溯超限时返回 null，失败就保留上一步结果
+        $text = preg_replace('/[ \t]+/', ' ', $text) ?? $text;
+        $text = preg_replace('/\n\s*\n\s*\n+/', "\n\n", $text) ?? $text;
         return trim($text);
     }
 
@@ -130,10 +131,13 @@ class WebContent
             '#<br\s*/?>#i'                                             => "\n",
             '#</p>#i'                                                  => "\n\n",
         ];
-        $html = preg_replace(array_keys($rules), array_values($rules), $html);
+        // preg_replace 在 PCRE 回溯/递归超限时返回 null（抓取大页面时真会触发），
+        // 之后 strip_tags(null) 在 PHP 8.1 起是 deprecated、9 会是 TypeError，
+        // 且整段提取会静默变成空内容。每步都退回上一步的结果。
+        $html = preg_replace(array_keys($rules), array_values($rules), $html) ?? $html;
         $text = strip_tags($html);
         $text = html_entity_decode($text, ENT_QUOTES | ENT_HTML5, 'UTF-8');
-        $text = preg_replace('/\n\s*\n\s*\n+/', "\n\n", $text);
+        $text = preg_replace('/\n\s*\n\s*\n+/', "\n\n", $text) ?? $text;
         return trim($text);
     }
 
@@ -143,9 +147,10 @@ class WebContent
      */
     protected static function stripNoise($html)
     {
-        $html = preg_replace('#<!--.*?-->#s', '', $html);
-        $html = preg_replace('#<(script|style|noscript|svg|iframe)[^>]*>.*?</\1>#is', '', $html);
-        $html = preg_replace('#<head[^>]*>.*?</head>#is', '', $html);
+        // 同上：任一步 PCRE 失败就保留上一步结果，不让 null 往下传
+        $html = preg_replace('#<!--.*?-->#s', '', $html) ?? $html;
+        $html = preg_replace('#<(script|style|noscript|svg|iframe)[^>]*>.*?</\1>#is', '', $html) ?? $html;
+        $html = preg_replace('#<head[^>]*>.*?</head>#is', '', $html) ?? $html;
         return $html;
     }
 }

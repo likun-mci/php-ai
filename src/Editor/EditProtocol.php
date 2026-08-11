@@ -88,7 +88,8 @@ class EditProtocol
         // JSON 之前的自然语言作为解释
         $pos = strpos($plan->raw, $json);
         $plan->explanation = $pos !== false ? trim(substr($plan->raw, 0, $pos)) : '';
-        $plan->explanation = preg_replace('/```json\s*$/', '', $plan->explanation);
+        // preg_replace 失败返回 null，会把 explanation 写成 null 并让下面的 trim 报错
+        $plan->explanation = preg_replace('/```json\s*$/', '', $plan->explanation) ?? $plan->explanation;
         $plan->explanation = trim($plan->explanation, "` \n\r\t");
 
         $data = json_decode($json, true);

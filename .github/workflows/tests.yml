@@ -41,14 +41,19 @@ jobs:
       - name: 安装依赖
         run: composer install --no-interaction --no-progress
 
-      - name: 跑测试（不联网，无需任何 API Key）
-        run: |
-          php tests/smoke_test.php
-          php tests/stream_test.php
-          php tests/tools_test.php
-          php tests/lib_test.php
-          php tests/cli_test.php
-          php tests/ssrf_test.php
+      # 拆成独立步骤：哪个挂了直接看步骤名就知道，不必翻日志
+      - name: 测试 smoke（类加载/实例化/签名兼容）
+        run: php tests/smoke_test.php
+      - name: 测试 stream（40 协议流式）
+        run: php tests/stream_test.php
+      - name: 测试 tools（工具调用跨平台）
+        run: php tests/tools_test.php
+      - name: 测试 lib（批量/上下文/记忆/计价/日志）
+        run: php tests/lib_test.php
+      - name: 测试 cli（参数渲染/注入防护）
+        run: php tests/cli_test.php
+      - name: 测试 ssrf（SSRF 防护）
+        run: php tests/ssrf_test.php
 
       # 静态分析只在较新的 PHP 上跑一次即可，避免 5 个版本重复跑
       - name: 静态分析（PHPStan level 5）

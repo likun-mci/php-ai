@@ -617,6 +617,47 @@ class Protocols
     }
 
     /**
+     * 协议某项扩展能力的接口相对路径
+     *
+     * @param string $protocol   协议标识或类名
+     * @param string $capability 能力标识，见 Capabilities
+     * @return string 不支持该能力时返回空串
+     */
+    public static function capabilityPathOf(string $protocol, string $capability): string
+    {
+        try {
+            $class = self::resolveClass($protocol);
+        } catch (ConfigException $e) {
+            return '';
+        }
+        if (!method_exists($class, 'capabilityPath')) {
+            return '';
+        }
+        $value = (new $class())->capabilityPath($capability);
+        return is_string($value) ? $value : '';
+    }
+
+    /**
+     * 协议支持的扩展能力清单
+     *
+     * @param string $protocol 协议标识或类名
+     * @return array<int, string>
+     */
+    public static function capabilitiesOf(string $protocol): array
+    {
+        try {
+            $class = self::resolveClass($protocol);
+        } catch (ConfigException $e) {
+            return [];
+        }
+        if (!method_exists($class, 'capabilities')) {
+            return [];
+        }
+        $value = (new $class())->capabilities();
+        return is_array($value) ? $value : [];
+    }
+
+    /**
      * 组装协议的默认对话端点
      *
      * @param string $protocol 协议标识或类名

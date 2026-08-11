@@ -3,6 +3,8 @@ namespace Ai\Transport;
 
 use Ai\Contracts\TransportInterface;
 use Ai\Exceptions\RequestException;
+use Ai\Helpers\AIFile;
+use Ai\Helpers\Media;
 
 /**
  * HTTP 传输层实现（使用 cURL）
@@ -122,19 +124,11 @@ class CurlTransport implements TransportInterface
         $this->streamLastUsage = [];
         $this->streamError = '';
 
-        // 先编码再发：json_encode 失败（最常见是内容含非 UTF-8 字节，
-        // 如从 GBK 库表里读出来的旧数据）会返回 false，直接塞给 CURLOPT_POSTFIELDS
-        // 会被当成空 body 发出去，拿到一个语义完全错误的响应且全程无报错
-        $payload = json_encode($data, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
-        if ($payload === false) {
-            throw new RequestException(
-                '请求体 JSON 编码失败：' . json_last_error_msg()
-                . '（常见原因：消息内容含非 UTF-8 字节，请先转成 UTF-8）',
-                '',
-                'json_encode_failed',
-                []
-            );
-        }
+        // 请求体的编码方式由 headers 里的 Content-Type 决定。
+        // 没有显式声明、或声明为 application/json 时走原来那条路径——
+        // 这覆盖了全部对话请求，行为与改造前逐字节等价。
+        // 注意 $headers 是引用传入：multipart 需要把调用方写的 Content-Type 摘掉
+        $payload = $this->encodeRequestBody($data, $headers);
 
         $ch = curl_init($url);
 
@@ -261,10 +255,172 @@ class CurlTransport implements TransportInterface
             );
         }
 
+        // 响应解码：**只有**明确属于二进制媒体（audio/* image/* video/*
+        // application/octet-stream）时才跳过 json_decode 并原样带回字节。
+        // 刻意用白名单而非「不是 JSON 就当二进制」——text/html 等异常响应
+        // 仍走原来的 json_decode 路径返回空数组，对话链路的行为一点没变
+        $respType = (string) ($this->lastInfo['content_type'] ?? '');
+        if (is_string($response) && Media::isBinaryContentType($respType)) {
+            return [
+                '_raw'          => $response,
+                '_content_type' => $respType,
+                '_status'       => (int) $httpCode,
+            ];
+        }
+
         // curl_exec() 未开 RETURNTRANSFER 时会返回 true；本类始终开启，
         // 但静态类型仍是 string|bool，取值前显式收窄，避免把 bool 喂给 json_decode()
         $decoded = is_string($response) ? json_decode($response, true) : null;
         return is_array($decoded) ? $decoded : [];
+    }
+
+    /**
+     * 按 Content-Type 编码请求体
+     *
+     * @param array<string, mixed>  $data
+     * @param array<string, string> $headers 引用传入，multipart 时会摘掉 Content-Type
+     * @return string|array<string, mixed> 数组形式交给 curl 即触发 multipart
+     */
+    protected function encodeRequestBody(array $data, array &$headers)
+    {
+        $contentType = $this->headerValue($headers, 'Content-Type');
+
+        // —— 默认路径：无声明或声明 JSON ——
+        if ($contentType === '' || stripos($contentType, 'application/json') === 0) {
+            // 先编码再发：json_encode 失败（最常见是内容含非 UTF-8 字节，
+            // 如从 GBK 库表里读出来的旧数据）会返回 false，直接塞给 CURLOPT_POSTFIELDS
+            // 会被当成空 body 发出去，拿到一个语义完全错误的响应且全程无报错
+            $payload = json_encode($data, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+            if ($payload === false) {
+                throw new RequestException(
+                    '请求体 JSON 编码失败：' . json_last_error_msg()
+                    . '（常见原因：消息内容含非 UTF-8 字节，请先转成 UTF-8）',
+                    '',
+                    'json_encode_failed',
+                    []
+                );
+            }
+            return $payload;
+        }
+
+        // —— 表单上传（语音识别传音频文件用）——
+        if (stripos($contentType, 'multipart/form-data') === 0) {
+            // 必须把调用方写的 Content-Type 摘掉，交给 curl 自己生成。
+            // multipart 的 Content-Type 里带一个随机 boundary，手写的那句
+            // "multipart/form-data" 没有 boundary，服务端会拿到一个无法解析的 body，
+            // 而请求本身往往仍返回 200——**静默失败**，是这条路径上最难查的坑
+            $headers = $this->removeHeader($headers, 'Content-Type');
+            return $this->buildMultipartFields($data);
+        }
+
+        // —— 其它类型（x-www-form-urlencoded、text/plain 等）——
+        return $this->buildRawBody($data);
+    }
+
+    /**
+     * 组装 multipart 字段，把文件类值转成 CURLFile
+     *
+     * @param array<string, mixed> $data
+     * @return array<string, mixed>
+     */
+    protected function buildMultipartFields(array $data): array
+    {
+        $fields = [];
+        foreach ($data as $key => $value) {
+            if ($value instanceof \CURLFile) {
+                $fields[$key] = $value;
+                continue;
+            }
+            if ($value instanceof AIFile) {
+                $fields[$key] = $this->toCurlFile($value);
+                continue;
+            }
+            if ($value === null) {
+                continue;
+            }
+            if (is_bool($value)) {
+                $fields[$key] = $value ? 'true' : 'false';
+                continue;
+            }
+            if (is_array($value) || is_object($value)) {
+                // multipart 表达不了嵌套结构，转成 JSON 字符串——多数平台接受这种写法
+                $encoded = json_encode($value, JSON_UNESCAPED_UNICODE);
+                $fields[$key] = $encoded === false ? '' : $encoded;
+                continue;
+            }
+            $fields[$key] = (string) $value;
+        }
+        return $fields;
+    }
+
+    /**
+     * AIFile 转 CURLFile
+     *
+     * 只接受本地路径。远端 URL 需要调用方先取回本地——下载应当走带 SSRF 防护的
+     * Helpers\Media::download()，不该由传输层顺手代劳
+     */
+    protected function toCurlFile(AIFile $file): \CURLFile
+    {
+        if ($file->getType() !== 'path') {
+            throw new RequestException(
+                '表单上传只接受本地文件；远端 URL 请先用 Ai\\Helpers\\Media::download() 取回并落盘后再传',
+                '',
+                'multipart_needs_local_file',
+                []
+            );
+        }
+        $path = $file->getSource();
+        $mime = $file->getMimeType();
+        return new \CURLFile($path, $mime !== '' ? $mime : 'application/octet-stream', basename($path));
+    }
+
+    /**
+     * 组装非 JSON、非 multipart 的请求体
+     *
+     * 约定 _body 键可直接给出原始字符串请求体，用于平台要求特殊编码的少数场景；
+     * 否则按表单编码
+     *
+     * @param array<string, mixed> $data
+     */
+    protected function buildRawBody(array $data): string
+    {
+        if (isset($data['_body']) && is_string($data['_body'])) {
+            return $data['_body'];
+        }
+        return http_build_query($data);
+    }
+
+    /**
+     * 大小写不敏感地取请求头的值，取不到返回空串
+     *
+     * HTTP 头名本就大小写不敏感，调用方写 content-type / Content-Type 都得认
+     *
+     * @param array<string, string> $headers
+     */
+    protected function headerValue(array $headers, string $name): string
+    {
+        foreach ($headers as $key => $value) {
+            if (strcasecmp((string) $key, $name) === 0) {
+                return (string) $value;
+            }
+        }
+        return '';
+    }
+
+    /**
+     * 大小写不敏感地移除某个请求头
+     *
+     * @param array<string, string> $headers
+     * @return array<string, string>
+     */
+    protected function removeHeader(array $headers, string $name): array
+    {
+        foreach (array_keys($headers) as $key) {
+            if (strcasecmp((string) $key, $name) === 0) {
+                unset($headers[$key]);
+            }
+        }
+        return $headers;
     }
 
     /**

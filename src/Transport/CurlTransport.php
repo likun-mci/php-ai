@@ -753,8 +753,9 @@ class CurlTransport implements TransportInterface
         // 解析 SSE 格式的流式数据
         $lines = explode("\n", $this->streamBuffer);
 
-        // 保留最后一行（可能不完整）
-        $this->streamBuffer = array_pop($lines);
+        // 保留最后一行（可能不完整）。explode 至少返回一个元素，
+        // array_pop 理论上不会是 null，仍兜一下以免属性被写成 null
+        $this->streamBuffer = array_pop($lines) ?? '';
 
         foreach ($lines as $line) {
             $this->handleStreamLine($line);

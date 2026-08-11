@@ -8,14 +8,20 @@
 # 过程中确实抓到了几处我原本猜错的类型（如 EditExecutor::applyStrReplace()
 # 实际返回数组而非字符串），说明这一级不只是形式功夫。
 #
-# 6 → 7 这一步查的是联合类型上的成员访问，抓到了几个真会炸的边界：
+# 6 → 7 查联合类型上的成员访问，抓到几个真会炸的边界：
 # base64_encode(file_get_contents()) 在文件读不到时返回 false，PHP 8 上直接
 # TypeError；json_encode 失败返回 false 被当字符串用；curl_exec 的 bool 分支
-# 被喂给 json_decode。这些都不是形式问题，是线上真会遇到的路径。
+# 被喂给 json_decode。
 #
-# 下一级是 8（严格 null 检查），届时再评估收益。
+# 7 → 8 查 null 安全，同样都是真问题：preg_replace 在 PCRE 回溯超限时返回 null
+# （抓大页面时真会触发），之后 strip_tags(null) 在 PHP 8.1 起 deprecated、
+# 9 会是 TypeError，整段内容提取会静默变成空。
+#
+# **就停在 8。** level 9 是「禁止对 mixed 做任何操作」，而本库处理的正是各家
+# 平台返回的任意 JSON 载荷——数据本身就是 mixed，那 269 条几乎全要靠
+# assert 或强制转型去哄静态分析，既不增加正确性也让代码更难读。
 parameters:
-    level: 7
+    level: 8
     paths:
         - src
 

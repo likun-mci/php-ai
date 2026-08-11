@@ -213,9 +213,12 @@ class EditContext
     public function toPromptJson()
     {
         $ext = strtolower(pathinfo($this->file, PATHINFO_EXTENSION));
-        $hasWs = $this->hasWorkspace();
+        // 取到局部变量再判空：经由 hasWorkspace() 判断时静态分析无法收窄 $this->workspace，
+        // 真正为 null 时会在下面几行触发方法调用错误
+        $ws    = $this->workspace;
+        $hasWs = ($ws !== null);
         // 有工作区：给相对工作区路径；否则给相对 FCPATH 路径
-        $displayPath = $hasWs ? $this->workspace->getRelPath() : $this->file;
+        $displayPath = $hasWs ? $ws->getRelPath() : $this->file;
 
         $ctx = [
             'current_file' => [
@@ -231,9 +234,9 @@ class EditContext
             'file_view'      => $this->buildFileView(),
             'workspace_mode' => $hasWs,
         ];
-        if ($hasWs) {
-            $ctx['workspace_name']  = $this->workspace->getName();
-            $ctx['workspace_files'] = $this->workspace->getFiles();
+        if ($ws !== null) {
+            $ctx['workspace_name']  = $ws->getName();
+            $ctx['workspace_files'] = $ws->getFiles();
         }
         return $ctx;
     }

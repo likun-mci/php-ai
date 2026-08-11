@@ -14,6 +14,7 @@
 - 🎯 **统一接口**：`AI::create()->chat()`，切换平台只需换 `protocol` 或 `model`，业务代码一行不用改
 - 🧰 **工具调用全平台统一**：一套工具定义跑 40 个协议，库自动在 OpenAI 的 `tool_calls` 与 Anthropic 的 `tool_use` 块之间翻译，Agent 换平台只改一行配置
 - 🛡️ **生产级健壮性**：429 限流与 5xx 自动退避重试（尊重 `Retry-After`）、请求体编码失败快速失败、SSRF 纵深防护
+- ⚡ **并发批量**：`chatBatch()` 用 `curl_multi` 并发跑批，实测 10 条提速 3.3 倍，单条失败不拖垮整批
 - 🧩 **任意模型 + 任意接口**：模型名不受内置清单限制，可手选协议格式（`protocol`）并指定自定义接口地址（`base_url` / `endpoint`），一套代码同时对接官方 API、第三方中转与自建网关
 - 🌊 **流式输出**：一行 `setStream(true)`，自动按 SSE 协议实时吐出数据块；常驻内存框架用 `setStreamCallback()` 接管分片
 - 🧰 **Agent 循环**：挂载工具（函数）后自动完成「模型决策 → 执行工具 → 回填结果」多轮循环
@@ -1002,9 +1003,13 @@ $full = $ai->chat($messages)->getContent();   // 返回值不受影响，仍是�
 ```bash
 php tests/stream_test.php   # 40 个协议 × 普通对话 / 流式 / token 统计
 php tests/tools_test.php    # 工具调用跨平台一致性
+php tests/lib_test.php      # 并发批量 / Memory 并发安全 / 计价 / 日志注入
+php tests/cli_test.php      # CLI 参数渲染与命令注入防护
 php tests/ssrf_test.php     # SSRF 防护的全部已知绕过向量
-composer test               # 等价于依次跑上面三个
+composer test               # 依次跑上面全部五套
 ```
+
+CI 会在 **PHP 7.2 / 7.4 / 8.0 / 8.2 / 8.4** 上跑同样的检查。
 
 覆盖的报文差异（都踩过坑，已在传输层统一处理）：
 
@@ -1100,7 +1105,12 @@ $ai->onAfter(function ($response) {          // onResponse() 是它的别名
 | `tokens(): int` | 总 tokens |
 | `getModel(): string` | 实际返回的模型名 |
 | `isSuccess(): bool` | 是否成功 |
-| `cost(array $pricing): float` | 按传入价格表估算费用，如 `['prompt'=>0.005,'completion'=>0.015]`（单位：每 1K tokens） |
+| `cost(array $pricing): float` | 按传入价格表估算费用，**单位是每百万 tokens**（照抄官网数字即可），如 `['prompt'=>5.0,'completion'=>25.0,'cached'=>0.5]`；传第二个参数 `1000` 可沿用旧的每千口径 |
+| `getToolCalls(): array` | 模型发起的工具调用，已归一：`[['id'=>..,'name'=>..,'input'=>[..]]]` |
+| `hasToolCalls(): bool` | 本轮是否要求调用工具 |
+| `getStopReason(): string` | 结束原因（已归一）：`end_turn` / `tool_use` / `max_tokens` / `content_filter` / `refusal` |
+| `toAssistantMessage(): array` | 转成可回填进 `messages` 的 assistant 回合 |
+| `getError(): string` | 失败原因（仅 `chatBatch()` 这类不抛异常的场景会填充） |
 | `toArray()` / `__toString()` | 转数组 / 直接当字符串用 |
 
 ---
@@ -1152,6 +1162,47 @@ $ai->setRetry(3, 800, 30000); // 重试 3 次、退避基数 800ms、单次等�
 
 ```php
 $ai->setTransport(new MyTransport());   // 实现 Ai\Contracts\TransportInterface 即可
+```
+
+### 并发批量：`chatBatch()`
+
+批量翻译、摘要、打标签这类场景串行跑，总耗时是「单条 × 条数」，且每条都要重做一次
+TLS 握手。`chatBatch()` 用 `curl_multi` 并发，总耗时约等于「最慢的一条 × 批次数」：
+
+```php
+$results = $ai->chatBatch([
+    'title' => '把这句翻译成英文：你好',
+    'intro' => '把这句翻译成英文：世界',
+    'body'  => ['messages' => [['role' => 'user', 'content' => '翻译：再见']]],
+], 5);   // 第二个参数是并发度，默认 5
+
+foreach ($results as $key => $r) {
+    if ($r->isSuccess()) {
+        echo $key, ': ', $r->getContent(), "\n";
+    } else {
+        echo $key, ' 失败: ', $r->getError(), "\n";   // 单条失败不影响其它条
+    }
+}
+```
+
+- 返回结果与入参**键名一一对应且保序**，可直接与原数组对齐
+- **单条失败不抛异常**，返回 `isSuccess()` 为 false 的响应，用 `getError()` 取原因——
+  批量场景不该因为一条失败就丢掉其它已经跑完的结果
+- 不支持流式（并发流式的分片会互相穿插）
+- 并发度调大容易触发平台限流，配合 `setRetry()` 使用
+
+### 日志：接到你自己的日志系统
+
+库内不再硬编码 `error_log()`。注入后拉取模型列表失败、流式回调异常等都会走你的日志：
+
+```php
+use Ai\Helpers\Log;
+
+Log::setLogger($monolog);                  // 任何 PSR-3 风格对象（不引入 psr/log 依赖）
+Log::setLogger(function ($level, $message, array $context) {
+    log_message($level, '[AI] ' . $message . ' ' . json_encode($context));
+});
+Log::setLogger(null);                      // 恢复默认的 error_log
 ```
 
 ---
@@ -1540,7 +1591,7 @@ php-ai/
 │   ├── Editor/             # AI 代码编辑：上下文 / 协议 / 动作 / 执行器 / 工作区
 │   ├── Exceptions/         # AIException / ConfigException / RequestException / ProcessException
 │   ├── Helpers/            # AIFile（附件封装）、Endpoint（端点解析）、Protocols（协议注册表）
-│   │                       # Headers（请求头合并）、Tools（工具调用格式归一）
+│   │                       # Headers（请求头合并）、Tools（工具调用格式归一）、Log（可注入日志）
 │   ├── Models/             # 模型层：各平台模型的名称、端点、能力、默认配置
 │   │   ├── BaseModel.php
 │   │   ├── CustomModel.php # 通用模型：任意模型名 + 手选协议 + 自定义接口地址
@@ -1561,6 +1612,8 @@ php-ai/
 ├── tests/                  # 回归测试（纯 PHP，无需 PHPUnit、无需网络、无需 API Key）
 │   ├── stream_test.php     # 40 个协议 × 普通对话 / 流式 / token 统计
 │   ├── tools_test.php      # 工具调用跨平台一致性（同一段代码跑两个协议家族）
+│   ├── lib_test.php        # 并发批量 / Memory 并发安全 / 计价 / 日志注入
+│   ├── cli_test.php        # CLI 参数渲染与命令注入防护
 │   └── ssrf_test.php       # SSRF 防护的全部已知绕过向量
 ├── examples*.php           # 使用示例（examples_platforms.php 为多平台接入示例）
 ├── LICENSE
@@ -1581,8 +1634,8 @@ php-ai/
 - Azure OpenAI 只覆盖了新版 `/openai/v1` 路由，旧版「部署名 + api-version」路由需自行用 `endpoint` 配置完整 URL；AWS Bedrock、Google Vertex AI 因需要 SigV4 / OAuth 签名，暂未内置；
 - 自定义模型的 `supports()` 能力是乐观默认值（对方接口实际支持什么库无从得知），需要准确值时用 `features` 配置项自行声明；
 - `Ai\Protocol\Gemini::convertMessages()` 未被调用——Gemini 走的是 OpenAI 兼容端点，消息直接透传；
-- 批量请求只能串行（无 `curl_multi`），大批量场景建议业务层自行起多进程；
-- `cost()` 需自行传入价格表，库不内置各平台价格；
+- `chatBatch()` 并发批量不支持流式，也不走 `setAttachments()`（附件请写在各自 payload 里）；
+- `cost()` 需自行传入价格表，库不内置各平台价格（价格变动频繁，内置必然过期）；
 - `Ai\Cli\ClaudeCode` 依赖本机已安装 claude 程序；`proc_open` / `shell_exec` 被禁用的受限 PHP 环境需改用自定义执行器（如 SSH/SFTP）。
 
 ---

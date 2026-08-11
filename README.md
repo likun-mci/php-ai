@@ -12,7 +12,8 @@
 
 - 🔌 **多平台**：内置 40 个平台协议——国内 20 家（通义千问 / 豆包 / 文心一言 / 智谱 GLM / Kimi / 混元 / 星火 / MiniMax / 阶跃星辰 / 零一万物 / 百川 / 商汤 / 360 智脑 / 华为云 MaaS / DeepSeek 等）、海外 12 家（OpenAI / Claude / Gemini / Grok / Mistral / Cohere / Perplexity / Meta Llama / Azure OpenAI 等）、聚合中转 8 家（OpenRouter / 硅基流动 / 魔搭 / Groq / Together / Fireworks / DeepInfra / NVIDIA NIM 等）与本地部署（Ollama / LM Studio / vLLM）
 - 🎯 **统一接口**：`AI::create()->chat()`，切换平台只需换 `protocol` 或 `model`，业务代码一行不用改
-- 🧰 **国产模型跑工具调用**：智谱、Kimi、百炼、DeepSeek 都提供了 Anthropic 兼容端点，可用国产价格跑 Agent 的 tools 协议
+- 🧰 **工具调用全平台统一**：一套工具定义跑 40 个协议，库自动在 OpenAI 的 `tool_calls` 与 Anthropic 的 `tool_use` 块之间翻译，Agent 换平台只改一行配置
+- 🛡️ **生产级健壮性**：429 限流与 5xx 自动退避重试（尊重 `Retry-After`）、请求体编码失败快速失败、SSRF 纵深防护
 - 🧩 **任意模型 + 任意接口**：模型名不受内置清单限制，可手选协议格式（`protocol`）并指定自定义接口地址（`base_url` / `endpoint`），一套代码同时对接官方 API、第三方中转与自建网关
 - 🌊 **流式输出**：一行 `setStream(true)`，自动按 SSE 协议实时吐出数据块；常驻内存框架用 `setStreamCallback()` 接管分片
 - 🧰 **Agent 循环**：挂载工具（函数）后自动完成「模型决策 → 执行工具 → 回填结果」多轮循环
@@ -337,6 +338,8 @@ $ai->setConfig([
     'model'        => 'gpt-4o',      // 模型标识（必填），内置标识或任意自定义模型名
     'api_key'      => 'sk-xxx',      // API 密钥（自建/内网接口可不填）
     'protocol'     => '',            // 手选协议格式：见「平台一览」，或自定义协议类名
+    'tools'        => [],            // 工具定义（统一格式，见「Agent：工具调用循环」）
+    'tool_choice'  => null,          // auto / any / none / ['type'=>'tool','name'=>'x']
     'base_url'     => '',            // 接口根地址，与协议官方路径智能拼接，见「自定义接口地址」
     'endpoint'     => '',            // 完整对话端点，原样使用，优先级高于 base_url
     'endpoint_models' => '',         // 完整模型列表端点（仅 listModels 生效）
@@ -994,10 +997,13 @@ $full = $ai->chat($messages)->getContent();   // 返回值不受影响，仍是�
 ### 平台兼容性：40 个协议均已覆盖
 
 「普通对话 + 流式输出 + token 统计」是每个协议的基础能力，`tests/stream_test.php`
-用各平台真实的 SSE 报文逐个回放校验，不联网、不需要 Key：
+用各平台真实的 SSE 报文逐个回放校验。三套测试都**不联网、不需要 Key、不依赖 PHPUnit**：
 
 ```bash
-php tests/stream_test.php
+php tests/stream_test.php   # 40 个协议 × 普通对话 / 流式 / token 统计
+php tests/tools_test.php    # 工具调用跨平台一致性
+php tests/ssrf_test.php     # SSRF 防护的全部已知绕过向量
+composer test               # 等价于依次跑上面三个
 ```
 
 覆盖的报文差异（都踩过坑，已在传输层统一处理）：
@@ -1123,11 +1129,92 @@ try {
 
 ---
 
+## 健壮性：超时与自动重试
+
+AI 接口最高频的失败不是「打不通」，而是 **429 限流**和 **5xx 临时故障**。库默认已处理：
+
+```php
+$ai->setTimeout(120);         // 默认 120 秒（推理模型单次经常跑一两分钟，60 秒会误杀）
+$ai->setRetry(2);             // 默认重试 2 次；传 0 关闭
+$ai->setRetry(3, 800, 30000); // 重试 3 次、退避基数 800ms、单次等待上限 30 秒
+```
+
+| 情形 | 行为 |
+|------|------|
+| 408 / 409 / 429 / 500 / 502 / 503 / 504 / 529 | 自动重试 |
+| 响应带 `Retry-After`（秒数或 HTTP 日期） | 优先按服务端给的时间等待，并有上限保护 |
+| 无 `Retry-After` | 指数退避 + 抖动（避免多进程被同时限流后又齐刷刷重试） |
+| 4xx（除上表）如 400 / 401 / 403 | **不重试**，立即抛异常 |
+| 流式请求 | **不重试**——分片已经吐给调用方，重试会造成重复输出 |
+| 请求体含非 UTF-8 字节 | 立即抛 `RequestException` 并说明原因（此前会静默发出空请求体） |
+
+需要接入连接池、换 HTTP 客户端或在单元测试里注入假传输层时，替换整个传输层：
+
+```php
+$ai->setTransport(new MyTransport());   // 实现 Ai\Contracts\TransportInterface 即可
+```
+
+---
+
 ## Agent：工具调用循环
 
 `Ai\Agent\Agent` 实现完整的 agentic 循环：模型决定调用哪个工具 → 库执行工具 → 结果回填给模型 → 继续，直到模型给出最终答复或达到迭代上限。
 
-**仅支持 Claude 协议的模型**（`claude-3-opus`、`deepseek-anthropic`）。
+**40 个协议全部可用**。各家把同一件事写成了两套结构，库在协议层吃掉了差异：
+
+| | OpenAI 系（36 个协议） | Anthropic 系（4 个协议） |
+|---|---|---|
+| 工具定义 | `{type:'function', function:{name, parameters}}` | `{name, description, input_schema}` |
+| 模型发起 | `message.tool_calls[]`，`arguments` 是 JSON **字符串** | content 里的 `tool_use` 块，`input` 是**数组** |
+| 结果回填 | 独立的 `{role:'tool', tool_call_id}` 消息 | user 消息里的 `tool_result` 块 |
+| 结束原因 | `finish_reason: 'tool_calls'` | `stop_reason: 'tool_use'` |
+| 系统提示 | `messages` 首条 `role:'system'` | 顶层 `system` 字段 |
+
+业务层只写**一套**（库的统一格式，采用 Anthropic 风格），换平台只改 `protocol`：
+
+```php
+$agent = (new Agent($ai))->setTools($tools)->onEvent($handler);
+$agent->run([['role' => 'user', 'content' => '北京天气怎么样']]);
+
+// 上面这段代码，$ai 换成下面任意一个都不用改：
+AI::create(['protocol' => 'qwen',     'model' => 'qwen-plus',       'api_key' => '...']);
+AI::create(['protocol' => 'zhipu',    'model' => 'glm-4.6',         'api_key' => '...']);
+AI::create(['protocol' => 'doubao',   'model' => 'doubao-seed-1-6', 'api_key' => '...']);
+AI::create(['protocol' => 'openai',   'model' => 'gpt-4o',          'api_key' => '...']);
+AI::create(['protocol' => 'claude',   'model' => 'claude-opus-5',   'api_key' => '...']);
+```
+
+完整可运行示例见 `examples_agent.php`；跨平台一致性由 `tests/tools_test.php` 保证。
+
+> 也可以直接写 OpenAI 原生格式（`{type:'function'}` 的工具定义、`role:'tool'` 的消息），
+> 库会识别并转成目标平台的结构，不强制迁移已有代码。
+
+### 不用 Agent，自己控制循环
+
+`AIResponse` 提供了平台无关的取用接口：
+
+```php
+$resp = $ai->chat(['messages' => $messages, 'tools' => $toolDefs]);
+
+if ($resp->hasToolCalls()) {                      // 各平台一致
+    $messages[] = $resp->toAssistantMessage();    // 把模型这一轮接回上下文
+
+    $results = [];
+    foreach ($resp->getToolCalls() as $call) {    // ['id'=>.., 'name'=>.., 'input'=>[..]]
+        $results[] = [
+            'type'        => 'tool_result',
+            'tool_use_id' => $call['id'],
+            'content'     => myHandler($call['name'], $call['input']),
+        ];
+    }
+    $messages[] = ['role' => 'user', 'content' => $results];
+
+    $resp = $ai->chat(['messages' => $messages, 'tools' => $toolDefs]);
+}
+
+echo $resp->getContent();
+echo $resp->getStopReason();   // end_turn / tool_use / max_tokens / content_filter / refusal
+```
 
 ### 工具定义
 
@@ -1452,7 +1539,8 @@ php-ai/
 │   ├── Contracts/          # 接口定义：Model / Protocol / Transport / AIResponse
 │   ├── Editor/             # AI 代码编辑：上下文 / 协议 / 动作 / 执行器 / 工作区
 │   ├── Exceptions/         # AIException / ConfigException / RequestException / ProcessException
-│   ├── Helpers/            # AIFile（附件封装）、Endpoint（端点解析）、Protocols（协议注册表）、Headers（请求头合并）
+│   ├── Helpers/            # AIFile（附件封装）、Endpoint（端点解析）、Protocols（协议注册表）
+│   │                       # Headers（请求头合并）、Tools（工具调用格式归一）
 │   ├── Models/             # 模型层：各平台模型的名称、端点、能力、默认配置
 │   │   ├── BaseModel.php
 │   │   ├── CustomModel.php # 通用模型：任意模型名 + 手选协议 + 自定义接口地址
@@ -1470,8 +1558,10 @@ php-ai/
 │   └── Transport/          # cURL 传输层（含 SSE 解析、代理、超时）
 ├── autoload.php            # PSR-4 加载器（不用 Composer 时引入）
 ├── composer.json
-├── tests/                  # 回归测试（纯 PHP，无需 PHPUnit 与网络）
-│   └── stream_test.php     # 40 个协议 × 普通对话 / 流式 / token 统计
+├── tests/                  # 回归测试（纯 PHP，无需 PHPUnit、无需网络、无需 API Key）
+│   ├── stream_test.php     # 40 个协议 × 普通对话 / 流式 / token 统计
+│   ├── tools_test.php      # 工具调用跨平台一致性（同一段代码跑两个协议家族）
+│   └── ssrf_test.php       # SSRF 防护的全部已知绕过向量
 ├── examples*.php           # 使用示例（examples_platforms.php 为多平台接入示例）
 ├── LICENSE
 ├── README.md
@@ -1485,12 +1575,13 @@ php-ai/
 ## 已知限制
 
 - `setSessionId()` 与配置项 `rounds` 目前**只是占位**，库内部不会据此保存或拼接历史对话，多轮上下文需业务层自行维护；
-- 工具调用（`tools`）仅 Claude 协议实现，OpenAI 的 function calling 尚未接入（国产平台可用 `zhipu-anthropic` / `moonshot-anthropic` / `qwen-anthropic` / `deepseek-anthropic` 走 Claude 协议）；
+- 工具调用仅支持**非流式**：流式响应里 OpenAI 系的 `tool_calls` 是按分片累积的，尚未做重组，`getToolCalls()` 在流式下返回空数组。Agent 内部已固定用非流式，不受影响；
 - 流式输出只提取正文增量，推理模型的思维链（`reasoning_content` / `thinking` 块）不计入 `getContent()`，需要时从 `stream_chunk` 事件的 `raw` 字段自取；
 - 各平台的 `knownModels()` 常用模型清单是库内维护的静态快照，仅用于离线渲染下拉框与拉取失败兜底，最新可用模型请以 `listModels()` 的实时结果为准；
 - Azure OpenAI 只覆盖了新版 `/openai/v1` 路由，旧版「部署名 + api-version」路由需自行用 `endpoint` 配置完整 URL；AWS Bedrock、Google Vertex AI 因需要 SigV4 / OAuth 签名，暂未内置；
 - 自定义模型的 `supports()` 能力是乐观默认值（对方接口实际支持什么库无从得知），需要准确值时用 `features` 配置项自行声明；
 - `Ai\Protocol\Gemini::convertMessages()` 未被调用——Gemini 走的是 OpenAI 兼容端点，消息直接透传；
+- 批量请求只能串行（无 `curl_multi`），大批量场景建议业务层自行起多进程；
 - `cost()` 需自行传入价格表，库不内置各平台价格；
 - `Ai\Cli\ClaudeCode` 依赖本机已安装 claude 程序；`proc_open` / `shell_exec` 被禁用的受限 PHP 环境需改用自定义执行器（如 SSH/SFTP）。
 

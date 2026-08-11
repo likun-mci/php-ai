@@ -9,6 +9,11 @@ use Ai\AI;
  * 给模型挂上一组工具，循环执行：
  *   模型决策(tool_use) → 我们执行工具 → 把 tool_result 回填 → 继续，直到 end_turn 或达上限。
  *
+ * **平台无关**：工具定义、模型发起的调用、结果回填全部走库的统一格式，
+ * 协议层负责翻译成各平台的实际结构（OpenAI 系的 tool_calls / role:'tool'，
+ * Anthropic 系的 tool_use / tool_result 块），因此同一段 Agent 代码
+ * 可以直接跑在 40 个协议上，换平台只改 protocol 配置。
+ *
  * 工具格式：
  *   $tools = [
  *     'read_file' => [
@@ -22,6 +27,7 @@ use Ai\AI;
  * 事件回调 onEvent(array $event)：
  *   - ['type'=>'agent_text','text'=>...]      模型自然语言
  *   - ['type'=>'tool_call','name'=>...,'input'=>...]
+ *   - ['type'=>'tool_error','name'=>...,'message'=>...]  工具抛错（已回填给模型）
  *   - ['type'=>'done']                        正常结束
  *   - ['type'=>'error','message'=>...]
  *   （工具内部的细粒度事件——如 diff/todo——由各 handler 自行通过闭包发出）
@@ -82,55 +88,55 @@ class Agent
                 return;
             }
 
-            $raw = $resp->getRaw();
-            $content = isset($raw['content']) && is_array($raw['content']) ? $raw['content'] : [];
-            $stop = isset($raw['stop_reason']) ? $raw['stop_reason'] : '';
+            // 全部走归一后的接口，不再直接翻平台原始结构
+            $text      = $resp->getContent();
+            $toolCalls = $resp->getToolCalls();
 
             // 记录 assistant 回合（含 tool_use 块）以维持多轮上下文
-            $messages[] = ['role' => 'assistant', 'content' => $content];
+            $messages[] = $resp->toAssistantMessage();
 
-            // 文本块
-            foreach ($content as $b) {
-                if (($b['type'] ?? '') === 'text' && trim($b['text'] ?? '') !== '') {
-                    $this->lastText = $b['text'];
-                    $this->fire(['type' => 'agent_text', 'text' => $b['text']]);
-                }
+            if (trim($text) !== '') {
+                $this->lastText = $text;
+                $this->fire(['type' => 'agent_text', 'text' => $text]);
             }
 
-            // 工具调用块
-            $toolUses = [];
-            foreach ($content as $b) {
-                if (($b['type'] ?? '') === 'tool_use') $toolUses[] = $b;
-            }
-
-            if ($stop !== 'tool_use' || !$toolUses) {
+            if (!$toolCalls) {
                 $this->fire(['type' => 'done']);
                 return;
             }
 
             $results = [];
-            foreach ($toolUses as $tu) {
-                $name  = $tu['name'] ?? '';
-                $input = isset($tu['input']) && is_array($tu['input']) ? $tu['input'] : [];
-                $id    = $tu['id'] ?? '';
+            foreach ($toolCalls as $call) {
+                $name  = $call['name'] ?? '';
+                $input = isset($call['input']) && is_array($call['input']) ? $call['input'] : [];
+                $id    = $call['id'] ?? '';
 
                 $this->fire(['type' => 'tool_call', 'name' => $name, 'input' => $input]);
 
-                $out = '';
+                $isError = false;
                 if (isset($this->tools[$name]['handler']) && is_callable($this->tools[$name]['handler'])) {
                     try {
+                        // 捕获 \Throwable 而非 \Exception：handler 里的 TypeError 等
+                        // Error 类异常不该穿透整个 Agent 循环，应作为工具失败回填给模型
                         $out = (string) call_user_func($this->tools[$name]['handler'], $input);
-                    } catch (\Exception $e) {
+                    } catch (\Throwable $e) {
                         $out = 'ERROR: ' . $e->getMessage();
+                        $isError = true;
                     }
                 } else {
                     $out = 'ERROR: 未知工具 ' . $name;
+                    $isError = true;
+                }
+
+                if ($isError) {
+                    $this->fire(['type' => 'tool_error', 'name' => $name, 'message' => $out]);
                 }
 
                 $results[] = [
                     'type'        => 'tool_result',
                     'tool_use_id' => $id,
                     'content'     => $out,
+                    'is_error'    => $isError,
                 ];
             }
 

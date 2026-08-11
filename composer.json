@@ -66,6 +66,7 @@
         },
         "exclude-from-classmap": [
             "examples.php",
+            "examples_agent.php",
             "examples_claude_cli.php",
             "examples_custom.php",
             "examples_models.php",
@@ -79,6 +80,10 @@
     },
     "minimum-stability": "stable",
     "scripts": {
-        "test": "php tests/stream_test.php"
+        "test": [
+            "php tests/stream_test.php",
+            "php tests/tools_test.php",
+            "php tests/ssrf_test.php"
+        ]
     }
 }

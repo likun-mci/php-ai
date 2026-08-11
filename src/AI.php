@@ -83,6 +83,12 @@ class AI
     protected $streamErrorMessage = '';
 
     /**
+     * 流式过程中解析到的结束原因（已归一）
+     * @var string
+     */
+    protected $streamStopReason = '';
+
+    /**
      * 流式分片回调，注册后由调用方接管分片下发（见 setStreamCallback）
      * @var callable|null
      */
@@ -578,6 +584,7 @@ class AI
         $this->streamAccumulatedContent = '';
         $this->streamAccumulatedUsage = [];
         $this->streamErrorMessage = '';
+        $this->streamStopReason = '';
         
         // 合并配置：模型默认参数 < 运行时配置里的生成参数 < 本次 payload
         $payload = array_merge([
@@ -613,6 +620,14 @@ class AI
                     $chunkUsage = $this->protocol->parseStreamUsage($data);
                     if (!empty($chunkUsage)) {
                         $this->streamAccumulatedUsage = array_merge($this->streamAccumulatedUsage, $chunkUsage);
+                    }
+                }
+
+                // 记录结束原因：流式不走 parseResponse()，不在这里取就永远拿不到
+                if (method_exists($this->protocol, 'parseStreamStopReason')) {
+                    $chunkStop = $this->protocol->parseStreamStopReason($data);
+                    if ($chunkStop !== null && $chunkStop !== '') {
+                        $this->streamStopReason = $chunkStop;
                     }
                 }
 
@@ -680,12 +695,30 @@ class AI
                 } else {
                     $streamUsage = [];
                 }
+                // 流式暂不支持工具调用：各平台的 tool_calls 都是按分片下发的
+                // （OpenAI 系按 delta.tool_calls[].index 累积 arguments 字符串，
+                // Anthropic 系按 content_block_start + input_json_delta 累积），
+                // 本库尚未做重组。若不在这里拦住，调用方会拿到一个
+                // 「isSuccess() 为 true、内容为空、getToolCalls() 也为空」的响应，
+                // 完全看不出模型其实是在要求调用工具——这种静默失败最难排查。
+                if ($this->streamStopReason === 'tool_use') {
+                    throw new \Ai\Exceptions\RequestException(
+                        '流式模式暂不支持工具调用：模型本轮要求调用工具，但流式响应里的 '
+                        . 'tool_calls 分片尚未做重组，结果会丢失。请对带 tools 的请求改用非流式'
+                        . '（setStream(false)），Agent 内部已默认如此。',
+                        $this->model->getPlatform(),
+                        'stream_tool_calls_unsupported',
+                        $streamUsage
+                    );
+                }
+
                 $response = new \Ai\Response\AIResponse([
-                    'content' => $this->streamAccumulatedContent,
-                    'model'   => $this->model->getName(),
-                    'usage'   => $streamUsage,
-                    'raw'     => $responseData,
-                    'success' => true,
+                    'content'     => $this->streamAccumulatedContent,
+                    'model'       => $this->model->getName(),
+                    'usage'       => $streamUsage,
+                    'raw'         => $responseData,
+                    'success'     => true,
+                    'stop_reason' => $this->streamStopReason,
                 ]);
                 $this->emitStream([ 'type' => 'stream_end', 'data' => [
                     'content' => $this->streamAccumulatedContent,
@@ -1102,6 +1135,16 @@ class AI
     {
         $this->stream = $stream;
         return $this;
+    }
+
+    /**
+     * 当前是否处于流式模式
+     *
+     * 供调用方在临时切换后恢复原状（Agent 内部即如此使用）。
+     */
+    public function isStreaming(): bool
+    {
+        return $this->stream;
     }
     
     /**

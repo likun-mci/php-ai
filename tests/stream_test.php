@@ -189,6 +189,62 @@ foreach ($errors as [$name, $key, $sse]) {
 }
 
 // ---------------------------------------------------------------
+// 三之二、流式下的 stop_reason 与工具调用
+// ---------------------------------------------------------------
+echo "\n=== 流式 stop_reason 与工具调用 ===\n\n";
+
+// 流式不走 parseResponse()，stop_reason 若不单独解析就永远是空串，
+// 调用方无从判断这一轮是正常结束还是被 max_tokens 截断
+$stopCases = [
+    ['正常结束 → end_turn', 'openai',
+     "data: {\"choices\":[{\"delta\":{\"content\":\"好\"}}]}\n\n"
+     . "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n",
+     'end_turn'],
+    ['被截断 → max_tokens', 'openai',
+     "data: {\"choices\":[{\"delta\":{\"content\":\"好\"}}]}\n\n"
+     . "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"length\"}]}\n\ndata: [DONE]\n\n",
+     'max_tokens'],
+    ['Anthropic 正常结束', 'claude',
+     "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"delta\":{\"type\":\"text_delta\",\"text\":\"好\"}}\n\n"
+     . "event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"}}\n\n",
+     'end_turn'],
+    ['Anthropic 被截断', 'claude',
+     "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"delta\":{\"type\":\"text_delta\",\"text\":\"好\"}}\n\n"
+     . "event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"max_tokens\"}}\n\n",
+     'max_tokens'],
+];
+foreach ($stopCases as [$name, $proto, $sse, $want]) {
+    $r   = replayAI(['protocol' => $proto, 'model' => 'm', 'api_key' => 'k'], $sse, true)->chat('hi');
+    $got = $r->getStopReason();
+    $ok  = ($got === $want);
+    check($ok, "流式 stop_reason：{$name}", '实际 "' . $got . '"');
+    echo pad($name, 30), $ok ? "✓ {$got}\n" : "✗ 得到 \"{$got}\"，期望 \"{$want}\"\n";
+}
+
+// 流式 + 工具调用：必须显式失败，不能返回「成功但全空」的响应
+$toolSSE = [
+    'OpenAI 系' => ['openai',
+        "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"c1\",\"type\":\"function\","
+        . "\"function\":{\"name\":\"f\",\"arguments\":\"{}\"}}]}}]}\n\n"
+        . "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"tool_calls\"}]}\n\ndata: [DONE]\n\n"],
+    'Anthropic 系' => ['claude',
+        "event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"tool_use\"}}\n\n"],
+];
+echo "\n";
+foreach ($toolSSE as $name => [$proto, $sse]) {
+    try {
+        $r = replayAI(['protocol' => $proto, 'model' => 'm', 'api_key' => 'k'], $sse, true)->chat('hi');
+        check(false, "流式工具调用显式失败：{$name}",
+              '未抛异常，返回 content="' . $r->getContent() . '"');
+        echo pad("流式工具调用 {$name}", 30), "✗ 未抛异常（静默返回空响应）\n";
+    } catch (\Ai\Exceptions\AIException $e) {
+        $ok = ($e->getErrorCode() === 'stream_tool_calls_unsupported');
+        check($ok, "流式工具调用显式失败：{$name}", $e->getErrorCode());
+        echo pad("流式工具调用 {$name}", 30), $ok ? "✓ 显式抛异常\n" : "✗ 错误码 {$e->getErrorCode()}\n";
+    }
+}
+
+// ---------------------------------------------------------------
 // 四、Anthropic 协议的正文提取（开启思考的模型首块是 thinking）
 // ---------------------------------------------------------------
 echo "\n=== Anthropic 多内容块解析 ===\n\n";

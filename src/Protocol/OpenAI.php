@@ -218,6 +218,25 @@ class OpenAI implements ProtocolInterface
     }
 
     /**
+     * 从流式数据块中解析结束原因（已归一）
+     *
+     * 流式响应不走 parseResponse()，stop_reason 若不在这里取，
+     * getStopReason() 在流式下就永远是空串——调用方无从判断这一轮是正常结束、
+     * 被 max_tokens 截断，还是模型在要求调用工具。
+     *
+     * @param array<string, mixed> $chunk
+     * @return string|null 该帧不含结束原因时返回 null
+     */
+    public function parseStreamStopReason(array $chunk): ?string
+    {
+        $reason = $chunk['choices'][0]['finish_reason'] ?? null;
+        if ($reason === null || $reason === '') {
+            return null;
+        }
+        return \Ai\Helpers\Tools::normalizeStopReason($reason);
+    }
+
+    /**
      * 判断流式数据是否结束
      * @param array<string, mixed> $chunk
      */

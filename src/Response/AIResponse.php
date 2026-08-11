@@ -13,7 +13,9 @@ class AIResponse implements AIResponseInterface
     protected $usage;
     protected $raw;
     protected $success;
-    
+    protected $toolCalls;
+    protected $stopReason;
+
     public function __construct(array $data)
     {
         $this->content = $data['content'] ?? '';
@@ -21,6 +23,61 @@ class AIResponse implements AIResponseInterface
         $this->usage = $data['usage'] ?? [];
         $this->raw = $data['raw'] ?? [];
         $this->success = $data['success'] ?? true;
+        $this->toolCalls = $data['tool_calls'] ?? [];
+        $this->stopReason = $data['stop_reason'] ?? '';
+    }
+
+    /**
+     * 模型发起的工具调用（已归一，各平台格式一致）
+     *
+     * @return array [['id'=>'调用ID', 'name'=>'工具名', 'input'=>[参数数组]], ...]
+     *               模型没有调用工具时返回空数组
+     */
+    public function getToolCalls(): array
+    {
+        return $this->toolCalls;
+    }
+
+    /**
+     * 本轮模型是否要求调用工具
+     */
+    public function hasToolCalls(): bool
+    {
+        return !empty($this->toolCalls);
+    }
+
+    /**
+     * 结束原因（已归一）
+     *
+     * 取值：end_turn 正常结束 / tool_use 要调工具 / max_tokens 长度截断 /
+     *      stop_sequence 命中停止词 / content_filter 被审核拦下 / refusal 模型拒答
+     */
+    public function getStopReason(): string
+    {
+        return $this->stopReason;
+    }
+
+    /**
+     * 转成可直接回填进 messages 的 assistant 回合
+     *
+     * 多轮工具调用时把模型这一轮的输出（文本 + tool_use 块）原样接回上下文，
+     * 格式为库的统一格式，协议层会按目标平台改写。
+     */
+    public function toAssistantMessage(): array
+    {
+        $blocks = [];
+        if ($this->content !== '') {
+            $blocks[] = ['type' => 'text', 'text' => $this->content];
+        }
+        foreach ($this->toolCalls as $call) {
+            $blocks[] = [
+                'type'  => 'tool_use',
+                'id'    => $call['id'] ?? '',
+                'name'  => $call['name'] ?? '',
+                'input' => $call['input'] ?? [],
+            ];
+        }
+        return ['role' => 'assistant', 'content' => $blocks];
     }
     
     /**
@@ -95,10 +152,12 @@ class AIResponse implements AIResponseInterface
     public function toArray(): array
     {
         return [
-            'content' => $this->content,
-            'model' => $this->model,
-            'usage' => $this->usage,
-            'success' => $this->success,
+            'content'     => $this->content,
+            'model'       => $this->model,
+            'usage'       => $this->usage,
+            'success'     => $this->success,
+            'tool_calls'  => $this->toolCalls,
+            'stop_reason' => $this->stopReason,
         ];
     }
     

@@ -1,0 +1,80 @@
+name: tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    name: PHP ${{ matrix.php }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # composer.json 声明 php >= 7.2，最低版本必须真的跑一遍，
+        # 否则很容易不小心用上 7.4+/8.0+ 的语法
+        php: ['7.2', '7.4', '8.0', '8.2', '8.4']
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 安装 PHP
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: ${{ matrix.php }}
+          extensions: curl, json, mbstring
+          coverage: none
+
+      - name: 校验 composer.json
+        run: composer validate --strict --no-check-publish
+
+      - name: 语法检查（含示例）
+        run: |
+          find src tests -name '*.php' -print0 | xargs -0 -n1 php -l
+          for f in *.php; do php -l "$f"; done
+
+      - name: 自动加载可用
+        run: php -r "require 'autoload.php'; class_exists('\Ai\AI') or exit(1); echo \"autoload OK\n\";"
+
+      - name: 跑测试（不联网，无需任何 API Key）
+        run: |
+          php tests/stream_test.php
+          php tests/tools_test.php
+          php tests/ssrf_test.php
+
+      - name: 协议注册表自检
+        run: |
+          php -r '
+            require "autoload.php";
+            use Ai\Helpers\Protocols;
+            $map = Protocols::all();
+            if (count($map) < 40) { fwrite(STDERR, "协议数异常\n"); exit(1); }
+            foreach (array_keys($map) as $k) {
+              $cls = Protocols::resolveClass($k);
+              if (!class_exists($cls)) { fwrite(STDERR, "缺类: $cls\n"); exit(1); }
+              if (!is_subclass_of($cls, "Ai\\Contracts\\ProtocolInterface")) {
+                fwrite(STDERR, "未实现接口: $cls\n"); exit(1);
+              }
+            }
+            echo count($map), " 个协议全部就绪\n";
+          '
+
+  tag-check:
+    # 推了代码却忘了打标签，Composer 用户拉不到更新且不会报错——这里主动兜住
+    name: 版本标签检查
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: HEAD 必须带标签
+        run: |
+          if git describe --exact-match --tags HEAD 2>/dev/null; then
+            echo "✓ 当前提交已打标签：$(git describe --exact-match --tags HEAD)"
+          else
+            echo "::warning::当前提交没有版本标签。本项目是 Composer 包，未打标签的提交对用户不可见（composer update 拉不到且不报错）。请补：git tag vX.Y.Z && git push origin vX.Y.Z"
+          fi

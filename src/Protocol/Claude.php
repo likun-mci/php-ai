@@ -62,7 +62,11 @@ class Claude implements ProtocolInterface
     {
         $request = [
             'model' => $payload['model'] ?? 'claude-3-opus-20240229',
-            'messages' => $this->convertMessages($payload['messages'] ?? []),
+            // 先把 OpenAI 写法（role:'tool' / assistant.tool_calls）归一成 Anthropic 块结构，
+            // 再走原有的角色过滤
+            'messages' => $this->convertMessages(
+                \Ai\Helpers\Tools::toClaudeMessages($payload['messages'] ?? [])
+            ),
             'max_tokens' => $payload['max_tokens'] ?? 4096,
         ];
 
@@ -72,6 +76,11 @@ class Claude implements ProtocolInterface
             if (array_key_exists($key, $payload)) {
                 $request[$key] = $payload[$key];
             }
+        }
+
+        // 工具定义：允许调用方直接写 OpenAI 原生格式
+        if (!empty($payload['tools']) && is_array($payload['tools'])) {
+            $request['tools'] = \Ai\Helpers\Tools::toClaudeDefs($payload['tools']);
         }
 
         // 流式开关必须写入请求体，否则服务端按非流式返回
@@ -133,11 +142,13 @@ class Claude implements ProtocolInterface
         }
 
         return new AIResponse([
-            'content' => $content,
-            'model' => $response['model'] ?? '',
-            'usage' => $usage,
-            'raw' => $response,
-            'success' => isset($response['content']),
+            'content'     => $content,
+            'model'       => $response['model'] ?? '',
+            'usage'       => $usage,
+            'raw'         => $response,
+            'success'     => isset($response['content']),
+            'tool_calls'  => \Ai\Helpers\Tools::fromClaudeContent($response['content'] ?? []),
+            'stop_reason' => \Ai\Helpers\Tools::normalizeStopReason($response['stop_reason'] ?? ''),
         ]);
     }
     

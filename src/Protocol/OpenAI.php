@@ -64,7 +64,9 @@ class OpenAI implements ProtocolInterface
     {
         $request = [
             'model' => $payload['model'] ?? 'gpt-4',
-            'messages' => $payload['messages'] ?? [],
+            // 统一格式（Anthropic 风格的 tool_use / tool_result 块）转成 OpenAI 的
+            // tool_calls / role:'tool' 结构；本来就是 OpenAI 写法的原样放行
+            'messages' => \Ai\Helpers\Tools::toOpenAiMessages($payload['messages'] ?? []),
         ];
 
         // 白名单透传所有已知生成参数（文档 & setConfig() 列出的参数都能实际送到接口）
@@ -72,6 +74,20 @@ class OpenAI implements ProtocolInterface
             if (array_key_exists($key, $payload)) {
                 $request[$key] = $payload[$key];
             }
+        }
+
+        // 工具定义与 tool_choice 同样按目标平台格式改写
+        if (!empty($payload['tools']) && is_array($payload['tools'])) {
+            $request['tools'] = \Ai\Helpers\Tools::toOpenAiDefs($payload['tools']);
+        }
+        if (isset($payload['tool_choice'])) {
+            $request['tool_choice'] = \Ai\Helpers\Tools::toOpenAiToolChoice($payload['tool_choice']);
+        }
+
+        // OpenAI 系没有顶层 system 字段，统一格式里的 system 要落到 messages 首位
+        if (!empty($payload['system']) && is_string($payload['system'])) {
+            array_unshift($request['messages'], ['role' => 'system', 'content' => $payload['system']]);
+            unset($request['system']);
         }
 
         // 流式
@@ -91,9 +107,15 @@ class OpenAI implements ProtocolInterface
         $content = '';
         $usage = [];
 
-        if (isset($response['choices'][0]['message']['content'])) {
-            $content = $response['choices'][0]['message']['content'];
+        $message = $response['choices'][0]['message'] ?? [];
+        if (isset($message['content']) && is_string($message['content'])) {
+            $content = $message['content'];
         }
+        // 工具调用归一成统一格式，业务层无需关心平台差异
+        $toolCalls  = \Ai\Helpers\Tools::fromOpenAiToolCalls($message);
+        $stopReason = \Ai\Helpers\Tools::normalizeStopReason(
+            $response['choices'][0]['finish_reason'] ?? ''
+        );
 
         if (isset($response['usage'])) {
             // 原样保留平台返回的完整 usage 对象（含 cached_tokens、prompt_tokens_details 等）
@@ -105,11 +127,13 @@ class OpenAI implements ProtocolInterface
         }
 
         return new AIResponse([
-            'content' => $content,
-            'model' => $response['model'] ?? '',
-            'usage' => $usage,
-            'raw' => $response,
-            'success' => isset($response['choices']),
+            'content'     => $content,
+            'model'       => $response['model'] ?? '',
+            'usage'       => $usage,
+            'raw'         => $response,
+            'success'     => isset($response['choices']),
+            'tool_calls'  => $toolCalls,
+            'stop_reason' => $stopReason,
         ]);
     }
     

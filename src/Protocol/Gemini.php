@@ -63,7 +63,8 @@ class Gemini implements ProtocolInterface
     {
         $request = [
             'model' => $payload['model'] ?? 'gemini-pro',
-            'messages' => $payload['messages'] ?? [],
+            // 走的是 OpenAI 兼容端点，工具相关结构与 OpenAI 一致
+            'messages' => \Ai\Helpers\Tools::toOpenAiMessages($payload['messages'] ?? []),
         ];
 
         // 白名单透传所有已知生成参数
@@ -71,6 +72,17 @@ class Gemini implements ProtocolInterface
             if (array_key_exists($key, $payload)) {
                 $request[$key] = $payload[$key];
             }
+        }
+
+        if (!empty($payload['tools']) && is_array($payload['tools'])) {
+            $request['tools'] = \Ai\Helpers\Tools::toOpenAiDefs($payload['tools']);
+        }
+        if (isset($payload['tool_choice'])) {
+            $request['tool_choice'] = \Ai\Helpers\Tools::toOpenAiToolChoice($payload['tool_choice']);
+        }
+        if (!empty($payload['system']) && is_string($payload['system'])) {
+            array_unshift($request['messages'], ['role' => 'system', 'content' => $payload['system']]);
+            unset($request['system']);
         }
 
         // 流式：走的是 OpenAI 兼容端点，必须显式要 usage，否则整个流都不回传 token 用量
@@ -129,11 +141,13 @@ class Gemini implements ProtocolInterface
         }
 
         return new AIResponse([
-            'content' => $content,
-            'model' => $response['model'] ?? ($response['modelVersion'] ?? ''),
-            'usage' => $usage,
-            'raw' => $response,
-            'success' => isset($response['choices']) || isset($response['candidates']),
+            'content'     => $content,
+            'model'       => $response['model'] ?? ($response['modelVersion'] ?? ''),
+            'usage'       => $usage,
+            'raw'         => $response,
+            'success'     => isset($response['choices']) || isset($response['candidates']),
+            'tool_calls'  => \Ai\Helpers\Tools::fromOpenAiToolCalls($response['choices'][0]['message'] ?? []),
+            'stop_reason' => \Ai\Helpers\Tools::normalizeStopReason($response['choices'][0]['finish_reason'] ?? ''),
         ]);
     }
     

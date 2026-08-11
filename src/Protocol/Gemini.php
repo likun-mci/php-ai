@@ -73,9 +73,10 @@ class Gemini implements ProtocolInterface
             }
         }
 
-        // 流式
+        // 流式：走的是 OpenAI 兼容端点，必须显式要 usage，否则整个流都不回传 token 用量
         if (!empty($payload['stream'])) {
             $request['stream'] = true;
+            $request['stream_options'] = ['include_usage' => true];
         }
 
         return $request;

@@ -14,7 +14,7 @@
 - 🎯 **统一接口**：`AI::create()->chat()`，切换平台只需换 `protocol` 或 `model`，业务代码一行不用改
 - 🧰 **国产模型跑工具调用**：智谱、Kimi、百炼、DeepSeek 都提供了 Anthropic 兼容端点，可用国产价格跑 Agent 的 tools 协议
 - 🧩 **任意模型 + 任意接口**：模型名不受内置清单限制，可手选协议格式（`protocol`）并指定自定义接口地址（`base_url` / `endpoint`），一套代码同时对接官方 API、第三方中转与自建网关
-- 🌊 **流式输出**：一行 `setStream(true)`，自动按 SSE 协议实时吐出数据块
+- 🌊 **流式输出**：一行 `setStream(true)`，自动按 SSE 协议实时吐出数据块；常驻内存框架用 `setStreamCallback()` 接管分片
 - 🧰 **Agent 循环**：挂载工具（函数）后自动完成「模型决策 → 执行工具 → 回填结果」多轮循环
 - 🤖 **Claude Code CLI**：直接调用本机 claude 程序（`Ai\Cli\ClaudeCode`），文件读写 / 工具执行 / 会话续接 / 结构化输出，路径自动检测并缓存
 - 📊 **CLI 信息查询**：不发起对话即可读取版本、登录态、模型列表、额度用量与限流、生效设置、MCP 状态
@@ -377,6 +377,7 @@ $ai->setModel('claude-3-opus')   // 单独切换模型
    ->setSslVerify(false)         // 禁用 SSL 校验（仅调试/内网自签）
    ->setProxy('socks5h://127.0.0.1:1080')
    ->setStream(true)
+   ->setStreamCallback($fn)      // 流式分片交给回调（常驻内存框架必用，见「流式输出」章节）
    ->setAttachments([$file])
    ->chat($prompt);
 ```
@@ -960,6 +961,35 @@ try {
 ```
 
 > **PHP 环境注意**：流式输出会清空并关闭所有输出缓冲。如果使用会话锁（`session_start()`），建议在流式开始前 `session_write_close()`，否则同一用户的其它请求会被阻塞。
+
+### 常驻内存框架（Swoole / Workerman）：`setStreamCallback()`
+
+上面的默认行为是 `echo` 到输出缓冲区，**只适用于 PHP-FPM / CLI**。在 Swoole、Workerman、RoadRunner 这类常驻内存框架里，`echo` 会落到进程标准输出（日志文件），永远送不到客户端。这种场景注册回调，由调用方自己下发：
+
+```php
+$ai->setStream(true)->setStreamCallback(function($event) use ($response) {
+    if ($event['type'] === 'stream_chunk' && $event['content'] !== null) {
+        // $response 是 Swoole\Http\Response，write() 分块下发
+        $response->write('data: ' . json_encode(['content' => $event['content']]) . "\n\n");
+    }
+    if ($event['type'] === 'stream_end') {
+        $response->write('data: ' . json_encode($event['data']) . "\n\n");
+    }
+});
+
+$full = $ai->chat($messages)->getContent();   // 返回值不受影响，仍是拼好的完整文本
+```
+
+注册回调后库不再产生任何输出，SSE 帧格式完全由调用方决定。事件结构：
+
+| 字段 | 说明 |
+|------|------|
+| `type` | `stream_chunk` 增量分片 / `stream_end` 结束 |
+| `content` | `stream_chunk` 的增量文本，**已由协议层归一化**，跨平台通用；无正文的分片为 `null` |
+| `raw` | `stream_chunk` 的平台原始分片数组，需要平台专有字段时才用 |
+| `data` | `stream_end` 的汇总：`content` 完整正文、`model`、`usage` |
+
+传 `null`（`setStreamCallback(null)`）恢复默认的直接输出。
 
 ---
 

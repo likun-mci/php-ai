@@ -56,20 +56,79 @@ class Memory
         return $c;
     }
 
-    /** 覆盖整份记忆 */
+    /**
+     * 覆盖整份记忆（原子写）
+     *
+     * 先写同目录临时文件再 rename：rename 在同一文件系统内是原子操作，
+     * 因此不会出现「写到一半进程被杀 → 记忆被截断」的情况。
+     * 直接 file_put_contents 到目标文件则会。
+     */
     public function write($content)
     {
         $this->ensure();
-        return @file_put_contents($this->file, (string) $content) !== false;
+        $content = (string) $content;
+
+        $tmp = $this->file . '.tmp.' . getmypid() . '.' . mt_rand(1000, 9999);
+        if (@file_put_contents($tmp, $content, LOCK_EX) === false) {
+            // 临时文件写不了（目录只读等），退回直接写，至少不丢功能
+            return @file_put_contents($this->file, $content, LOCK_EX) !== false;
+        }
+        // 尽量沿用原文件权限，避免 rename 后权限变成 umask 默认值
+        if (is_file($this->file)) {
+            $perms = @fileperms($this->file);
+            if ($perms !== false) {
+                @chmod($tmp, $perms & 0777);
+            }
+        }
+        if (!@rename($tmp, $this->file)) {
+            @unlink($tmp);
+            return @file_put_contents($this->file, $content, LOCK_EX) !== false;
+        }
+        return true;
     }
 
-    /** 追加一段记忆（自动补换行分隔；空内容不写） */
+    /**
+     * 追加一段记忆（自动补换行分隔；空内容不写）
+     *
+     * 原实现是「读全文 → 拼接 → 整体写回」，两个进程同时 append 时后写的会
+     * 覆盖掉先写的，直接丢数据。改为用 'a' 模式 + LOCK_EX 独占追加：
+     * 追加本身就是幂等的尾部写入，不需要先读全文，也就不存在竞态。
+     */
     public function append($content)
     {
         $content = trim((string) $content);
         if ($content === '') return false;
-        $existing = $this->read();
-        $sep = ($existing === '' || substr($existing, -1) === "\n") ? '' : "\n";
-        return $this->write($existing . $sep . $content . "\n");
+
+        $this->ensure();
+        $fp = @fopen($this->file, 'a');
+        if ($fp === false) {
+            return false;
+        }
+        // 阻塞直到拿到独占锁，避免并发交错
+        if (!@flock($fp, LOCK_EX)) {
+            @fclose($fp);
+            return false;
+        }
+
+        // 拿到锁之后再判断结尾是否需要补换行——此时文件状态才是确定的
+        $sep  = '';
+        $size = @filesize($this->file);
+        if ($size !== false && $size > 0) {
+            $fh = @fopen($this->file, 'r');
+            if ($fh !== false) {
+                @fseek($fh, -1, SEEK_END);
+                $lastChar = @fread($fh, 1);
+                @fclose($fh);
+                if ($lastChar !== "\n") {
+                    $sep = "\n";
+                }
+            }
+        }
+
+        $ok = @fwrite($fp, $sep . $content . "\n") !== false;
+        @fflush($fp);
+        @flock($fp, LOCK_UN);
+        @fclose($fp);
+        return $ok;
     }
 }

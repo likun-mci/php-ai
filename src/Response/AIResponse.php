@@ -15,6 +15,7 @@ class AIResponse implements AIResponseInterface
     protected $success;
     protected $toolCalls;
     protected $stopReason;
+    protected $error;
 
     public function __construct(array $data)
     {
@@ -25,6 +26,18 @@ class AIResponse implements AIResponseInterface
         $this->success = $data['success'] ?? true;
         $this->toolCalls = $data['tool_calls'] ?? [];
         $this->stopReason = $data['stop_reason'] ?? '';
+        $this->error = $data['error'] ?? '';
+    }
+
+    /**
+     * 失败原因
+     *
+     * 只有 chatBatch() 这类「单条失败不抛异常」的场景会填充；
+     * chat() 失败时直接抛 AIException，这里始终为空串。
+     */
+    public function getError(): string
+    {
+        return $this->error;
     }
 
     /**
@@ -129,21 +142,57 @@ class AIResponse implements AIResponseInterface
     }
     
     /**
-     * 估算费用（需要配置价格表）
+     * 估算费用（需要自行传入价格表）
+     *
+     * **单位是「每百万 token」**——各家官网现在都按百万计价，此前按每千计价
+     * 容易让人直接把官网数字抄进来，结果算出 1000 倍的费用。
+     *
+     * ```php
+     * // 价格照抄官网的「每百万 token」数字即可
+     * $response->cost([
+     *     'prompt'     => 3.00,   // 输入 $3 / 1M tokens
+     *     'completion' => 15.00,  // 输出 $15 / 1M tokens
+     *     'cached'     => 0.30,   // 可选：命中缓存的输入价（通常是输入价的 1/10）
+     * ]);
+     * ```
+     *
+     * 缓存 token：多数平台把命中缓存的输入量单列（OpenAI 系放在
+     * `prompt_tokens_details.cached_tokens`，Anthropic 系是
+     * `cache_read_input_tokens`）。传了 `cached` 价格时，这部分会从
+     * 普通输入里扣除后单独按缓存价计算；不传则全按普通输入价算。
+     *
+     * @param array $pricing ['prompt'=>每百万输入价, 'completion'=>每百万输出价, 'cached'=>每百万缓存输入价]
+     * @param int   $perTokens 计价基数，默认 1_000_000；传 1000 可沿用旧的「每千」口径
+     * @return float 估算费用，单位与价格表一致（通常是美元）
      */
-    public function cost(array $pricing = []): float
+    public function cost(array $pricing = [], int $perTokens = 1000000): float
     {
-        if (empty($pricing)) {
+        if (empty($pricing) || $perTokens <= 0) {
             return 0.0;
         }
-        
-        $promptTokens = $this->usage['prompt_tokens'] ?? 0;
-        $completionTokens = $this->usage['completion_tokens'] ?? 0;
-        
-        $promptCost = ($promptTokens / 1000) * ($pricing['prompt'] ?? 0);
-        $completionCost = ($completionTokens / 1000) * ($pricing['completion'] ?? 0);
-        
-        return $promptCost + $completionCost;
+
+        $prompt     = (int) ($this->usage['prompt_tokens'] ?? 0);
+        $completion = (int) ($this->usage['completion_tokens'] ?? 0);
+
+        // 命中缓存的输入量：两大家族字段名不同，都认
+        $cached = (int) (
+            $this->usage['prompt_tokens_details']['cached_tokens']
+            ?? $this->usage['cache_read_input_tokens']
+            ?? 0
+        );
+
+        $cost = 0.0;
+        if (isset($pricing['cached']) && $cached > 0) {
+            // 缓存部分单独计价，其余按普通输入价
+            $cached = min($cached, $prompt);
+            $cost  += ($cached / $perTokens) * (float) $pricing['cached'];
+            $prompt -= $cached;
+        }
+
+        $cost += ($prompt / $perTokens) * (float) ($pricing['prompt'] ?? 0);
+        $cost += ($completion / $perTokens) * (float) ($pricing['completion'] ?? 0);
+
+        return $cost;
     }
     
     /**

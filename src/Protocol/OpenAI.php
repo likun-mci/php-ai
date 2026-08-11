@@ -274,7 +274,7 @@ class OpenAI implements ProtocolInterface
             return $models ?: $this->fallbackModels($config);
 
         } catch (\Exception $e) {
-            error_log('Failed to list models (' . static::class . '): ' . $e->getMessage());
+            \Ai\Helpers\Log::warning('拉取模型列表失败', ['protocol' => static::class, 'error' => $e->getMessage()]);
             return $this->fallbackModels($config);
         }
     }

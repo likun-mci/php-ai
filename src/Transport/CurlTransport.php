@@ -323,6 +323,197 @@ class CurlTransport implements TransportInterface
     }
 
     /**
+     * 并发发送多个 POST 请求（curl_multi）
+     *
+     * 批量场景（翻译、摘要、打标签……）串行跑，耗时是「单条 × 条数」，
+     * 且每条都要重做一次 TLS 握手。这里用 curl_multi 并发，总耗时约等于
+     * 「最慢的一条 × 批次数」。
+     *
+     * 与 post() 的差异：
+     *   - 单条失败不影响其它条，失败项在返回值里以 error 字段呈现，不抛异常
+     *   - 不支持流式（并发流式没有意义，回调会互相穿插）
+     *   - 重试按条独立进行
+     *
+     * @param array $requests [
+     *     ['url'=>..., 'data'=>[...], 'headers'=>[...]],   // 键可自定义，返回时原样对应
+     *     ...
+     * ]
+     * @param int   $concurrency 同时在途的最大请求数，默认 5；过大易触发平台限流
+     * @return array 与入参同键的结果数组，每项为：
+     *     ['ok'=>true,  'status'=>200, 'response'=>[...]]
+     *     ['ok'=>false, 'status'=>429, 'error'=>'...', 'response'=>[原始错误体]]
+     */
+    public function postConcurrent(array $requests, int $concurrency = 5): array
+    {
+        if (!$requests) {
+            return [];
+        }
+        $concurrency = max(1, $concurrency);
+        $results     = [];
+        $queue       = $requests;          // 待发送队列（保留原始键）
+        $keys        = array_keys($queue);
+        $cursor      = 0;
+        $active      = [];                 // curl 句柄 => ['key'=>..., 'tries'=>..., 'req'=>...]
+
+        $mh = curl_multi_init();
+
+        // 把队列里的下一条塞进 multi 句柄
+        $push = function () use (&$cursor, &$keys, &$queue, &$active, $mh, &$results) {
+            while ($cursor < count($keys)) {
+                $key = $keys[$cursor];
+                $cursor++;
+                $req = $queue[$key];
+                $ch  = $this->buildHandle($req, $results, $key);
+                if ($ch === null) {
+                    continue;              // 编码失败等，已写入 $results，跳过
+                }
+                curl_multi_add_handle($mh, $ch);
+                $active[(int) $ch] = ['key' => $key, 'tries' => 1, 'req' => $req, 'handle' => $ch];
+                return true;
+            }
+            return false;
+        };
+
+        for ($i = 0; $i < $concurrency; $i++) {
+            if (!$push()) {
+                break;
+            }
+        }
+
+        do {
+            do {
+                $status = curl_multi_exec($mh, $running);
+            } while ($status === CURLM_CALL_MULTI_PERFORM);
+
+            // 阻塞等待，避免空转把 CPU 打满
+            if ($running > 0) {
+                curl_multi_select($mh, 1.0);
+            }
+
+            while ($done = curl_multi_info_read($mh)) {
+                $ch   = $done['handle'];
+                $id   = (int) $ch;
+                $meta = $active[$id] ?? null;
+                unset($active[$id]);
+
+                $body     = curl_multi_getcontent($ch);
+                $errno    = curl_errno($ch);
+                $error    = curl_error($ch);
+                $httpCode = (int) curl_getinfo($ch, CURLINFO_HTTP_CODE);
+                curl_multi_remove_handle($mh, $ch);
+
+                if ($meta === null) {
+                    continue;
+                }
+
+                // 可重试：连接级瞬时错误，或 429/5xx
+                $retryable = ($body === false && in_array($errno, [35, 52, 55, 56], true))
+                          || in_array($httpCode, $this->retryStatuses, true);
+
+                if ($retryable && $meta['tries'] <= $this->maxRetries) {
+                    // 并发场景不读 Retry-After（拿不到单条响应头），直接指数退避
+                    usleep($this->retryDelayMs($meta['tries'], '') * 1000);
+                    $newCh = $this->buildHandle($meta['req'], $results, $meta['key']);
+                    if ($newCh !== null) {
+                        curl_multi_add_handle($mh, $newCh);
+                        $active[(int) $newCh] = [
+                            'key'    => $meta['key'],
+                            'tries'  => $meta['tries'] + 1,
+                            'req'    => $meta['req'],
+                            'handle' => $newCh,
+                        ];
+                        continue;
+                    }
+                }
+
+                $results[$meta['key']] = $this->buildConcurrentResult($body, $errno, $error, $httpCode);
+                $push();               // 补位，保持在途数量
+            }
+        } while ($running > 0 || $active);
+
+        curl_multi_close($mh);
+
+        // 按入参顺序返回，调用方可直接与原数组对齐
+        $ordered = [];
+        foreach (array_keys($requests) as $k) {
+            $ordered[$k] = $results[$k] ?? [
+                'ok' => false, 'status' => 0, 'error' => '未执行', 'response' => [],
+            ];
+        }
+        return $ordered;
+    }
+
+    /**
+     * 为并发请求构造单个 curl 句柄；请求体编码失败时直接写结果并返回 null
+     */
+    protected function buildHandle(array $req, array &$results, $key)
+    {
+        $payload = json_encode($req['data'] ?? [], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+        if ($payload === false) {
+            $results[$key] = [
+                'ok'       => false,
+                'status'   => 0,
+                'error'    => '请求体 JSON 编码失败：' . json_last_error_msg(),
+                'response' => [],
+            ];
+            return null;
+        }
+
+        $ch = curl_init($req['url'] ?? '');
+        curl_setopt($ch, CURLOPT_POST, true);
+        curl_setopt($ch, CURLOPT_POSTFIELDS, $payload);
+        curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+        curl_setopt($ch, CURLOPT_TIMEOUT, $this->timeout);
+        if ($this->connectTimeout !== null) {
+            curl_setopt($ch, CURLOPT_CONNECTTIMEOUT, $this->connectTimeout);
+        }
+        if ($this->userAgent !== '') {
+            curl_setopt($ch, CURLOPT_USERAGENT, $this->userAgent);
+        }
+        if (!$this->sslVerify) {
+            curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, false);
+            curl_setopt($ch, CURLOPT_SSL_VERIFYHOST, 0);
+        }
+        if (!empty($this->proxy)) {
+            curl_setopt($ch, CURLOPT_PROXY, $this->proxy);
+            curl_setopt($ch, CURLOPT_PROXYTYPE, $this->proxyType);
+        }
+
+        $curlHeaders = [];
+        foreach (($req['headers'] ?? []) as $k => $v) {
+            $curlHeaders[] = "{$k}: {$v}";
+        }
+        curl_setopt($ch, CURLOPT_HTTPHEADER, $curlHeaders);
+        if (defined('CURL_HTTP_VERSION_1_1')) {
+            curl_setopt($ch, CURLOPT_HTTP_VERSION, CURL_HTTP_VERSION_1_1);
+        }
+        return $ch;
+    }
+
+    /**
+     * 把单条并发请求的原始结果整理成统一结构
+     */
+    protected function buildConcurrentResult($body, int $errno, string $error, int $httpCode): array
+    {
+        if ($body === false || $httpCode >= 400) {
+            $decoded = is_string($body) ? (json_decode($body, true) ?: []) : [];
+            $message = $error !== '' ? $error : "HTTP Error: {$httpCode}";
+            if (isset($decoded['error']['message'])) {
+                $message .= ': ' . $decoded['error']['message'];
+            } elseif (isset($decoded['message'])) {
+                $message .= ': ' . $decoded['message'];
+            }
+            return ['ok' => false, 'status' => $httpCode, 'error' => $message, 'response' => $decoded];
+        }
+        return [
+            'ok'       => true,
+            'status'   => $httpCode,
+            'error'    => '',
+            'response' => json_decode((string) $body, true) ?: [],
+        ];
+    }
+
+    /**
      * 发送 GET 请求
      */
     public function get(string $url, array $params = [], array $headers = []): array
@@ -616,7 +807,7 @@ class CurlTransport implements TransportInterface
             call_user_func($this->streamCallback, $decoded);
         } catch (\Exception $e) {
             // 回调异常不影响主流程
-            error_log('Stream callback error: ' . $e->getMessage());
+            \Ai\Helpers\Log::warning('流式回调抛出异常（已忽略，不影响主流程）', ['error' => $e->getMessage()]);
         }
     }
 }

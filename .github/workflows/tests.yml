@@ -42,6 +42,8 @@ jobs:
         run: |
           php tests/stream_test.php
           php tests/tools_test.php
+          php tests/lib_test.php
+          php tests/cli_test.php
           php tests/ssrf_test.php
 
       - name: 协议注册表自检

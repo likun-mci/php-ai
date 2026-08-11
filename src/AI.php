@@ -585,6 +585,101 @@ class AI
     }
     
     /**
+     * 批量并发对话
+     *
+     * 批量场景（翻译、摘要、分类、打标签……）串行跑，总耗时是「单条 × 条数」，
+     * 且每条都要重做一次 TLS 握手。这里并发发送，总耗时约等于「最慢的一条 × 批次数」。
+     *
+     * 用法与 chat() 一致，每个元素可以是字符串或完整 payload 数组：
+     *
+     * ```php
+     * $results = $ai->chatBatch([
+     *     'title' => '把这句翻译成英文：你好',
+     *     'desc'  => ['messages' => [['role'=>'user','content'=>'翻译：世界']]],
+     * ], 5);
+     *
+     * foreach ($results as $key => $r) {
+     *     if ($r->isSuccess()) {
+     *         echo $key, ': ', $r->getContent(), "\n";
+     *     } else {
+     *         echo $key, ' 失败: ', $r->getError(), "\n";
+     *     }
+     * }
+     * ```
+     *
+     * 与 chat() 的差异：
+     *   - **单条失败不抛异常**，而是返回一个 isSuccess() 为 false 的响应，
+     *     用 getError() 取错误信息——批量场景不该因为一条失败就丢掉其它结果
+     *   - 不支持流式（并发流式的分片会互相穿插，没有意义）
+     *   - 附件（setAttachments）只作用于 chat()，批量请在各自 payload 里自带
+     *
+     * @param array $payloads    键名任意，返回结果按同样的键对应回来
+     * @param int   $concurrency 同时在途的请求数，默认 5；调大易触发平台限流
+     * @return AIResponseInterface[] 与入参同键的响应数组
+     */
+    public function chatBatch(array $payloads, int $concurrency = 5): array
+    {
+        if (!$this->model) {
+            throw new ConfigException('Model not set');
+        }
+        if (!method_exists($this->transport, 'postConcurrent')) {
+            // 传输层不支持并发时降级为串行，保证功能可用
+            $out = [];
+            foreach ($payloads as $key => $payload) {
+                try {
+                    $out[$key] = $this->chat($payload);
+                } catch (\Exception $e) {
+                    $out[$key] = new \Ai\Response\AIResponse([
+                        'success' => false,
+                        'error'   => $e->getMessage(),
+                        'model'   => $this->model->getName(),
+                    ]);
+                }
+            }
+            return $out;
+        }
+
+        $endpoint = $this->resolveEndpoint();
+        $headers  = $this->protocol->buildHeaders($this->config);
+
+        $requests = [];
+        foreach ($payloads as $key => $payload) {
+            if (is_string($payload)) {
+                $payload = ['messages' => [['role' => 'user', 'content' => $payload]]];
+            }
+            $payload = array_merge([
+                'model'    => $this->model->getName(),
+                'messages' => [],
+            ], $this->model->getConfig(), $this->collectModelParams(), (array) $payload);
+            unset($payload['stream']);              // 批量不支持流式
+            $payload = self::sanitizePayloadParams($payload);
+
+            $body = $this->protocol->buildRequest($payload);
+            if (!empty($this->config['extra_body']) && is_array($this->config['extra_body'])) {
+                $body = array_merge($body, $this->config['extra_body']);
+            }
+            $requests[$key] = ['url' => $endpoint, 'data' => $body, 'headers' => $headers];
+        }
+
+        $raw = $this->transport->postConcurrent($requests, $concurrency);
+
+        $out = [];
+        foreach ($raw as $key => $item) {
+            if (!empty($item['ok'])) {
+                $out[$key] = $this->protocol->parseResponse($item['response']);
+            } else {
+                $out[$key] = new \Ai\Response\AIResponse([
+                    'success' => false,
+                    'error'   => $item['error'] ?? '请求失败',
+                    'model'   => $this->model->getName(),
+                    'raw'     => $item['response'] ?? [],
+                ]);
+            }
+        }
+        return $out;
+    }
+
+    /**
      * 实时输出文本（兼容 CLI 和 HTTP 环境）
      *
      * - CLI 模式：直接 print 到 stdout，自动刷新缓冲区
@@ -665,7 +760,7 @@ class AI
                     $callback($data);
                 } catch (\Exception $e) {
                     // 回调异常不影响主流程
-                    error_log('Callback error: ' . $e->getMessage());
+                    \Ai\Helpers\Log::warning('回调抛出异常（已忽略，不影响主流程）', ['event' => $event, 'error' => $e->getMessage()]);
                 }
             }
         }

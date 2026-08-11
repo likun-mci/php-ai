@@ -94,7 +94,7 @@ class Log
         try {
             if (is_object($logger) && method_exists($logger, 'log')) {
                 $logger->log($level, $message, $context);   // PSR-3
-            } else {
+            } elseif (is_callable($logger)) {
                 call_user_func($logger, $level, $message, $context);
             }
         } catch (\Throwable $e) {

@@ -60,7 +60,7 @@ class DeepSeekAnthropic extends BaseModel
                         'type' => $attachment->getType(),
                         'filename' => basename($source),
                         'mime_type' => $mimeType,
-                        'content' => file_get_contents($source)
+                        'content' => (string) @file_get_contents($source)
                     ];
                 } else {
                     $attachmentInfo[] = [
@@ -69,7 +69,8 @@ class DeepSeekAnthropic extends BaseModel
                         'mime_type' => $mimeType,
                         'content' => [
                             'encoding' => 'base64',
-                            'data' => base64_encode(file_get_contents($source))
+                            // 读不到时 base64_encode(false) 在 PHP 8 上是 TypeError
+                            'data' => base64_encode((string) @file_get_contents($source))
                         ]
                     ];
                 }

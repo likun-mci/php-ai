@@ -261,8 +261,10 @@ class CurlTransport implements TransportInterface
             );
         }
 
-        $decoded = json_decode($response, true);
-        return $decoded ?: [];
+        // curl_exec() 未开 RETURNTRANSFER 时会返回 true；本类始终开启，
+        // 但静态类型仍是 string|bool，取值前显式收窄，避免把 bool 喂给 json_decode()
+        $decoded = is_string($response) ? json_decode($response, true) : null;
+        return is_array($decoded) ? $decoded : [];
     }
 
     /**
@@ -602,8 +604,10 @@ class CurlTransport implements TransportInterface
             );
         }
 
-        $decoded = json_decode($response, true);
-        return $decoded ?: [];
+        // curl_exec() 未开 RETURNTRANSFER 时会返回 true；本类始终开启，
+        // 但静态类型仍是 string|bool，取值前显式收窄，避免把 bool 喂给 json_decode()
+        $decoded = is_string($response) ? json_decode($response, true) : null;
+        return is_array($decoded) ? $decoded : [];
     }
 
     /**

@@ -302,8 +302,10 @@ class Gemini implements ProtocolInterface
             $models = [];
             foreach ($response['models'] as $model) {
                 if (isset($model['name'])) {
-                    // name 格式为 "models/gemini-pro"，提取模型名称
-                    $modelId = str_replace('models/', '', $model['name']);
+                    // name 格式为 "models/gemini-pro"，提取模型名称。
+                    // 显式转字符串：平台若返回非字符串，str_replace 会返回数组，
+                    // 拿数组当数组键会触发 "Illegal offset type"
+                    $modelId = str_replace('models/', '', (string) $model['name']);
                     $models[$modelId] = $raw ? $model : ($model['displayName'] ?? $modelId);
                 }
             }

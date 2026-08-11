@@ -166,7 +166,7 @@ class AI
 
     /**
      * 模型名称到类名的映射表
-     * @var array<mixed>
+     * @var array<string, class-string<ModelInterface>>
      */
     private $modelMap = [
         'gpt-4.1'            => 'Ai\Models\OpenAI\GPT41',

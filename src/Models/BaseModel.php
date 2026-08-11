@@ -22,7 +22,7 @@ abstract class BaseModel implements ModelInterface
     
     /**
      * 使用的协议类
-     * @var string
+     * @var class-string<\Ai\Contracts\ProtocolInterface>
      */
     protected $protocol;
 
@@ -62,6 +62,7 @@ abstract class BaseModel implements ModelInterface
     
     /**
      * 获取使用的协议
+     * @return class-string<\Ai\Contracts\ProtocolInterface>
      */
     public function getProtocol(): string
     {

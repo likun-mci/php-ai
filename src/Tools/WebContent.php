@@ -57,7 +57,9 @@ class WebContent
     {
         $d = json_decode((string) $body, true);
         if ($d === null) return (string) $body;
-        return json_encode($d, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+        $pretty = json_encode($d, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+        // 编码失败时退回原文，好过返回 false 让调用方拿到假的空内容
+        return $pretty === false ? (string) $body : $pretty;
     }
 
     /** HTML → 纯文本：剥离噪声后取文本、压缩空白

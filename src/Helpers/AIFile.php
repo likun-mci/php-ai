@@ -80,7 +80,17 @@ class AIFile
     public function getBase64Content(): string
     {
         if ($this->type === 'path') {
-            return base64_encode(file_get_contents($this->source));
+            // file_get_contents 读不到时返回 false，直接喂给 base64_encode()
+            // 在 PHP 8 上是 TypeError，在 PHP 7 上则会静默编码成空串——
+            // 两种都不该发生，这里显式判定并记录原因
+            $raw = @file_get_contents($this->source);
+            if ($raw === false) {
+                \Ai\Helpers\Log::error('附件文件读取失败，本次附件将被忽略', [
+                    'source' => $this->source,
+                ]);
+                return '';
+            }
+            return base64_encode($raw);
         }
         return '';
     }

@@ -23,8 +23,9 @@ use Ai\Exceptions\ConfigException;
  */
 class Protocols
 {
-    /** 协议表：标识 => [类名, 显示名, 平台显示名, 平台键, 分组, 文档地址]
-     * @var array<string, array<string, string>>
+    /**
+     * 协议表：标识 => [类名, 显示名, 平台显示名, 平台键, 分组, 文档地址]
+     * @var array<string, array{class: class-string<\Ai\Contracts\ProtocolInterface>, label: string, vendor: string, platform: string, group: string, docs: string}>
      */
     protected static $map = [
         'openai' => [
@@ -349,8 +350,13 @@ class Protocols
         ],
     ];
 
-    /** 协议标识别名
-     * @var array<string, string>
+    /**
+     * 协议标识别名
+     *
+     * 键类型写成 string|int 是因为 PHP 会把纯数字的字符串键静默转成 int
+     * （如 '360' => 360）。查表时 isset(\$alias['360']) 同样会被转换，
+     * 因此功能不受影响，但类型上必须如实标注。
+     * @var array<string|int, string>
      */
     protected static $alias = [
         'oai'                 => 'openai',
@@ -510,6 +516,7 @@ class Protocols
      *
      * @param string $protocol 'openai'、'anthropic'、或 'App\\Protocol\\MyApi' 这样的完整类名
      * @throws ConfigException 协议不存在或类未实现 ProtocolInterface
+     * @return class-string<\Ai\Contracts\ProtocolInterface>
      */
     public static function resolveClass(string $protocol): string
     {

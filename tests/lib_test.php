@@ -179,25 +179,29 @@ $resp = new AIResponse(['usage' => [
     'prompt_tokens_details' => ['cached_tokens' => 800000],
 ]]);
 
-check(abs($resp->cost(['prompt' => 5.0, 'completion' => 25.0]) - 17.5) < 0.0001,
-      '按百万 token 计价（5 + 12.5 = 17.5）',
-      (string) $resp->cost(['prompt' => 5.0, 'completion' => 25.0]));
+// cost() 默认口径保持每千不变——改默认会让已有代码的账静默差 1000 倍
+check(abs($resp->cost(['prompt' => 0.005, 'completion' => 0.025]) - 17.5) < 0.0001,
+      'cost() 默认仍是每千 token（向后兼容）',
+      (string) $resp->cost(['prompt' => 0.005, 'completion' => 0.025]));
+
+check(abs($resp->costPerMillion(['prompt' => 5.0, 'completion' => 25.0]) - 17.5) < 0.0001,
+      'costPerMillion() 按百万计价（5 + 12.5 = 17.5）',
+      (string) $resp->costPerMillion(['prompt' => 5.0, 'completion' => 25.0]));
 
 // 80 万走缓存价 0.5 = 0.40；剩 20 万走输入价 5 = 1.00；输出 12.50
-check(abs($resp->cost(['prompt' => 5.0, 'completion' => 25.0, 'cached' => 0.5]) - 13.9) < 0.0001,
+check(abs($resp->costPerMillion(['prompt' => 5.0, 'completion' => 25.0, 'cached' => 0.5]) - 13.9) < 0.0001,
       '缓存 token 单独计价（OpenAI 字段）',
-      (string) $resp->cost(['prompt' => 5.0, 'completion' => 25.0, 'cached' => 0.5]));
+      (string) $resp->costPerMillion(['prompt' => 5.0, 'completion' => 25.0, 'cached' => 0.5]));
 
 $anthropic = new AIResponse(['usage' => [
     'prompt_tokens' => 1000000, 'completion_tokens' => 0, 'cache_read_input_tokens' => 1000000,
 ]]);
-check(abs($anthropic->cost(['prompt' => 5.0, 'completion' => 25.0, 'cached' => 0.5]) - 0.5) < 0.0001,
+check(abs($anthropic->costPerMillion(['prompt' => 5.0, 'completion' => 25.0, 'cached' => 0.5]) - 0.5) < 0.0001,
       '缓存 token 单独计价（Anthropic 字段）',
-      (string) $anthropic->cost(['prompt' => 5.0, 'completion' => 25.0, 'cached' => 0.5]));
+      (string) $anthropic->costPerMillion(['prompt' => 5.0, 'completion' => 25.0, 'cached' => 0.5]));
 
-check(abs($resp->cost(['prompt' => 0.005, 'completion' => 0.025], 1000) - 17.5) < 0.0001,
-      'perTokens=1000 可沿用旧的每千口径');
 check($resp->cost([]) === 0.0, '未传价格表返回 0');
+check($resp->costPerMillion([]) === 0.0, 'costPerMillion 未传价格表返回 0');
 
 // ===============================================================
 // 四、Log 注入

@@ -1009,10 +1009,13 @@ php tests/cli_test.php      # CLI 参数渲染与命令注入防护
 php tests/ssrf_test.php     # SSRF 防护的全部已知绕过向量
 
 composer test               # 依次跑上面全部六套
-composer analyse            # PHPStan level 5 静态分析
+composer analyse            # PHPStan level 6 静态分析（全绿）
 ```
 
 CI 会在 **PHP 7.2 / 7.4 / 8.0 / 8.2 / 8.4** 上跑同样的检查，并在 8.2 上额外跑一次静态分析。
+
+> 库内所有公开方法都带完整的 phpdoc 类型（PHP 7.2 不支持类型化属性，类型只能写在注释里），
+> IDE 能正确补全 `getToolCalls()` 这类方法的返回结构。
 
 覆盖的报文差异（都踩过坑，已在传输层统一处理）：
 

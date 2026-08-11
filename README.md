@@ -1031,9 +1031,23 @@ CI 会在 **PHP 7.2 / 7.4 / 8.0 / 8.2 / 8.4** 上跑同样的检查，并在 8.2
 `usage` 中的 `prompt_tokens` / `completion_tokens` / `total_tokens` 三个标准字段在所有平台一致可用
 （Anthropic 系的 `input_tokens` / `output_tokens` 已自动映射），平台特有字段原样保留。
 
-> **自定义协议**可选实现两个钩子来接入上述能力（不实现也能正常流式，只是拿不到用量/错误）：
-> `parseStreamUsage(array $chunk): ?array` 返回该帧的用量（AI 层会逐帧合并）、
-> `parseStreamError(array $chunk): ?string` 返回该帧的错误信息（非空即抛异常）。
+流式下 `getStopReason()` 与 `getToolCalls()` 同样可用：
+
+```php
+$resp = $ai->setStream(true)->chat(['messages' => $msgs, 'tools' => $toolDefs]);
+
+$resp->getStopReason();   // end_turn / max_tokens / tool_use …（可据此判断是否被截断）
+$resp->getToolCalls();    // 分片已自动重组，格式与非流式完全一致
+```
+
+> **自定义协议**可选实现四个流式钩子（都不实现也能正常流式，只是拿不到对应信息）：
+>
+> | 钩子 | 作用 |
+> |------|------|
+> | `parseStreamUsage(array $chunk): ?array` | 该帧的 token 用量，AI 层逐帧合并 |
+> | `parseStreamError(array $chunk): ?string` | 该帧的错误信息，非空即抛异常 |
+> | `parseStreamStopReason(array $chunk): ?string` | 该帧的结束原因（已归一） |
+> | `parseStreamToolCalls(array $chunk): ?array` | 该帧的工具调用分片，返回 `[索引 => ['id'=>, 'name'=>, 'arguments'=>片段]]`，AI 层按索引拼接 |
 
 ---
 
@@ -1286,6 +1300,27 @@ AI::create(['protocol' => 'claude',   'model' => 'claude-opus-5',   'api_key' =>
 ```
 
 完整可运行示例见 `examples_agent.php`；跨平台一致性由 `tests/tools_test.php` 保证。
+
+**流式跑 Agent**：`setStream(true)` 后每轮正文实时吐给回调，工具调用照常工作——
+库会把各平台分片下发的 `tool_calls` 重组回来（OpenAI 系按 `delta.tool_calls[].index`
+拼 `arguments` 字符串，Anthropic 系按 `content_block_start` + `input_json_delta` 拼）。
+适合聊天界面：用户能一边看模型说话，一边看它去调工具。
+
+```php
+$ai->setStreamCallback(function ($event) use ($response) {
+    if ($event['type'] === 'stream_chunk' && $event['content'] !== null) {
+        $response->write('data: ' . json_encode(['content' => $event['content']]) . "\n\n");
+    }
+});
+
+(new Agent($ai))
+    ->setStream(true)          // 默认关闭，与旧版本一致
+    ->setTools($tools)
+    ->run([['role' => 'user', 'content' => '北京天气怎么样']]);
+```
+
+Agent 只是**临时借用**你的 AI 实例：跑完会把 `setStream()` 恢复原状（异常路径也会），
+不会影响后续无关的 `chat()`。
 
 > 也可以直接写 OpenAI 原生格式（`{type:'function'}` 的工具定义、`role:'tool'` 的消息），
 > 库会识别并转成目标平台的结构，不强制迁移已有代码。
@@ -1679,7 +1714,7 @@ php-ai/
 ## 已知限制
 
 - 会话历史存在内存里，进程退出即失，跨请求需用 `exportHistory()` / `importHistory()` 自行落库；
-- 工具调用仅支持**非流式**：流式响应里的 `tool_calls` 是按分片下发的（OpenAI 系按 `delta.tool_calls[].index` 累积 `arguments` 字符串，Anthropic 系按 `content_block_start` + `input_json_delta` 累积），本库尚未做重组。带 `tools` 的请求若开了流式且模型真的发起了工具调用，**会抛出 `stream_tool_calls_unsupported` 异常**而不是静默返回空响应；Agent 内部固定用非流式，不受影响；
+- 流式下的工具调用已支持（分片会自动重组）。若模型声明本轮要调工具、却一个都重组不出来（说明该平台用了本库尚未覆盖的分片结构），会抛 `stream_tool_calls_unassembled` 异常而非静默返回空响应；
 - 流式输出只提取正文增量，推理模型的思维链（`reasoning_content` / `thinking` 块）不计入 `getContent()`，需要时从 `stream_chunk` 事件的 `raw` 字段自取；
 - 各平台的 `knownModels()` 常用模型清单是库内维护的静态快照，仅用于离线渲染下拉框与拉取失败兜底，最新可用模型请以 `listModels()` 的实时结果为准；
 - Azure OpenAI 只覆盖了新版 `/openai/v1` 路由，旧版「部署名 + api-version」路由需自行用 `endpoint` 配置完整 URL；AWS Bedrock、Google Vertex AI 因需要 SigV4 / OAuth 签名，暂未内置；

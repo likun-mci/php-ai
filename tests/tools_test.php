@@ -337,6 +337,33 @@ $emptyAi->setTransport($emptyTr)->setStream(true);
 (new Agent($emptyAi))->setTools([])->onEvent(function ($e) {})->run([['role' => 'user', 'content' => 'x']]);
 check($emptyAi->isStreaming() === true, '空响应路径下同样还原');
 
+// Agent 默认非流式；显式 setStream(true) 后请求才带 stream
+$defTr = new ScriptedTransport();
+$defTr->responses = $scripts['openai'];
+$defAi = AI::create(['protocol' => 'openai', 'model' => 'm', 'api_key' => 'k']);
+$defAi->setTransport($defTr);
+(new Agent($defAi))
+    ->setTools(['get_weather' => ['description' => 'x', 'input_schema' => ['type' => 'object'],
+                                  'handler' => function (array $in) { return 'ok'; }]])
+    ->onEvent(function ($e) {})
+    ->run([['role' => 'user', 'content' => 'x']]);
+$anyStream = false;
+foreach ($defTr->requests as $req) { if (!empty($req['stream'])) { $anyStream = true; } }
+check(!$anyStream, 'Agent 默认仍是非流式（向后兼容）');
+
+$onTr = new ScriptedTransport();
+$onTr->responses = $scripts['openai'];
+$onAi = AI::create(['protocol' => 'openai', 'model' => 'm', 'api_key' => 'k']);
+$onAi->setTransport($onTr)->setStreamCallback(function ($e) {});
+(new Agent($onAi))->setStream(true)
+    ->setTools(['get_weather' => ['description' => 'x', 'input_schema' => ['type' => 'object'],
+                                  'handler' => function (array $in) { return 'ok'; }]])
+    ->onEvent(function ($e) {})
+    ->run([['role' => 'user', 'content' => 'x']]);
+$allStream = true;
+foreach ($onTr->requests as $req) { if (empty($req['stream'])) { $allStream = false; } }
+check($allStream, 'Agent setStream(true) 后请求以流式发出');
+
 // ---------------------------------------------------------------
 // 六、全部 40 个协议都能构造出带工具的请求
 // ---------------------------------------------------------------

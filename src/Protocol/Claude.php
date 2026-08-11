@@ -241,6 +241,50 @@ class Claude implements ProtocolInterface
     }
 
     /**
+     * 从流式数据块中解析工具调用分片
+     *
+     * Anthropic 的工具调用同样按分片下发，但结构与 OpenAI 完全不同：
+     * content_block_start 给出 index / id / name，随后的 input_json_delta
+     * 只带同一 index 下的 partial_json 片段，需要拼接成完整 JSON。形如：
+     *
+     *   {"type":"content_block_start","index":0,
+     *    "content_block":{"type":"tool_use","id":"toolu_1","name":"get_weather","input":{}}}
+     *   {"type":"content_block_delta","index":0,
+     *    "delta":{"type":"input_json_delta","partial_json":"{\"city\""}}
+     *   {"type":"content_block_delta","index":0,
+     *    "delta":{"type":"input_json_delta","partial_json":":\"北京\"}"}}
+     *
+     * 注意 index 是「内容块序号」，文本块也占号，因此不能假定从 0 连续。
+     *
+     * @param array<string, mixed> $chunk
+     * @return array<int, array{id?: string, name?: string, arguments?: string}>|null
+     *         该帧不含工具调用分片时返回 null
+     */
+    public function parseStreamToolCalls(array $chunk): ?array
+    {
+        $type  = $chunk['type'] ?? '';
+        $index = isset($chunk['index']) ? (int) $chunk['index'] : 0;
+
+        if ($type === 'content_block_start'
+            && ($chunk['content_block']['type'] ?? '') === 'tool_use') {
+            $block = $chunk['content_block'];
+            return [$index => [
+                'id'   => (string) ($block['id'] ?? ''),
+                'name' => (string) ($block['name'] ?? ''),
+                // input 起始通常是空对象，真正的参数走后续 partial_json
+                'arguments' => '',
+            ]];
+        }
+
+        if ($type === 'content_block_delta'
+            && ($chunk['delta']['type'] ?? '') === 'input_json_delta') {
+            return [$index => ['arguments' => (string) ($chunk['delta']['partial_json'] ?? '')]];
+        }
+
+        return null;
+    }
+
+    /**
      * 从流式数据块中解析结束原因（已归一）
      *
      * Anthropic 把 stop_reason 放在 message_delta 帧的 delta 下。

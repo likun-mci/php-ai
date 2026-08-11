@@ -23,6 +23,23 @@ function pad(string $t, int $w): string
 $srcDir = realpath(__DIR__ . '/../src');
 $failures = [];
 
+/**
+ * 取方法的返回类型，并把 self / static 解析成实际声明它的类
+ * 只比字面量的话，父子都写 self 会被误判为一致
+ */
+function resolveReturnType(ReflectionMethod $m): string
+{
+    $t = $m->getReturnType();
+    if ($t === null) {
+        return '(无)';
+    }
+    $name = $t instanceof ReflectionNamedType ? $t->getName() : (string) $t;
+    if ($name === 'self' || $name === 'static') {
+        return $m->getDeclaringClass()->getName();
+    }
+    return $name;
+}
+
 // 收集 src/ 下所有类名
 $classes = [];
 $it = new RecursiveIteratorIterator(new RecursiveDirectoryIterator($srcDir));
@@ -145,6 +162,18 @@ foreach ($classes as $class) {
                 '%s::%s() 参数比父类 %s::%s() 少（%d < %d），PHP 会直接 Fatal error',
                 $class, $m->getName(), $parent->getName(), $pm->getName(),
                 $m->getNumberOfParameters(), $pm->getNumberOfParameters()
+            );
+        }
+        // 返回类型协变：PHP 7.4 才允许，本库声明兼容 7.2，必须与父类完全一致。
+        // 注意 self 要解析成「声明它的类」才看得出来——父子都写 self 时字面相同，
+        // 实际类型却不同，正是这一点让 ClaudeCodeSession 在 7.2 上加载即 Fatal。
+        $childRet  = resolveReturnType($m);
+        $parentRet = resolveReturnType($pm);
+        if ($childRet !== $parentRet) {
+            $failures[] = sprintf(
+                '%s::%s() 返回 %s，父类 %s::%s() 返回 %s —— 返回类型协变，PHP 7.2 会 Fatal',
+                $class, $m->getName(), $childRet,
+                $parent->getName(), $pm->getName(), $parentRet
             );
         }
     }

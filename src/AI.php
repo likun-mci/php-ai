@@ -89,6 +89,15 @@ class AI
     protected $streamStopReason = '';
 
     /**
+     * 流式过程中累积的工具调用分片：索引 => ['id'=>, 'name'=>, 'arguments'=>拼接中的 JSON 串]
+     *
+     * 三个键在建条目时一起初始化，因此都是必选——协议钩子返回的增量才是可选键，
+     * 那边只带该帧真正携带的字段。
+     * @var array<int, array{id: string, name: string, arguments: string}>
+     */
+    protected $streamToolCallParts = [];
+
+    /**
      * 流式分片回调，注册后由调用方接管分片下发（见 setStreamCallback）
      * @var callable|null
      */
@@ -585,6 +594,7 @@ class AI
         $this->streamAccumulatedUsage = [];
         $this->streamErrorMessage = '';
         $this->streamStopReason = '';
+        $this->streamToolCallParts = [];
         
         // 合并配置：模型默认参数 < 运行时配置里的生成参数 < 本次 payload
         $payload = array_merge([
@@ -620,6 +630,28 @@ class AI
                     $chunkUsage = $this->protocol->parseStreamUsage($data);
                     if (!empty($chunkUsage)) {
                         $this->streamAccumulatedUsage = array_merge($this->streamAccumulatedUsage, $chunkUsage);
+                    }
+                }
+
+                // 累积工具调用分片：两家都是按 index 分帧下发，
+                // id / name 只在首帧给出，arguments 需要逐帧拼接
+                if (method_exists($this->protocol, 'parseStreamToolCalls')) {
+                    $parts = $this->protocol->parseStreamToolCalls($data);
+                    if (!empty($parts)) {
+                        foreach ($parts as $idx => $part) {
+                            if (!isset($this->streamToolCallParts[$idx])) {
+                                $this->streamToolCallParts[$idx] = ['id' => '', 'name' => '', 'arguments' => ''];
+                            }
+                            if (isset($part['id']) && $part['id'] !== '') {
+                                $this->streamToolCallParts[$idx]['id'] = (string) $part['id'];
+                            }
+                            if (isset($part['name']) && $part['name'] !== '') {
+                                $this->streamToolCallParts[$idx]['name'] = (string) $part['name'];
+                            }
+                            if (isset($part['arguments'])) {
+                                $this->streamToolCallParts[$idx]['arguments'] .= (string) $part['arguments'];
+                            }
+                        }
                     }
                 }
 
@@ -695,19 +727,18 @@ class AI
                 } else {
                     $streamUsage = [];
                 }
-                // 流式暂不支持工具调用：各平台的 tool_calls 都是按分片下发的
-                // （OpenAI 系按 delta.tool_calls[].index 累积 arguments 字符串，
-                // Anthropic 系按 content_block_start + input_json_delta 累积），
-                // 本库尚未做重组。若不在这里拦住，调用方会拿到一个
-                // 「isSuccess() 为 true、内容为空、getToolCalls() 也为空」的响应，
-                // 完全看不出模型其实是在要求调用工具——这种静默失败最难排查。
-                if ($this->streamStopReason === 'tool_use') {
+                // 把累积的分片重组成统一格式的工具调用
+                $streamToolCalls = $this->assembleStreamToolCalls();
+
+                // 模型说要调工具，却一个都没重组出来——多半是平台用了本库尚未覆盖的
+                // 分片结构。宁可显式报错，也不要返回「成功但全空」的响应让人排查半天。
+                if ($this->streamStopReason === 'tool_use' && !$streamToolCalls) {
                     throw new \Ai\Exceptions\RequestException(
-                        '流式模式暂不支持工具调用：模型本轮要求调用工具，但流式响应里的 '
-                        . 'tool_calls 分片尚未做重组，结果会丢失。请对带 tools 的请求改用非流式'
-                        . '（setStream(false)），Agent 内部已默认如此。',
+                        '流式响应声明本轮要调用工具（stop_reason=tool_use），但未能从分片中'
+                        . '重组出任何 tool_calls。可能是该平台的流式结构与 OpenAI / Anthropic '
+                        . '两种主流写法都不同；可先改用非流式（setStream(false)）绕开。',
                         $this->model->getPlatform(),
-                        'stream_tool_calls_unsupported',
+                        'stream_tool_calls_unassembled',
                         $streamUsage
                     );
                 }
@@ -719,6 +750,7 @@ class AI
                     'raw'         => $responseData,
                     'success'     => true,
                     'stop_reason' => $this->streamStopReason,
+                    'tool_calls'  => $streamToolCalls,
                 ]);
                 $this->emitStream([ 'type' => 'stream_end', 'data' => [
                     'content' => $this->streamAccumulatedContent,
@@ -867,6 +899,46 @@ class AI
             }
         }
         return $out;
+    }
+
+    /**
+     * 把流式累积的分片重组成统一格式的工具调用
+     *
+     * 分片按 index 归并后，arguments 是一段拼接出来的 JSON 字符串。
+     * 模型偶尔会给出不合法的 JSON（截断、多余逗号等），此时降级为空参数数组
+     * 而不是丢掉整个调用——工具名和调用 id 仍然有效，业务层至少能知道模型想干什么。
+     *
+     * @return array<int, array{id: string, name: string, input: array<string, mixed>}>
+     */
+    protected function assembleStreamToolCalls(): array
+    {
+        if (!$this->streamToolCallParts) {
+            return [];
+        }
+        ksort($this->streamToolCallParts);      // 按下发顺序还原
+
+        $calls = [];
+        foreach ($this->streamToolCallParts as $part) {
+            $name = $part['name'];
+            if ($name === '') {
+                continue;                        // 没有工具名的分片不成其为一次调用
+            }
+            $args   = trim($part['arguments']);
+            $parsed = ($args === '') ? [] : json_decode($args, true);
+            if (!is_array($parsed)) {
+                \Ai\Helpers\Log::warning('流式工具调用的参数不是合法 JSON，已降级为空参数', [
+                    'tool'      => $name,
+                    'arguments' => mb_substr($args, 0, 200),
+                ]);
+                $parsed = [];
+            }
+            $calls[] = [
+                'id'    => $part['id'],
+                'name'  => $name,
+                'input' => $parsed,
+            ];
+        }
+        return $calls;
     }
 
     /**

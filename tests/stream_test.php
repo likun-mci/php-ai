@@ -221,28 +221,59 @@ foreach ($stopCases as [$name, $proto, $sse, $want]) {
     echo pad($name, 30), $ok ? "✓ {$got}\n" : "✗ 得到 \"{$got}\"，期望 \"{$want}\"\n";
 }
 
-// 流式 + 工具调用：必须显式失败，不能返回「成功但全空」的响应
-$toolSSE = [
-    'OpenAI 系' => ['openai',
-        "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"c1\",\"type\":\"function\","
-        . "\"function\":{\"name\":\"f\",\"arguments\":\"{}\"}}]}}]}\n\n"
-        . "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"tool_calls\"}]}\n\ndata: [DONE]\n\n"],
-    'Anthropic 系' => ['claude',
-        "event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"tool_use\"}}\n\n"],
-];
+// 流式工具调用：两家的分片结构完全不同，重组后必须得到一致的结果
 echo "\n";
-foreach ($toolSSE as $name => [$proto, $sse]) {
-    try {
-        $r = replayAI(['protocol' => $proto, 'model' => 'm', 'api_key' => 'k'], $sse, true)->chat('hi');
-        check(false, "流式工具调用显式失败：{$name}",
-              '未抛异常，返回 content="' . $r->getContent() . '"');
-        echo pad("流式工具调用 {$name}", 30), "✗ 未抛异常（静默返回空响应）\n";
-    } catch (\Ai\Exceptions\AIException $e) {
-        $ok = ($e->getErrorCode() === 'stream_tool_calls_unsupported');
-        check($ok, "流式工具调用显式失败：{$name}", $e->getErrorCode());
-        echo pad("流式工具调用 {$name}", 30), $ok ? "✓ 显式抛异常\n" : "✗ 错误码 {$e->getErrorCode()}\n";
-    }
+$want = [['id' => 'c1', 'name' => 'get_weather', 'input' => ['city' => '北京']]];
+
+// OpenAI 系：按 delta.tool_calls[].index 累积 arguments 字符串（这里切成 3 片）
+$openaiTool =
+      "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"c1\",\"type\":\"function\","
+    . "\"function\":{\"name\":\"get_weather\",\"arguments\":\"\"}}]}}]}\n\n"
+    . "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"{\\\"city\\\"\"}}]}}]}\n\n"
+    . "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\":\\\"北京\\\"}\"}}]}}]}\n\n"
+    . "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"tool_calls\"}]}\n\ndata: [DONE]\n\n";
+
+// Anthropic 系：content_block_start 给 id/name，input_json_delta 给参数片段。
+// 注意工具块的 index 是 1（0 被文本块占了），重组不能假定从 0 开始
+$claudeTool =
+      "event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,"
+    . "\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n"
+    . "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,"
+    . "\"delta\":{\"type\":\"text_delta\",\"text\":\"我查一下\"}}\n\n"
+    . "event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":1,"
+    . "\"content_block\":{\"type\":\"tool_use\",\"id\":\"c1\",\"name\":\"get_weather\",\"input\":{}}}\n\n"
+    . "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":1,"
+    . "\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"{\\\"city\\\"\"}}\n\n"
+    . "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":1,"
+    . "\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\":\\\"北京\\\"}\"}}\n\n"
+    . "event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"tool_use\"}}\n\n";
+
+$rOpenAi = replayAI(['protocol' => 'openai', 'model' => 'm', 'api_key' => 'k'], $openaiTool, true)->chat('hi');
+$rClaude = replayAI(['protocol' => 'claude', 'model' => 'm', 'api_key' => 'k'], $claudeTool, true)->chat('hi');
+
+foreach (['OpenAI 系' => $rOpenAi, 'Anthropic 系' => $rClaude] as $name => $r) {
+    $ok = ($r->getToolCalls() === $want);
+    check($ok, "流式工具调用重组：{$name}", json_encode($r->getToolCalls(), JSON_UNESCAPED_UNICODE));
+    echo pad("流式工具调用重组 {$name}", 30),
+         $ok ? "✓ " . json_encode($r->getToolCalls(), JSON_UNESCAPED_UNICODE) . "\n" : "✗\n";
 }
+$same = ($rOpenAi->getToolCalls() === $rClaude->getToolCalls());
+check($same, '两家流式重组结果一致');
+echo pad('两家重组结果逐字节相同', 30), $same ? "✓\n" : "✗\n";
+
+$textKept = ($rClaude->getContent() === '我查一下');
+check($textKept, 'Anthropic 同轮的文本块不被工具调用挤掉', $rClaude->getContent());
+echo pad('同轮文本与工具调用并存', 30), $textKept ? "✓\n" : "✗\n";
+
+// 参数 JSON 非法时降级为空参数，而不是丢掉整个调用
+$broken = "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"c9\",\"type\":\"function\","
+        . "\"function\":{\"name\":\"f\",\"arguments\":\"{截断的\"}}]}}]}\n\n"
+        . "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"tool_calls\"}]}\n\ndata: [DONE]\n\n";
+$rBroken = replayAI(['protocol' => 'openai', 'model' => 'm', 'api_key' => 'k'], $broken, true)->chat('hi');
+$degraded = ($rBroken->getToolCalls() === [['id' => 'c9', 'name' => 'f', 'input' => []]]);
+check($degraded, '参数非法时降级为空参数而非丢掉调用',
+      json_encode($rBroken->getToolCalls(), JSON_UNESCAPED_UNICODE));
+echo pad('参数非法时降级保留调用', 30), $degraded ? "✓\n" : "✗\n";
 
 // ---------------------------------------------------------------
 // 四、Anthropic 协议的正文提取（开启思考的模型首块是 thinking）

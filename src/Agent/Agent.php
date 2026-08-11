@@ -56,6 +56,11 @@ class Agent
      * @var string
      */
     protected $lastText = '';
+    /**
+     * 是否以流式跑循环。默认 false，与旧版本一致。
+     * @var bool
+     */
+    protected $stream = false;
 
     public function __construct(AI $ai)
     {
@@ -81,6 +86,21 @@ class Agent
      * @return $this
      */
     public function setMaxIter($n) { $this->maxIter = max(1, (int) $n); return $this; }
+
+    /**
+     * 是否以流式跑这个循环
+     *
+     * 开启后每一轮的正文都会实时经由 AI 的流式回调吐出去，工具调用照常工作
+     * （库会把各平台分片下发的 tool_calls 重组回来）。适合聊天类界面：
+     * 用户能一边看到模型说话，一边看到它去调工具。
+     *
+     * 默认关闭，与旧版本行为一致。开启前请先在 AI 实例上 setStreamCallback()
+     * 注册回调，否则分片会直接 echo 到输出。
+     *
+     * @param bool $stream
+     * @return $this
+     */
+    public function setStream($stream = true) { $this->stream = (bool) $stream; return $this; }
     /**
      * @return string
      */
@@ -111,12 +131,10 @@ class Agent
     {
         $toolDefs = $this->toolDefs();
 
-        // 工具调用必须走非流式：流式响应里的 tool_calls 是分片下发的，
-        // 本库尚未重组（见 AI::chat 的流式分支）。这里临时关掉，
-        // 跑完在 finally 里恢复——否则调用方本来开着的流式会被永久关掉，
-        // 后续无关的 chat() 也跟着不流式了。
+        // 借用调用方的 AI 实例：按本 Agent 的设置临时切换流式开关，
+        // 跑完在 finally 里恢复——否则调用方原本的设置会被永久改写。
         $streamWasOn = $this->ai->isStreaming();
-        $this->ai->setStream(false);
+        $this->ai->setStream($this->stream);
 
         try {
             $this->loop($messages, $toolDefs);

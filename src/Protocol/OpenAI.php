@@ -218,6 +218,55 @@ class OpenAI implements ProtocolInterface
     }
 
     /**
+     * 从流式数据块中解析工具调用分片
+     *
+     * OpenAI 系的 tool_calls 是**按分片下发**的：第一帧给出 index / id / name，
+     * 之后若干帧只带同一个 index 下的 arguments 片段，需要按 index 把
+     * arguments 字符串拼起来才能得到完整的 JSON。形如：
+     *
+     *   {"delta":{"tool_calls":[{"index":0,"id":"call_1","type":"function",
+     *                            "function":{"name":"get_weather","arguments":""}}]}}
+     *   {"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\"city\""}}]}}
+     *   {"delta":{"tool_calls":[{"index":0,"function":{"arguments":":\"北京\"}"}}]}}
+     *
+     * 这里只负责把单帧拆成「按 index 归并」的增量，拼接与 JSON 解析由 AI 层完成。
+     *
+     * @param array<string, mixed> $chunk
+     * @return array<int, array{id?: string, name?: string, arguments?: string}>|null
+     *         该帧不含工具调用分片时返回 null
+     */
+    public function parseStreamToolCalls(array $chunk): ?array
+    {
+        $deltas = $chunk['choices'][0]['delta']['tool_calls'] ?? null;
+        if (!is_array($deltas) || !$deltas) {
+            return null;
+        }
+
+        $out = [];
+        foreach ($deltas as $i => $d) {
+            if (!is_array($d)) {
+                continue;
+            }
+            // index 缺省时退回数组下标：个别兼容实现不下发 index
+            $index = isset($d['index']) ? (int) $d['index'] : (int) $i;
+            $part  = [];
+            if (isset($d['id']) && $d['id'] !== '') {
+                $part['id'] = (string) $d['id'];
+            }
+            if (isset($d['function']['name']) && $d['function']['name'] !== '') {
+                $part['name'] = (string) $d['function']['name'];
+            }
+            if (isset($d['function']['arguments'])) {
+                $part['arguments'] = (string) $d['function']['arguments'];
+            }
+            if ($part) {
+                $out[$index] = $part;
+            }
+        }
+        return $out ?: null;
+    }
+
+    /**
      * 从流式数据块中解析结束原因（已归一）
      *
      * 流式响应不走 parseResponse()，stop_reason 若不在这里取，

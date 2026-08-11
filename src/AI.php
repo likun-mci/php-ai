@@ -67,6 +67,12 @@ class AI
      */
     protected $streamAccumulatedContent = '';
 
+    /**
+     * 流式分片回调，注册后由调用方接管分片下发（见 setStreamCallback）
+     * @var callable|null
+     */
+    protected $streamCallback = null;
+
     protected $session_id = null;
 
     /**
@@ -444,8 +450,7 @@ class AI
                     $this->streamAccumulatedContent .= $content;
                 }
                 // 输出流式数据块
-                $flushData = json_encode( [ "type"=>"stream_chunk", "content"=>$content ], JSON_UNESCAPED_UNICODE);
-                $this->flushText( "data: {$flushData}\n\n" );
+                $this->emitStream([ 'type' => 'stream_chunk', 'content' => $content, 'raw' => $data ]);
             });
         } else {
             // 清除流式回调
@@ -489,13 +494,11 @@ class AI
                     'raw'     => $responseData,
                     'success' => true,
                 ]);
-                $flushData = json_encode( [ "type"=>"stream_end", "data"=>[
+                $this->emitStream([ 'type' => 'stream_end', 'data' => [
                     'content' => $this->streamAccumulatedContent,
                     'model'   => $this->model->getName(),
                     'usage'   => $streamUsage,
-                ]], JSON_UNESCAPED_UNICODE);
-                $this->flushText( "data: {$flushData}\n\n" )
-                    ->flushText( "data: [DONE]\n\n" );
+                ]]);
             } else {
                 // 解析响应
                 $response = $this->protocol->parseResponse($responseData);
@@ -697,6 +700,57 @@ class AI
     {
         $this->transport->setProxy($proxy);
         return $this;
+    }
+
+    /**
+     * 注册流式分片回调
+     *
+     * 默认（未注册回调）时，chat() 会把 SSE 报文直接写进输出缓冲区，这只适用于
+     * PHP-FPM / CLI。**Swoole、Workerman、RoadRunner 等常驻内存框架必须注册回调**，
+     * 否则 echo 出去的分片会落到进程标准输出，永远送不到客户端。
+     *
+     * 回调收到的事件结构与库默认输出的 SSE 报文一致，另附平台原始分片：
+     *   [ 'type' => 'stream_chunk', 'content' => 增量文本|null, 'raw' => 平台原始分片数组 ]
+     *   [ 'type' => 'stream_end',   'data' => [ 'content' =>…, 'model' =>…, 'usage' =>… ] ]
+     *
+     * `content` 已由协议层归一化，跨平台通用；需要平台专有字段时再取 `raw`。
+     *
+     * 用法（Swoole）：
+     * ```php
+     * $ai->setStream(true)->setStreamCallback(function($event) use ($response) {
+     *     if ($event['type'] === 'stream_chunk' && $event['content'] !== null) {
+     *         $response->write("data: " . json_encode($event) . "\n\n");
+     *     }
+     * })->chat($messages);
+     * ```
+     *
+     * @param callable|null $callback function(array $event):void；传 null 恢复默认的直接输出
+     */
+    public function setStreamCallback($callback = null): self
+    {
+        $this->streamCallback = is_callable($callback) ? $callback : null;
+        return $this;
+    }
+
+    /**
+     * 下发一个流式事件
+     *
+     * 注册了回调就交给回调，否则维持默认行为：按 SSE 报文写进输出缓冲区。
+     * 默认路径不下发 `raw`，报文格式与历史版本完全一致，前端无需改动。
+     */
+    protected function emitStream(array $event): void
+    {
+        if ($this->streamCallback) {
+            call_user_func($this->streamCallback, $event);
+            return;
+        }
+
+        $wire = $event;
+        unset($wire['raw']);
+        $this->flushText( 'data: ' . json_encode($wire, JSON_UNESCAPED_UNICODE) . "\n\n" );
+        if ($event['type'] === 'stream_end') {
+            $this->flushText( "data: [DONE]\n\n" );
+        }
     }
 
     public function setStream(bool $stream): self

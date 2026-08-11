@@ -1,6 +1,15 @@
 <?php
 /**
  * AI 标准库流式输出使用示例
+ *
+ * 两种模式：
+ *   1. 只调 setStream(true)             —— 库按固定 SSE 报文直接写输出缓冲区（PHP-FPM / CLI）
+ *   2. 再调 setStreamCallback($fn)      —— 分片交给回调，库不再有任何输出
+ *                                          Swoole / Workerman 等常驻内存框架必须用这种方式
+ *
+ * 回调事件结构（已屏蔽平台差异）：
+ *   [ 'type' => 'stream_chunk', 'content' => 增量文本|null, 'raw' => 平台原始分片 ]
+ *   [ 'type' => 'stream_end',   'data' => [ 'content' =>…, 'model' =>…, 'usage' =>… ] ]
  */
 
 require_once __DIR__ . '/autoload.php';
@@ -19,16 +28,14 @@ try {
         'model' => 'gpt-4o',
     ]);
     
-    // 设置流式回调
-    $ai->setStreamCallback(function($data) {
-        // 实时输出流式内容
-        if (isset($data['choices'][0]['delta']['content'])) {
-            echo $data['choices'][0]['delta']['content'];
+    // 开启流式 + 注册分片回调（回调收到的 content 已由协议层归一化，跨平台通用）
+    $ai->setStream(true)->setStreamCallback(function($event) {
+        if ($event['type'] === 'stream_chunk' && $event['content'] !== null) {
+            echo $event['content'];
             flush(); // 立即输出到浏览器
         }
     });
     
-    // 发送请求（自动启用 stream: true）
     $response = $ai->chat([
         'messages' => [
             ['role' => 'user', 'content' => '用100字介绍人工智能']
@@ -57,9 +64,10 @@ try {
         'model' => 'claude-3-opus',
     ]);
     
-    $ai->setStreamCallback(function($data) {
-        if (isset($data['choices'][0]['delta']['content'])) {
-            echo $data['choices'][0]['delta']['content'];
+    // 同一套回调代码即可，无需关心 Claude 的 content_block_delta 格式差异
+    $ai->setStream(true)->setStreamCallback(function($event) {
+        if ($event['type'] === 'stream_chunk' && $event['content'] !== null) {
+            echo $event['content'];
             flush();
         }
     });
@@ -91,9 +99,9 @@ try {
     $charCount = 0;
     
     // 流式回调中进行实时统计
-    $ai->setStreamCallback(function($data) use (&$wordCount, &$charCount) {
-        if (isset($data['choices'][0]['delta']['content'])) {
-            $content = $data['choices'][0]['delta']['content'];
+    $ai->setStream(true)->setStreamCallback(function($event) use (&$wordCount, &$charCount) {
+        if ($event['type'] === 'stream_chunk' && $event['content'] !== null) {
+            $content = $event['content'];
             echo $content;
             flush();
             
@@ -135,9 +143,9 @@ try {
     
     $file = fopen('/tmp/ai_output.txt', 'w');
     
-    $ai->setStreamCallback(function($data) use ($file) {
-        if (isset($data['choices'][0]['delta']['content'])) {
-            $content = $data['choices'][0]['delta']['content'];
+    $ai->setStream(true)->setStreamCallback(function($event) use ($file) {
+        if ($event['type'] === 'stream_chunk' && $event['content'] !== null) {
+            $content = $event['content'];
             
             // 同时输出到屏幕和文件
             echo $content;
@@ -172,8 +180,8 @@ try {
     ]);
     
     // 先启用流式输出
-    $ai->setStreamCallback(function($data) {
-        echo ".";
+    $ai->setStream(true)->setStreamCallback(function($event) {
+        if ($event['type'] === 'stream_chunk') echo ".";
     });
     
     echo "第一次请求（流式）: ";
@@ -183,7 +191,7 @@ try {
     echo "\n内容: " . $response1->getContent() . "\n\n";
     
     // 关闭流式输出
-    $ai->setStreamCallback(null);
+    $ai->setStream(false)->setStreamCallback(null);
     
     echo "第二次请求（非流式）:\n";
     $response2 = $ai->chat([
@@ -213,10 +221,10 @@ function simulateSSE() {
             'model' => 'gpt-4o',
         ]);
         
-        $ai->setStreamCallback(function($data) {
+        $ai->setStream(true)->setStreamCallback(function($event) {
             // 发送 SSE 格式数据到客户端
-            if (isset($data['choices'][0]['delta']['content'])) {
-                $content = $data['choices'][0]['delta']['content'];
+            if ($event['type'] === 'stream_chunk' && $event['content'] !== null) {
+                $content = $event['content'];
                 
                 // SSE 格式
                 echo "data: " . json_encode(['content' => $content]) . "\n\n";
@@ -286,9 +294,9 @@ try {
         ['role' => 'system', 'content' => '你是一个有帮助的助手'],
     ];
     
-    $ai->setStreamCallback(function($data) {
-        if (isset($data['choices'][0]['delta']['content'])) {
-            echo $data['choices'][0]['delta']['content'];
+    $ai->setStream(true)->setStreamCallback(function($event) {
+        if ($event['type'] === 'stream_chunk' && $event['content'] !== null) {
+            echo $event['content'];
             flush();
         }
     });

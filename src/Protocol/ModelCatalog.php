@@ -25,8 +25,8 @@ trait ModelCatalog
     /**
      * 模型列表拉取失败/为空时的兜底清单
      *
-     * @param array $config 运行时配置（据此判断实际请求的是不是官方域名）
-     * @return array|null 不适用兜底时返回 null
+     * @param array<mixed> $config 运行时配置（据此判断实际请求的是不是官方域名）
+     * @return array<mixed> 不适用兜底时返回 null
      */
     protected function fallbackModels(array $config): ?array
     {

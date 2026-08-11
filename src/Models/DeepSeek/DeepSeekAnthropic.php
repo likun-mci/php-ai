@@ -16,7 +16,13 @@ class DeepSeekAnthropic extends BaseModel
     protected $platform = 'deepseek';
     protected $protocol = 'Ai\\Protocol\\Claude';
     protected $endpoint = 'https://api.deepseek.com/anthropic/v1/messages';
+    /**
+     * @var array<mixed>
+     */
     protected $features = ['chat', 'stream'];
+    /**
+     * @var array<mixed>
+     */
     protected $config = [
         'max_tokens'  => 1024*256,
         'temperature' => 1.0,
@@ -26,6 +32,9 @@ class DeepSeekAnthropic extends BaseModel
      * 处理附件
      * DeepSeek 不支持多模态输入，将附件信息以文本形式附加到消息尾部
      * （避免 Claude 协议的 image/document 块导致 DeepSeek 端报错）
+     * @param array<mixed> $attachments
+     * @param array<mixed> $payload
+     * @return array<mixed>
      */
     public function processAttachments(array $payload, array $attachments): array
     {

@@ -9,18 +9,18 @@ interface TransportInterface
     /**
      * 发送 POST 请求
      * @param string $url 请求 URL
-     * @param array $data 请求数据
-     * @param array $headers 请求头
-     * @return array 响应数据
+     * @param array<string, mixed> $data 请求数据
+     * @param array<string, string> $headers 请求头
+     * @return array<string, mixed> 响应数据
      */
     public function post(string $url, array $data, array $headers = []): array;
     
     /**
      * 发送 GET 请求
      * @param string $url 请求 URL
-     * @param array $params 请求参数
-     * @param array $headers 请求头
-     * @return array 响应数据
+     * @param array<string, scalar> $params 请求参数
+     * @param array<string, string> $headers 请求头
+     * @return array<string, mixed> 响应数据
      */
     public function get(string $url, array $params = [], array $headers = []): array;
     

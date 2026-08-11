@@ -55,6 +55,8 @@ class OpenRouter extends OpenAI
      *   - referer: 来源站点 URL（自动写为 HTTP-Referer 头）
      *   - title:   应用名称（自动写为 X-Title 头）
      *   - headers:  数组形式覆盖或追加任意请求头（优先级最高）
+     * @param array<string, mixed> $config
+     * @return array<string, string>
      */
     public function buildHeaders(array $config): array
     {
@@ -82,6 +84,7 @@ class OpenRouter extends OpenAI
     /**
      * 常用模型（供后台离线渲染下拉框；拉取失败时作为兜底）
      * OpenRouter 自身的 /v1/models 接口很完整，正常情况下不会用到这里
+     * @return array<string, string> 模型 id => 显示名
      */
     public function knownModels(): array
     {

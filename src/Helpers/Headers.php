@@ -17,9 +17,9 @@ namespace Ai\Helpers;
 class Headers
 {
     /**
-     * @param array $headers 协议构建出的默认请求头
-     * @param array $config  运行时配置，读取 headers
-     * @return array
+     * @param array<string, string> $headers 协议构建出的默认请求头
+     * @param array<string, mixed> $config 运行时配置，读取 headers
+     * @return array<string, string>
      */
     public static function apply(array $headers, array $config): array
     {

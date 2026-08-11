@@ -14,13 +14,13 @@ interface AIResponseInterface
     
     /**
      * 获取原始响应数据
-     * @return array
+     * @return array<string, mixed>
      */
     public function getRaw(): array;
     
     /**
      * 获取使用情况统计
-     * @return array
+     * @return array<string, mixed>
      */
     public function getUsage(): array;
     
@@ -38,7 +38,7 @@ interface AIResponseInterface
 
     /**
      * 模型发起的工具调用（已跨平台归一）
-     * @return array [['id'=>'调用ID','name'=>'工具名','input'=>[参数]], ...]
+     * @return array<int, array{id: string, name: string, input: array<string, mixed>}> [['id'=>'调用ID','name'=>'工具名','input'=>[参数]], ...]
      */
     public function getToolCalls(): array;
 
@@ -54,6 +54,7 @@ interface AIResponseInterface
 
     /**
      * 转成可回填进 messages 的 assistant 回合
+     * @return array{role: string, content: array<int, array<string, mixed>>}
      */
     public function toAssistantMessage(): array;
 

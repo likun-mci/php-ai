@@ -12,7 +12,13 @@ class GPT4o extends BaseModel
     protected $platform = 'openai';
     protected $protocol = 'Ai\\Protocol\\OpenAI';
     protected $endpoint = 'https://api.openai.com/v1/chat/completions';
+    /**
+     * @var array<mixed>
+     */
     protected $features = ['chat', 'stream', 'function_calling', 'vision', 'attachments'];
+    /**
+     * @var array<mixed>
+     */
     protected $config = [
         'max_tokens' => 16384,
         'temperature' => 0.7,

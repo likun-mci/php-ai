@@ -52,6 +52,8 @@ class Azure extends OpenAI
      *
      * Azure OpenAI 用 api-key 头鉴权，而非 OpenAI 的 Authorization: Bearer。
      * 用 Microsoft Entra ID 的访问令牌时，改用 headers 配置项自行写 Authorization。
+     * @param array<string, mixed> $config
+     * @return array<string, string>
      */
     public function buildHeaders(array $config): array
     {
@@ -68,6 +70,7 @@ class Azure extends OpenAI
 
     /**
      * 常用模型（供后台离线渲染下拉框；平台无模型列表接口或拉取失败时作为兜底）
+     * @return array<string, string> 模型 id => 显示名
      */
     public function knownModels(): array
     {

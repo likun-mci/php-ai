@@ -17,6 +17,7 @@ class DeepSeek extends OpenAI
 
     /**
      * 常用模型（供后台离线渲染下拉框；拉取失败时作为兜底）
+     * @return array<string, string> 模型 id => 显示名
      */
     public function knownModels(): array
     {

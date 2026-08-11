@@ -12,7 +12,13 @@ class Claude3Opus extends BaseModel
     protected $platform = 'claude';
     protected $protocol = 'Ai\\Protocol\\Claude';
     protected $endpoint = 'https://api.anthropic.com/v1/messages';
+    /**
+     * @var array<mixed>
+     */
     protected $features = ['chat', 'vision', 'attachments'];
+    /**
+     * @var array<mixed>
+     */
     protected $config = [
         'max_tokens' => 4096,
         'temperature' => 1.0,
@@ -20,6 +26,9 @@ class Claude3Opus extends BaseModel
     
     /**
      * 处理附件，使用 Claude 特定格式
+     * @param array<mixed> $attachments
+     * @param array<mixed> $payload
+     * @return array<mixed>
      */
     public function processAttachments(array $payload, array $attachments): array
     {

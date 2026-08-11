@@ -38,21 +38,21 @@ interface ModelInterface
     
     /**
      * 获取支持的功能列表
-     * @return array
+     * @return array<mixed>
      */
     public function getFeatures(): array;
     
     /**
      * 获取模型配置
-     * @return array
+     * @return array<string, mixed>
      */
     public function getConfig(): array;
     
     /**
      * 处理附件，将附件转换为模型特定格式
-     * @param array $payload 请求负载（包含messages）
-     * @param array $attachments 附件数组（AIFile对象数组）
-     * @return array 处理后的请求负载
+     * @param array<string, mixed> $payload 请求负载（包含messages）
+     * @param array<int, \Ai\Helpers\AIFile> $attachments 附件数组（AIFile对象数组）
+     * @return array<string, mixed> 处理后的请求负载
      */
     public function processAttachments(array $payload, array $attachments): array;
 }

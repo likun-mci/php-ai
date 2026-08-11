@@ -12,7 +12,13 @@ class Gemini25Pro extends BaseModel
     protected $platform = 'gemini';
     protected $protocol = 'Ai\\Protocol\\Gemini';
     protected $endpoint = 'https://generativelanguage.googleapis.com/v1beta/openai/chat/completions';
+    /**
+     * @var array<mixed>
+     */
     protected $features = ['chat'];
+    /**
+     * @var array<mixed>
+     */
     protected $config = [
         'max_tokens' => 8192,
         'temperature' => 1.0,
@@ -21,6 +27,9 @@ class Gemini25Pro extends BaseModel
     /**
      * 处理附件，Gemini OpenAI 兼容模式
      * 使用 messages 字段，但附件格式仍然使用 Gemini 的 inline_data
+     * @param array<mixed> $attachments
+     * @param array<mixed> $payload
+     * @return array<mixed>
      */
     public function processAttachments(array $payload, array $attachments): array
     {

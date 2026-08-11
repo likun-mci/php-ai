@@ -21,36 +21,75 @@ class EditContext
     const SEL_CONTEXT  = 2000;    // 选区前后各保留字符数
     const CHUNK_HALF   = 5000;    // 大文件光标窗口半径
 
+    /**
+     * @var string
+     */
     protected $fcpath;
 
+    /**
+     * @var string
+     */
     protected $file = '';          // 相对 FCPATH，如 app/views/website-template/default/site/index.php
+    /**
+     * @var string
+     */
     protected $language = '';
+    /**
+     * @var string|null
+     */
     protected $content = null;     // 文件全文（可空）
+    /**
+     * @var array{line?: int, column?: int, offset?: int}|null
+     */
     protected $cursor = null;      // ['line','column','offset']
+    /**
+     * @var array{start_offset?: int, end_offset?: int, start_line?: int, end_line?: int}|null
+     */
     protected $selection = null;   // ['start_offset','end_offset','start_line','end_line']
+    /**
+     * @var string|null
+     */
     protected $selectedContent = null;
+    /**
+     * @var array<int, array{file_name?: string, file_path?: string}>
+     */
     protected $openedFiles = [];   // [['file_name','file_path'], ...]
 
     /** @var Workspace|null 业务层注入的工作区，null=无（仅当前文件可改） */
     protected $workspace = null;
 
+    /**
+     * @param string $fcpath 项目根目录绝对路径
+     */
     public function __construct($fcpath)
     {
         $this->fcpath = rtrim((string) $fcpath, "/\\") . '/';
     }
 
+    /**
+     * @param string $relativePath
+     * @return $this
+     */
     public function setFile($relativePath)
     {
         $this->file = ltrim(str_replace('\\', '/', (string) $relativePath), '/');
         return $this;
     }
 
+    /**
+     * @param string $lang
+     * @return $this
+     */
     public function setLanguage($lang)
     {
         $this->language = (string) $lang;
         return $this;
     }
 
+    /**
+     * @param string|null $content
+     * @return $this
+     */
     public function setContent($content)
     {
         // 统一换行为 \n：模型据此产出 \n 的 old_string，避免与 \r\n 文件匹配失败
@@ -58,12 +97,21 @@ class EditContext
         return $this;
     }
 
+    /**
+     * @param array{line?: int, column?: int, offset?: int}|null $cursor
+     * @return $this
+     */
     public function setCursor($cursor)
     {
         $this->cursor = is_array($cursor) ? $cursor : null;
         return $this;
     }
 
+    /**
+     * @param array{start_offset?: int, end_offset?: int, start_line?: int, end_line?: int}|null $selection
+     * @param string|null $selectedContent
+     * @return $this
+     */
     public function setSelection($selection, $selectedContent = null)
     {
         $this->selection = (is_array($selection) && isset($selection['start_offset'], $selection['end_offset'])
@@ -72,6 +120,10 @@ class EditContext
         return $this;
     }
 
+    /**
+     * @param array<mixed> $files
+     * @return $this
+     */
     public function setOpenedFiles(array $files)
     {
         $this->openedFiles = [];
@@ -91,6 +143,8 @@ class EditContext
     /**
      * 注入工作区（当前文件所属的可跨文件编辑沙箱）。
      * 传 null 表示无工作区：模型只能操作当前文件。
+     * @param \Ai\Editor\Workspace|null $workspace
+     * @return $this
      */
     public function setWorkspace($workspace)
     {
@@ -98,12 +152,24 @@ class EditContext
         return $this;
     }
 
+    /**
+     * @return bool
+     */
     public function hasWorkspace() { return $this->workspace !== null; }
+    /**
+     * @return \Ai\Editor\Workspace|null
+     */
     public function getWorkspace() { return $this->workspace; }
+    /**
+     * @return string
+     */
     public function getGuidelines() { return $this->workspace ? $this->workspace->getGuidelines() : ''; }
 
     /* ---------- 内容窗口化 ---------- */
 
+    /**
+     * @return array<string, mixed>|null 内容为空时返回 null
+     */
     protected function buildFileView()
     {
         if ($this->content === null) return null;
@@ -141,6 +207,9 @@ class EditContext
 
     /* ---------- 输出 ---------- */
 
+    /**
+     * @return array<string, mixed> 供注入提示词的上下文结构
+     */
     public function toPromptJson()
     {
         $ext = strtolower(pathinfo($this->file, PATHINFO_EXTENSION));

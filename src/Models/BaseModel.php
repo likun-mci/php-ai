@@ -34,13 +34,13 @@ abstract class BaseModel implements ModelInterface
     
     /**
      * 支持的功能列表
-     * @var array
+     * @var array<mixed>
      */
     protected $features = [];
     
     /**
      * 模型配置
-     * @var array
+     * @var array<mixed>
      */
     protected $config = [];
     
@@ -86,6 +86,7 @@ abstract class BaseModel implements ModelInterface
     
     /**
      * 获取支持的功能列表
+     * @return array<mixed>
      */
     public function getFeatures(): array
     {
@@ -94,6 +95,7 @@ abstract class BaseModel implements ModelInterface
     
     /**
      * 获取模型配置
+     * @return array<mixed>
      */
     public function getConfig(): array
     {
@@ -102,6 +104,7 @@ abstract class BaseModel implements ModelInterface
     
     /**
      * 设置配置
+     * @param array<mixed> $config
      */
     public function setConfig(array $config): self
     {
@@ -112,6 +115,9 @@ abstract class BaseModel implements ModelInterface
     /**
      * 处理附件，默认实现（OpenAI 格式）
      * 子类可以重写此方法以实现平台特定的附件处理
+     * @param array<mixed> $attachments
+     * @param array<mixed> $payload
+     * @return array<mixed>
      */
     public function processAttachments(array $payload, array $attachments): array
     {

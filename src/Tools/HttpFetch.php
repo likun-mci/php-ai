@@ -20,13 +20,34 @@ namespace Ai\Tools;
  */
 class HttpFetch
 {
+    /**
+     * @var int
+     */
     protected $maxBytes;
+    /**
+     * @var int
+     */
     protected $connectTimeout;
+    /**
+     * @var int
+     */
     protected $timeout;
+    /**
+     * @var int
+     */
     protected $maxRedirects;
+    /**
+     * @var int[]
+     */
     protected $allowedPorts;
+    /**
+     * @var string
+     */
     protected $userAgent;
 
+    /**
+     * @param array<mixed> $opts
+     */
     public function __construct(array $opts = [])
     {
         $this->maxBytes       = (int)   ($opts['max_bytes']       ?? 1500 * 1024);
@@ -39,7 +60,8 @@ class HttpFetch
 
     /**
      * 安全抓取一个 URL。
-     * @return array { ok, status, content_type, final_url, bytes, body, error }
+     * @return array{ok: bool, status: int, content_type: string, final_url: string, bytes: int, body: string, error: string} { ok, status, content_type, final_url, bytes, body, error }
+     * @param string $url
      */
     public function fetch($url)
     {
@@ -91,12 +113,20 @@ class HttpFetch
         }
     }
 
+    /**
+     * @param string $msg
+     * @param int $status
+     * @return array{ok: bool, status: int, content_type: string, final_url: string, bytes: int, body: string, error: string}
+     */
     protected function err($msg, $status = 0)
     {
         return ['ok' => false, 'status' => $status, 'content_type' => '', 'final_url' => '', 'bytes' => 0, 'body' => '', 'error' => $msg];
     }
 
-    /** 校验协议/端口/userinfo，并确保所有解析 IP 均为公网 */
+    /** 校验协议/端口/userinfo，并确保所有解析 IP 均为公网
+     * @param string $url
+     * @return array{ok: bool, error?: string, parts?: array{scheme: string, host: string, port: int}, ip?: string}
+     */
     protected function validateUrl($url)
     {
         $p = @parse_url($url);
@@ -128,7 +158,10 @@ class HttpFetch
         return ['ok' => true, 'parts' => ['scheme' => $scheme, 'host' => $host, 'port' => $port], 'ip' => $ips[0]];
     }
 
-    /** 解析主机的所有 IPv4/IPv6（字面量 IP 原样返回） */
+    /** 解析主机的所有 IPv4/IPv6（字面量 IP 原样返回）
+     * @param string $host
+     * @return string[] 该主机的全部 A/AAAA 记录
+     */
     protected function resolveHost($host)
     {
         if (filter_var($host, FILTER_VALIDATE_IP)) {
@@ -158,6 +191,8 @@ class HttpFetch
      *   64:ff9b::7f00:1         NAT64，同样映射回 IPv4
      *   100.64.0.0/10           CGNAT 共享地址段，多家云厂商内网在用
      * 因此先把「内嵌 IPv4 的 IPv6 形式」还原成 IPv4 再判，并显式补齐网段黑名单。
+     * @param string $ip
+     * @return bool
      */
     protected function isPublicIp($ip)
     {
@@ -183,6 +218,7 @@ class HttpFetch
      * 覆盖 ::ffff:a.b.c.d（IPv4-mapped）、::a.b.c.d（IPv4-compatible，已废弃但仍可路由）
      * 与 64:ff9b::/96、64:ff9b:1::/48（NAT64）
      * @return string|null 不含内嵌 IPv4 时返回 null
+     * @param string $ip
      */
     protected function extractEmbeddedIpv4($ip)
     {
@@ -212,7 +248,10 @@ class HttpFetch
         return null;
     }
 
-    /** IPv4 是否公网：filter_var 之外补齐 CGNAT 与其它保留段 */
+    /** IPv4 是否公网：filter_var 之外补齐 CGNAT 与其它保留段
+     * @param string $ip
+     * @return bool
+     */
     protected function isPublicIpv4($ip)
     {
         if (!filter_var($ip, FILTER_VALIDATE_IP, FILTER_FLAG_IPV4 | FILTER_FLAG_NO_PRIV_RANGE | FILTER_FLAG_NO_RES_RANGE)) {
@@ -242,7 +281,10 @@ class HttpFetch
         return true;
     }
 
-    /** IPv6 是否公网：只放行全球单播 2000::/3，其余（含 ULA/链路本地/回环/未指定）一律拒绝 */
+    /** IPv6 是否公网：只放行全球单播 2000::/3，其余（含 ULA/链路本地/回环/未指定）一律拒绝
+     * @param string $ip
+     * @return bool
+     */
     protected function isPublicIpv6($ip)
     {
         $packed = @inet_pton($ip);
@@ -264,7 +306,12 @@ class HttpFetch
         return true;
     }
 
-    /** 单次请求：钉死已校验 IP、协议白名单、不自动跟随重定向、超限中断 */
+    /** 单次请求：钉死已校验 IP、协议白名单、不自动跟随重定向、超限中断
+     * @param string $url
+     * @param array{scheme: string, host: string, port: int} $parts
+     * @param string $ip
+     * @return array{ok: bool, status?: int, error?: string, content_type?: string, body?: string, location?: string}
+     */
     protected function curlOnce($url, $parts, $ip)
     {
         $ch = curl_init();
@@ -338,7 +385,11 @@ class HttpFetch
         return ['ok' => true, 'status' => $status, 'content_type' => $ctype, 'body' => $body, 'location' => $location];
     }
 
-    /** 将重定向 Location 解析为绝对 URL */
+    /** 将重定向 Location 解析为绝对 URL
+     * @param string $base
+     * @param string $location
+     * @return string|null 解析失败返回 null
+     */
     protected function resolveLocation($base, $location)
     {
         $location = trim($location);

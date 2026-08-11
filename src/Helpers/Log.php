@@ -53,16 +53,25 @@ class Log
         return self::$logger !== null;
     }
 
+    /**
+     * @param array<string, mixed> $context
+     */
     public static function warning(string $message, array $context = []): void
     {
         self::write('warning', $message, $context);
     }
 
+    /**
+     * @param array<string, mixed> $context
+     */
     public static function error(string $message, array $context = []): void
     {
         self::write('error', $message, $context);
     }
 
+    /**
+     * @param array<string, mixed> $context
+     */
     public static function debug(string $message, array $context = []): void
     {
         self::write('debug', $message, $context);
@@ -70,6 +79,7 @@ class Log
 
     /**
      * 写日志。未注入日志器时退回 error_log()，与改造前行为一致
+     * @param array<string, mixed> $context
      */
     protected static function write(string $level, string $message, array $context): void
     {

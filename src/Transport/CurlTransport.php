@@ -68,7 +68,7 @@ class CurlTransport implements TransportInterface
 
     /**
      * 流式输出中捕获到的最后一个 usage 数据
-     * @var array
+     * @var array<mixed>
      */
     protected $streamLastUsage = [];
 
@@ -80,14 +80,14 @@ class CurlTransport implements TransportInterface
 
     /**
      * 最近一次请求的 cURL info（调试用）
-     * @var array
+     * @var array<mixed>
      */
     protected $lastInfo = [];
 
     /**
      * 可重试的 HTTP 状态码：429 限流，5xx 服务端临时故障
      * 529 是 Anthropic 的过载码，一并纳入
-     * @var array
+     * @var array<mixed>
      */
     protected $retryStatuses = [408, 409, 429, 500, 502, 503, 504, 529];
 
@@ -111,6 +111,8 @@ class CurlTransport implements TransportInterface
 
     /**
      * 发送 POST 请求
+     * @param array<string, string> $headers * @return array<mixed>
+     * @return array<string, mixed>
      */
     public function post(string $url, array $data, array $headers = []): array
     {
@@ -314,7 +316,7 @@ class CurlTransport implements TransportInterface
 
     /**
      * 自定义哪些 HTTP 状态码需要重试
-     * @param array $statuses 状态码数组，传空数组表示只重试连接级错误
+     * @param int[] $statuses 状态码数组，传空数组表示只重试连接级错误
      */
     public function setRetryStatuses(array $statuses): TransportInterface
     {
@@ -334,12 +336,12 @@ class CurlTransport implements TransportInterface
      *   - 不支持流式（并发流式没有意义，回调会互相穿插）
      *   - 重试按条独立进行
      *
-     * @param array $requests [
+     * @param array<string|int, array{url: string, data: array<string, mixed>, headers: array<string, string>}> $requests [
      *     ['url'=>..., 'data'=>[...], 'headers'=>[...]],   // 键可自定义，返回时原样对应
      *     ...
      * ]
      * @param int   $concurrency 同时在途的最大请求数，默认 5；过大易触发平台限流
-     * @return array 与入参同键的结果数组，每项为：
+     * @return array<string|int, array{ok: bool, status: int, error: string, response: array<string, mixed>}> 与入参同键的结果数组，每项为：
      *     ['ok'=>true,  'status'=>200, 'response'=>[...]]
      *     ['ok'=>false, 'status'=>429, 'error'=>'...', 'response'=>[原始错误体]]
      */
@@ -447,6 +449,10 @@ class CurlTransport implements TransportInterface
 
     /**
      * 为并发请求构造单个 curl 句柄；请求体编码失败时直接写结果并返回 null
+     * @param array<string, mixed> $results
+     * @param int|string $key
+     * @return \CurlHandle|resource|null 编码失败时返回 null
+     * @param array<mixed> $req
      */
     protected function buildHandle(array $req, array &$results, $key)
     {
@@ -494,6 +500,8 @@ class CurlTransport implements TransportInterface
 
     /**
      * 把单条并发请求的原始结果整理成统一结构
+     * @return array<mixed>
+     * @param string|null $body
      */
     protected function buildConcurrentResult($body, int $errno, string $error, int $httpCode): array
     {
@@ -521,6 +529,8 @@ class CurlTransport implements TransportInterface
 
     /**
      * 发送 GET 请求
+     * @param array<string, string> $headers * @param array<string, scalar> $params * @return array<mixed>
+     * @return array<string, mixed>
      */
     public function get(string $url, array $params = [], array $headers = []): array
     {
@@ -636,7 +646,7 @@ class CurlTransport implements TransportInterface
 
     /**
      * 获取最近一次请求的 cURL info（调试用）
-     * @return array
+     * @return array<mixed>
      */
     public function getLastInfo(): array
     {
@@ -696,7 +706,7 @@ class CurlTransport implements TransportInterface
 
     /**
      * 返回流式请求中捕获到的 usage 数据
-     * @return array
+     * @return array<string, mixed>
      */
     public function getStreamUsage(): array
     {

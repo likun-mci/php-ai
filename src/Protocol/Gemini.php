@@ -12,10 +12,14 @@ class Gemini implements ProtocolInterface
 {
     use ModelCatalog;
 
+    /**
+     * @var array<string, mixed>
+     */
     protected $config = [];
     
     /**
      * 设置配置
+     * @param array<string, mixed> $config
      */
     public function setConfig(array $config): self
     {
@@ -49,6 +53,7 @@ class Gemini implements ProtocolInterface
 
     /**
      * 透传白名单：buildRequest 放行的参数（Gemini OpenAI 兼容端点的标准参数）
+     * @var string[]
      */
     protected static $passthroughKeys = [
         'temperature', 'max_tokens', 'top_p', 'top_k',
@@ -58,6 +63,8 @@ class Gemini implements ProtocolInterface
 
     /**
      * 构建请求数据
+     * @param array<string, mixed> $payload 已合并的请求负载
+     * @return array<string, mixed> 发给平台的请求体
      */
     public function buildRequest(array $payload): array
     {
@@ -96,6 +103,8 @@ class Gemini implements ProtocolInterface
     
     /**
      * 转换消息格式
+     * @param array<int, array<string, mixed>> $messages
+     * @return array<int, array<string, mixed>>
      */
     protected function convertMessages(array $messages): array
     {
@@ -114,6 +123,7 @@ class Gemini implements ProtocolInterface
     
     /**
      * 解析响应数据
+     * @param array<string, mixed> $response 平台返回的原始数据
      */
     public function parseResponse(array $response): AIResponseInterface
     {
@@ -153,6 +163,8 @@ class Gemini implements ProtocolInterface
     
     /**
      * 构建请求头
+     * @param array<string, mixed> $config
+     * @return array<string, string> 请求头名 => 值
      */
     public function buildHeaders(array $config): array
     {
@@ -172,6 +184,7 @@ class Gemini implements ProtocolInterface
     /**
      * 解析流式数据块
      * Gemini OpenAI 兼容端点使用 OpenAI 格式: {"choices":[{"delta":{"content":"text"}}]}
+     * @param array<string, mixed> $chunk 单个 SSE 分片
      */
     public function parseStreamChunk(array $chunk): ?string
     {
@@ -184,7 +197,8 @@ class Gemini implements ProtocolInterface
     
     /**
      * 从流式数据块中解析 usage（走的是 OpenAI 兼容端点，收尾帧顶层带 usage）
-     * @return array|null 该帧不含 usage 时返回 null
+     * @return array<mixed> 该帧不含 usage 时返回 null
+     * @param array<string, mixed> $chunk
      */
     public function parseStreamUsage(array $chunk): ?array
     {
@@ -201,6 +215,7 @@ class Gemini implements ProtocolInterface
     /**
      * 从流式数据块中解析平台错误
      * @return string|null 该帧不含错误时返回 null
+     * @param array<string, mixed> $chunk
      */
     public function parseStreamError(array $chunk): ?string
     {
@@ -216,6 +231,7 @@ class Gemini implements ProtocolInterface
 
     /**
      * 判断流式数据是否结束
+     * @param array<string, mixed> $chunk
      */
     public function isStreamEnd(array $chunk): bool
     {
@@ -227,6 +243,7 @@ class Gemini implements ProtocolInterface
      * 解析模型列表端点
      * 优先级：endpoint_models > base_url > 由实际对话端点推导 > 官方地址
      * 注：Gemini 的模型列表在原生路径下（/v1beta/models），推导前先摘掉对话端点里的 openai 兼容目录
+     * @param array<string, mixed> $config
      */
     public function modelsEndpoint(array $config): string
     {
@@ -244,6 +261,7 @@ class Gemini implements ProtocolInterface
 
     /**
      * 常用模型（供后台离线渲染下拉框；拉取失败时作为兜底）
+     * @return array<string, string> 模型 id => 显示名
      */
     public function knownModels(): array
     {
@@ -258,6 +276,9 @@ class Gemini implements ProtocolInterface
     /**
      * 列举可用模型列表
      * 拉取失败或为空时，若请求的正是本协议官方域名，则回退到 knownModels()
+     * @param array<string, mixed> $config
+     * @param \Ai\Contracts\TransportInterface $transport
+     * @return array<string, mixed>|null 模型 id => 名称或完整数据
      */
     public function listModels(array $config, $transport): ?array
     {

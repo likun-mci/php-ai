@@ -26,7 +26,7 @@ class Endpoint
      * 解析实际请求端点
      *
      * @param string $default 模型默认端点（完整 URL）
-     * @param array  $config  运行时配置，读取 endpoint / base_url
+     * @param array<mixed> $config 运行时配置，读取 endpoint / base_url
      * @return string 实际请求端点
      */
     public static function resolve(string $default, array $config): string
@@ -58,7 +58,7 @@ class Endpoint
      *
      * 优先级：endpoint_models（完整覆盖） > base_url + $modelsPath > 由对话端点推导 > $default
      *
-     * @param array  $config     运行时配置
+     * @param array<mixed> $config 运行时配置
      * @param string $default    官方默认模型列表端点
      * @param string $modelsPath 该协议的模型列表路径，如 '/v1/models'
      * @return string

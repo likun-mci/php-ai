@@ -16,10 +16,13 @@ class AI
 {
     /**
      * 配置
-     * @var array
+     * @var array<mixed>
      */
     protected $config = [];
 
+    /**
+     * @var int
+     */
     protected $rounds = 0; # 默认保留最近 10 轮对话上下文
     
     /**
@@ -42,7 +45,7 @@ class AI
     
     /**
      * 回调函数
-     * @var array
+     * @var array<mixed>
      */
     protected $callbacks = [
         'before' => [],
@@ -51,7 +54,7 @@ class AI
     
     /**
      * 附件列表
-     * @var array
+     * @var array<mixed>
      */
     protected $attachments = [];
     
@@ -69,7 +72,7 @@ class AI
 
     /**
      * 流式输出累积的 usage（部分平台分多帧下发，需要逐帧合并）
-     * @var array
+     * @var array<mixed>
      */
     protected $streamAccumulatedUsage = [];
 
@@ -93,14 +96,14 @@ class AI
 
     /**
      * 各会话的历史消息：[会话ID => [消息, ...]]
-     * @var array
+     * @var array<mixed>
      */
     protected $histories = [];
 
     /**
      * 可由运行时配置透传到请求体的生成参数白名单
      * （config 里的 api_key、base_url 等连接信息不会进入请求体）
-     * @var array
+     * @var array<mixed>
      */
     protected static $payloadKeys = [
         'max_tokens', 'max_completion_tokens', 'temperature', 'top_p', 'top_k', 'stop',
@@ -111,6 +114,7 @@ class AI
     /**
      * 数值型生成参数的取值范围 [最小值, 最大值]
      * 超出范围时自动截断到最近的边界值。
+     * @var array<string, array{0: float|int, 1: float|int}>
      */
     protected static $numericRanges = [
         'temperature'       => [0.0, 2.0],
@@ -129,8 +133,8 @@ class AI
      * - 超出范围的值自动截断到最近的边界值
      * - 非数值类型的值原样保留（pass-through）
      *
-     * @param array $params 配置项或 payload 数组
-     * @return array
+     * @param array<string, mixed> $params 配置项或 payload 数组
+     * @return array<string, mixed>
      */
     protected static function sanitizePayloadParams(array $params): array
     {
@@ -162,7 +166,7 @@ class AI
 
     /**
      * 模型名称到类名的映射表
-     * @var array
+     * @var array<mixed>
      */
     private $modelMap = [
         'gpt-4.1'            => 'Ai\Models\OpenAI\GPT41',
@@ -178,6 +182,7 @@ class AI
     
     /**
      * 构造函数
+     * @param array<mixed> $config
      */
     public function __construct(array $config = [])
     {
@@ -209,7 +214,7 @@ class AI
 
     /**
      * 读取当前会话的历史消息
-     * @return array 标准 messages 结构，可直接塞回 chat()
+     * @return array<int, array<string, mixed>> 标准 messages 结构，可直接塞回 chat()
      */
     public function getHistory(): array
     {
@@ -218,6 +223,7 @@ class AI
 
     /**
      * 覆盖当前会话的历史（从数据库/Redis 恢复上下文时用）
+     * @param array<int, array<string, mixed>> $messages
      */
     public function setHistory(array $messages): self
     {
@@ -240,7 +246,7 @@ class AI
 
     /**
      * 导出全部会话的历史，便于业务层持久化
-     * @return array [会话ID => [消息, ...]]
+     * @return array<string, array<int, array<string, mixed>>> [会话ID => [消息, ...]]
      */
     public function exportHistory(): array
     {
@@ -249,6 +255,7 @@ class AI
 
     /**
      * 导入全部会话的历史（与 exportHistory() 对应）
+     * @param array<string, array<int, array<string, mixed>>> $histories
      */
     public function importHistory(array $histories): self
     {
@@ -263,6 +270,8 @@ class AI
      * 它属于上一轮工具调用的一部分）。按轮切分而不是按条数切，
      * 是为了避免把 assistant 的 tool_use 和对应的 tool_result 切散——
      * 那会让下一次请求直接被平台拒绝。
+     * @param array<int, array<string, mixed>> $messages * @return array<mixed>
+     * @return array<int, array<string, mixed>>
      */
     protected function trimHistory(array $messages, int $rounds): array
     {
@@ -321,7 +330,7 @@ class AI
      *           历史按 setSessionId() 分桶，可用 exportHistory() / importHistory() 持久化
      * - 其他生成参数，如 temperature、max_tokens、top_p 等（见 self::$payloadKeys）
      *
-     * @param array $config 配置项数组
+     * @param array<string, mixed> $config 配置项数组
      * @return self
      */
     public function setConfig(array $config): self
@@ -347,6 +356,7 @@ class AI
 
     /**
      * 创建 AI 实例（工厂方法）
+     * @param array<mixed> $config
      */
     public static function create(array $config = []): self
     {
@@ -361,6 +371,7 @@ class AI
      * 2) 内置模型标识（见 modelMap）：沿用内置平台/协议/端点
      * 3) 任意模型名：按 config['protocol'] 手选协议格式，或按模型名自动推断协议，
      *    再结合 config['endpoint'] / config['base_url'] 组装端点
+     * @param \Ai\Contracts\ModelInterface|string $model 模型实例或模型标识
      */
     public function setModel($model): self
     {
@@ -440,6 +451,7 @@ class AI
 
     /**
      * 从运行时配置里挑出可进入请求体的生成参数
+     * @return array<string, mixed>
      */
     protected function collectModelParams(): array
     {
@@ -515,6 +527,7 @@ class AI
     
     /**
      * 设置附件
+     * @param array<int, \Ai\Helpers\AIFile> $attachments
      */
     public function setAttachments(array $attachments): self
     {
@@ -524,7 +537,7 @@ class AI
     
     /**
      * 对话
-     * @param array|string $payload 对话内容，可以是字符串（用户消息）或数组（完整请求负载）
+     * @param string|array<string, mixed> $payload 对话内容，可以是字符串（用户消息）或数组（完整请求负载）
      * 格式示例：
      * 字符串模式： "你好，AI！"
      * 数组模式：   [
@@ -757,9 +770,9 @@ class AI
      *   - 不支持流式（并发流式的分片会互相穿插，没有意义）
      *   - 附件（setAttachments）只作用于 chat()，批量请在各自 payload 里自带
      *
-     * @param array $payloads    键名任意，返回结果按同样的键对应回来
+     * @param array<string, string|array<string, mixed>> $payloads 键名任意，返回结果按同样的键对应回来
      * @param int   $concurrency 同时在途的请求数，默认 5；调大易触发平台限流
-     * @return AIResponseInterface[] 与入参同键的响应数组
+     * @return array<string, \Ai\Contracts\AIResponseInterface> 与入参同键的响应数组
      */
     public function chatBatch(array $payloads, int $concurrency = 5): array
     {
@@ -895,6 +908,7 @@ class AI
     
     /**
      * 运行回调函数
+     * @param mixed $data 回调可读写的数据（before 是 payload，after 是响应对象）
      */
     protected function runCallbacks(string $event, &$data): void
     {
@@ -1006,7 +1020,7 @@ class AI
 
     /**
      * 获取最近一次请求的 cURL info（调试用）
-     * @return array
+     * @return array<mixed>
      */
     public function getLastInfo(): array
     {
@@ -1067,6 +1081,7 @@ class AI
      *
      * 注册了回调就交给回调，否则维持默认行为：按 SSE 报文写进输出缓冲区。
      * 默认路径不下发 `raw`，报文格式与历史版本完全一致，前端无需改动。
+     * @param array<mixed> $event
      */
     protected function emitStream(array $event): void
     {
@@ -1096,7 +1111,7 @@ class AI
      * 海外的 OpenAI、Claude、Gemini、Grok、Mistral……，以及聚合中转与本地部署）。
      * 平台键即业务层取密钥用的前缀，约定为 {平台}__api_key。
      *
-     * @return array ['openai' => 'OpenAI', 'deepseek' => 'DeepSeek 深度求索', 'qwen' => '阿里云百炼（通义千问）', ...]
+     * @return array<string, string> ['openai' => 'OpenAI', 'deepseek' => 'DeepSeek 深度求索', 'qwen' => '阿里云百炼（通义千问）', ...]
      */
     public function listPlatforms(): array
     {
@@ -1117,7 +1132,7 @@ class AI
     /**
      * 协议格式列表
      * 用于后台「手选协议格式」下拉框：接入任意兼容接口时，由用户指定按哪种协议通信
-     * @return array ['openai' => 'OpenAI 兼容（Chat Completions）', ...]
+     * @return array<string, string> ['openai' => 'OpenAI 兼容（Chat Completions）', ...]
      */
     public function listProtocols(): array
     {
@@ -1127,7 +1142,7 @@ class AI
     /**
      * 协议格式列表（按「中国大陆 / 海外主流 / 聚合中转 / 本地部署」分组）
      * 用于后台下拉框的 optgroup 渲染
-     * @return array ['中国大陆' => ['deepseek' => '...', ...], ...]
+     * @return array<string, array<string, string>> ['中国大陆' => ['deepseek' => '...', ...], ...]
      */
     public function listProtocolGroups(): array
     {
@@ -1141,7 +1156,7 @@ class AI
      * 本方法直接返回库内维护的常用模型，适合后台下拉框的默认值与离线渲染。
      *
      * @param string $protocol 协议标识（如 'qwen'、'zhipu'）或协议类名；留空则用当前模型的协议
-     * @return array ['模型 id' => '显示名']，无内置清单时返回空数组
+     * @return array<string, string> ['模型 id' => '显示名']，无内置清单时返回空数组
      */
     public function listKnownModels(string $protocol = ''): array
     {
@@ -1208,7 +1223,7 @@ class AI
      *
      * @param bool $raw 为 true 时返回平台原始模型数据（含 pricing、context_length 等），
      *                  默认为空则返回 ['model_id' => 'model_name']
-     * @return array|null 模型列表，不支持返回 null
+     * @return array<mixed> 模型列表，不支持返回 null
      *
      * @example
      * $models = $ai->listModels();

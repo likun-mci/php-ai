@@ -19,12 +19,18 @@ namespace Ai\Agent;
  */
 class Memory
 {
+    /**
+     * @var string
+     */
     protected $file;
+    /**
+     * @var int
+     */
     protected $maxInject;
 
     /**
-     * @param string $file      记忆文件绝对路径
-     * @param int    $maxInject 注入对话时的最大字符数（防止 token 膨胀）
+     * @param mixed $file 记忆文件绝对路径
+     * @param int $maxInject 注入对话时的最大字符数（防止 token 膨胀）
      */
     public function __construct($file, $maxInject = 20000)
     {
@@ -32,9 +38,14 @@ class Memory
         $this->maxInject = (int) $maxInject;
     }
 
+    /**
+     * @return string
+     */
     public function path() { return $this->file; }
 
-    /** 确保目录与文件存在（不存在则创建空文件） */
+    /** 确保目录与文件存在（不存在则创建空文件）
+     * @return $this
+     */
     public function ensure()
     {
         $dir = dirname($this->file);
@@ -52,20 +63,26 @@ class Memory
         return $this;
     }
 
-    /** 取最近一次 PHP 文件操作的错误描述，用于把失败原因写进日志 */
+    /** 取最近一次 PHP 文件操作的错误描述，用于把失败原因写进日志
+     * @return string
+     */
     protected function lastError()
     {
         $err = error_get_last();
         return isset($err['message']) ? $err['message'] : '未知原因';
     }
 
-    /** 读取原始内容（文件不存在返回空串） */
+    /** 读取原始内容（文件不存在返回空串）
+     * @return string
+     */
     public function read()
     {
         return is_file($this->file) ? (string) file_get_contents($this->file) : '';
     }
 
-    /** 注入对话用文本：去除首尾空白并按 maxInject 截断；空记忆返回 '' */
+    /** 注入对话用文本：去除首尾空白并按 maxInject 截断；空记忆返回 ''
+     * @return string
+     */
     public function forPrompt()
     {
         $c = trim($this->read());
@@ -82,6 +99,8 @@ class Memory
      * 先写同目录临时文件再 rename：rename 在同一文件系统内是原子操作，
      * 因此不会出现「写到一半进程被杀 → 记忆被截断」的情况。
      * 直接 file_put_contents 到目标文件则会。
+     * @param mixed $content
+     * @return bool
      */
     public function write($content)
     {
@@ -131,6 +150,8 @@ class Memory
      * 原实现是「读全文 → 拼接 → 整体写回」，两个进程同时 append 时后写的会
      * 覆盖掉先写的，直接丢数据。改为用 'a' 模式 + LOCK_EX 独占追加：
      * 追加本身就是幂等的尾部写入，不需要先读全文，也就不存在竞态。
+     * @param mixed $content
+     * @return bool
      */
     public function append($content)
     {

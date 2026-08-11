@@ -18,6 +18,7 @@ class WebContent
      * @param string $contentType 响应 Content-Type
      * @param string $format      text|md|source（非法值回退 md）
      * @param int    $maxChars    注入上限（按字符截断）
+     * @return string
      */
     public static function render($body, $contentType, $format, $maxChars = 16000)
     {
@@ -48,6 +49,10 @@ class WebContent
         return $out;
     }
 
+    /**
+     * @param string $body
+     * @return string
+     */
     protected static function prettyJson($body)
     {
         $d = json_decode((string) $body, true);
@@ -55,7 +60,10 @@ class WebContent
         return json_encode($d, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
     }
 
-    /** HTML → 纯文本：剥离噪声后取文本、压缩空白 */
+    /** HTML → 纯文本：剥离噪声后取文本、压缩空白
+     * @param string $html
+     * @return string
+     */
     public static function htmlToText($html)
     {
         $html = self::stripNoise($html);
@@ -76,7 +84,10 @@ class WebContent
         return trim($text);
     }
 
-    /** HTML → Markdown：优先 league/html-to-markdown，缺失则回退基础转换 */
+    /** HTML → Markdown：优先 league/html-to-markdown，缺失则回退基础转换
+     * @param string $html
+     * @return string
+     */
     public static function htmlToMarkdown($html)
     {
         $html = self::stripNoise($html);
@@ -95,7 +106,10 @@ class WebContent
         return self::basicMarkdown($html);
     }
 
-    /** 无依赖的轻量 HTML→Markdown 回退（best-effort） */
+    /** 无依赖的轻量 HTML→Markdown 回退（best-effort）
+     * @param string $html
+     * @return string
+     */
     protected static function basicMarkdown($html)
     {
         if (preg_match('#<body[^>]*>(.*)</body>#is', $html, $m)) {
@@ -121,7 +135,10 @@ class WebContent
         return trim($text);
     }
 
-    /** 去掉 script/style/noscript/svg/iframe/注释/head 等噪声 */
+    /** 去掉 script/style/noscript/svg/iframe/注释/head 等噪声
+     * @param string $html
+     * @return string
+     */
     protected static function stripNoise($html)
     {
         $html = preg_replace('#<!--.*?-->#s', '', $html);

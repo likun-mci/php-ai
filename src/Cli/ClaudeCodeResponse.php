@@ -39,19 +39,19 @@ class ClaudeCodeResponse extends AIResponse
     /** @var string 本轮思考内容（若模型产生了 thinking 块） */
     protected $thinking;
 
-    /** @var array 本次会话可用工具名列表（取自 system/init 事件） */
+    /** @var string[] 本次会话可用工具名列表（取自 system/init 事件） */
     protected $tools;
 
-    /** @var array 本轮的工具调用记录，每项 ['id','name','input'] */
+    /** @var array<int, array<string, mixed>> 本轮的工具调用记录，每项 ['id','name','input'] */
     protected $toolUses;
 
-    /** @var array 被权限拒绝的工具调用记录 */
+    /** @var array<int, array<string, mixed>> 被权限拒绝的工具调用记录 */
     protected $permissionDenials;
 
-    /** @var array system/init 事件原文（cwd、mcp_servers、slash_commands 等） */
+    /** @var array<string, mixed> system/init 事件原文（cwd、mcp_servers、slash_commands 等） */
     protected $init;
 
-    /** @var array|null --json-schema 结构化输出解析结果 */
+    /** @var array<string, mixed>|null --json-schema 结构化输出解析结果 */
     protected $structured;
 
     public function __construct(array $data)
@@ -148,6 +148,7 @@ class ClaudeCodeResponse extends AIResponse
 
     /**
      * 获取本次会话可用的工具名列表
+     * @return array<mixed>
      */
     public function getTools(): array
     {
@@ -156,6 +157,7 @@ class ClaudeCodeResponse extends AIResponse
 
     /**
      * 获取本轮的工具调用记录，每项 ['id','name','input']
+     * @return array<mixed>
      */
     public function getToolUses(): array
     {
@@ -164,6 +166,7 @@ class ClaudeCodeResponse extends AIResponse
 
     /**
      * 获取被权限拒绝的工具调用记录
+     * @return array<mixed>
      */
     public function getPermissionDenials(): array
     {
@@ -172,6 +175,7 @@ class ClaudeCodeResponse extends AIResponse
 
     /**
      * 获取 system/init 事件原文（cwd、mcp_servers、slash_commands、permissionMode 等）
+     * @return array<mixed>
      */
     public function getInit(): array
     {
@@ -180,6 +184,7 @@ class ClaudeCodeResponse extends AIResponse
 
     /**
      * 获取结构化输出（配合 setJsonSchema() 使用），无法解析为 JSON 时返回 null
+     * @return array<mixed>
      */
     public function getStructured(): ?array
     {

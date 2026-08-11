@@ -10,6 +10,7 @@ class EditProtocol
 {
     /**
      * 生成 system 指令（含动作契约、安全规则；模板模式注入开发文档与文件清单约定）
+     * @return string
      */
     public static function systemPrompt(EditContext $ctx)
     {
@@ -69,6 +70,8 @@ class EditProtocol
 
     /**
      * 解析模型返回文本为 EditPlan
+     * @param string $aiText 模型返回的原始文本
+     * @return \Ai\Editor\EditPlan
      */
     public static function parse($aiText)
     {
@@ -117,6 +120,8 @@ class EditProtocol
 
     /**
      * 从文本中提取 JSON 字符串：优先 ```json 围栏，其次裸 { ... }
+     * @param string $text * @return string 提取失败返回空串
+     * @return string|null 提取失败返回 null
      */
     protected static function extractJson($text)
     {

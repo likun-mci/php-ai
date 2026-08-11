@@ -49,10 +49,14 @@ use Ai\Exceptions\ProcessException;
  */
 class ClaudeCode
 {
-    /** 进程内缓存：自动检测到的 claude 路径（PHP 请求生命周期内有效） */
+    /** 进程内缓存：自动检测到的 claude 路径（PHP 请求生命周期内有效）
+     * @var string
+     */
     protected static $binaryCache = '';
 
-    /** 默认 CLI 参数（用户未覆盖时生效）。值 true 表示布尔 flag，数组/字符串为带值 flag */
+    /** 默认 CLI 参数（用户未覆盖时生效）。值 true 表示布尔 flag，数组/字符串为带值 flag
+     * @var array<string, mixed>
+     */
     protected static $defaultFlags = [
         'output-format'   => 'stream-json',
         'verbose'         => true,
@@ -69,6 +73,7 @@ class ClaudeCode
      *  variadic → --flag 'a' 'b'       （一个 flag 后跟多个值）
      *  repeat   → --flag 'a' --flag 'b'（flag 本身重复）
      * 未列出的数组值按 --flag 'a b'（空格拼成单值）渲染。
+     * @var array<string, string>
      */
     protected static $arrayFlagStyles = [
         'setting-sources' => 'comma',
@@ -82,12 +87,16 @@ class ClaudeCode
         'plugin-url'      => 'repeat',
     ];
 
-    /** --permission-mode 合法取值 */
+    /** --permission-mode 合法取值
+     * @var string[]
+     */
     protected static $permissionModes = [
         'acceptEdits', 'auto', 'bypassPermissions', 'manual', 'dontAsk', 'plan',
     ];
 
-    /** --effort 合法取值 */
+    /** --effort 合法取值
+     * @var string[]
+     */
     protected static $effortLevels = ['low', 'medium', 'high', 'xhigh', 'max'];
 
     /** @var string 手动指定的 claude 可执行文件路径（最高优先级） */
@@ -105,7 +114,7 @@ class ClaudeCode
     /** @var string 默认工作目录（未设置时用当前 PHP 进程 cwd） */
     protected $workdir = '';
 
-    /** @var array 额外环境变量（本地执行时传给 proc_open） */
+    /** @var array<string, string> 额外环境变量（本地执行时传给 proc_open） */
     protected $env = [];
 
     /** @var bool 本地执行时自动把 claude 所在目录（如 nvm node bin）加入 PATH */
@@ -126,10 +135,10 @@ class ClaudeCode
     /** @var string 提示词临时文件目录（默认 sys_get_temp_dir()） */
     protected $promptDir = '';
 
-    /** @var array 用户覆盖的 CLI 参数 */
+    /** @var array<string, mixed> 用户覆盖的 CLI 参数 */
     protected $flags = [];
 
-    /** @var array 需要删除的默认 CLI 参数名 */
+    /** @var array<string, bool> 需要删除的默认 CLI 参数名 */
     protected $removedFlags = [];
 
     /** @var callable|null 自定义执行器 function(string $cmd, callable $onChunk): int */
@@ -144,11 +153,11 @@ class ClaudeCode
     /** @var string CLI 版本号缓存 */
     protected $version = '';
 
-    /** @var array|null 模型列表缓存（null 表示尚未查询） */
+    /** @var array<string, mixed>|null 模型列表缓存（null 表示尚未查询） */
     protected $modelsCache = null;
 
     /**
-     * @param array $config 支持键：
+     * @param array<mixed> $config 支持键：
      *                      binary、binary_cache、binary_cache_path、binary_cache_ttl、
      *                      workdir、env、auto_nvm_path、shell、timeout、session_id、
      *                      model、prompt_dir、flags、runner、on_event
@@ -182,6 +191,7 @@ class ClaudeCode
      * 快捷构造
      *
      * @return static
+     * @param array<mixed> $config
      */
     public static function create(array $config = []): self
     {
@@ -448,6 +458,7 @@ class ClaudeCode
 
     /**
      * 批量设置 CLI 参数
+     * @param array<mixed> $flags
      */
     public function setFlags(array $flags): self
     {
@@ -480,6 +491,7 @@ class ClaudeCode
 
     /**
      * 获取最终生效的参数（默认 + 用户覆盖 - 已删除）
+     * @return array<mixed>
      */
     public function getFlags(): array
     {
@@ -513,7 +525,7 @@ class ClaudeCode
 
     /**
      * 免权限提示的工具白名单（--allowedTools），支持 "Bash(git *)" 这类细粒度写法
-     * @param array|string $tools
+     * @param array<mixed> $tools
      */
     public function setAllowedTools($tools): self
     {
@@ -522,7 +534,7 @@ class ClaudeCode
 
     /**
      * 拒绝使用的工具名单（--disallowedTools）
-     * @param array|string $tools
+     * @param array<mixed> $tools
      */
     public function setDisallowedTools($tools): self
     {
@@ -533,7 +545,7 @@ class ClaudeCode
      * 限定模型可用的内置工具集合（--tools）。
      * 传空数组/空串禁用全部工具，传 'default' 使用全部工具。
      * 与 setAllowedTools() 的区别：这里决定"有哪些工具"，那里决定"哪些不用问"。
-     * @param array|string $tools 如 ['Read','Edit','Grep'] 或 'default'
+     * @param array<mixed> $tools 如 ['Read','Edit','Grep'] 或 'default'
      */
     public function setTools($tools): self
     {
@@ -565,7 +577,7 @@ class ClaudeCode
 
     /**
      * 额外授权可访问的目录（--add-dir），工作目录之外的路径需在此声明
-     * @param array|string $dirs
+     * @param array<mixed> $dirs
      */
     public function setAddDirs($dirs): self
     {
@@ -608,7 +620,7 @@ class ClaudeCode
 
     /**
      * 主模型过载/不可用时的降级模型（--fallback-model），按顺序尝试
-     * @param array|string $models
+     * @param array<mixed> $models
      */
     public function setFallbackModel($models): self
     {
@@ -627,7 +639,7 @@ class ClaudeCode
     /**
      * 结构化输出（--json-schema）：约束最终结果符合给定 JSON Schema，
      * 结果可用 ClaudeCodeResponse::getStructured() 取回数组。
-     * @param array|string $schema 数组会自动 json_encode
+     * @param array<mixed> $schema 数组会自动 json_encode
      */
     public function setJsonSchema($schema): self
     {
@@ -667,7 +679,7 @@ class ClaudeCode
     /**
      * 定义临时自定义 agent（--agents），如
      * ['reviewer' => ['description' => '代码审查', 'prompt' => '你是代码审查员']]
-     * @param array|string $agents
+     * @param array<mixed> $agents
      */
     public function setAgents($agents): self
     {
@@ -682,7 +694,7 @@ class ClaudeCode
 
     /**
      * 加载 MCP 服务器配置（--mcp-config），可传 JSON 文件路径或 JSON 字符串
-     * @param array|string $configs
+     * @param array<mixed> $configs
      */
     public function setMcpConfig($configs): self
     {
@@ -708,7 +720,7 @@ class ClaudeCode
     /**
      * 设置加载哪些配置来源（--setting-sources），默认 ['user','project','local']。
      * 传空数组表示不加载任何配置（等价于纯净环境）。
-     * @param array|string $sources
+     * @param array<mixed> $sources
      */
     public function setSettingSources($sources): self
     {
@@ -720,7 +732,7 @@ class ClaudeCode
 
     /**
      * 额外加载的设置（--settings），可传 JSON 文件路径或 JSON 字符串
-     * @param array|string $settings
+     * @param array<mixed> $settings
      */
     public function setSettings($settings): self
     {
@@ -880,6 +892,7 @@ class ClaudeCode
 
     /**
      * 单个参数渲染为命令行片段（按 $arrayFlagStyles 决定多值写法）
+     * @param mixed $value
      */
     protected function renderFlag(string $name, $value): string
     {
@@ -916,6 +929,7 @@ class ClaudeCode
 
     /**
      * 渲染全部参数（含选项级 model / flags 注入）
+     * @param array<mixed> $options
      */
     protected function renderFlags(array $options): string
     {
@@ -954,6 +968,7 @@ class ClaudeCode
 
     /**
      * 追加环境变量（本地执行时传给 proc_open）
+     * @param array<mixed> $env
      */
     public function setEnv(array $env): self
     {
@@ -1047,7 +1062,7 @@ class ClaudeCode
      * 非流式调用：执行一轮 claude，返回最终结果。
      *
      * @param string $prompt  用户提示词
-     * @param array  $options 可选：session_id（覆盖续接）、reset（清空会话）、
+     * @param array<mixed> $options 可选：session_id（覆盖续接）、reset（清空会话）、
      *                        workdir、model、flags（临时参数）、env、timeout
      */
     public function chat(string $prompt, array $options = []): ClaudeCodeResponse
@@ -1057,6 +1072,7 @@ class ClaudeCode
 
     /**
      * run 的别名（与 chat 等价）
+     * @param array<mixed> $options
      */
     public function run(string $prompt, array $options = []): ClaudeCodeResponse
     {
@@ -1087,7 +1103,7 @@ class ClaudeCode
      *
      * @param string   $prompt  用户提示词
      * @param callable|null $onEvent 事件回调；为空时仅返回结果对象
-     * @param array    $options 同 chat()
+     * @param array<mixed> $options 同 chat()
      */
     public function runStream(string $prompt, $onEvent = null, array $options = []): ClaudeCodeResponse
     {
@@ -1195,6 +1211,7 @@ class ClaudeCode
 
     /**
      * 处理一行 stream-json 事件（或非 JSON 原始行）
+     * @param array<mixed> $collect
      */
     protected function handleLine(string $line, array &$collect, callable $emit): void
     {
@@ -1269,6 +1286,8 @@ class ClaudeCode
 
     /**
      * system 事件：init 携带会话初始信息，其余按子类型透传
+     * @param array<mixed> $collect
+     * @param array<mixed> $ev
      */
     protected function handleSystemEvent(array $ev, array &$collect, callable $emit): void
     {
@@ -1289,6 +1308,8 @@ class ClaudeCode
 
     /**
      * assistant 事件：拆出文本 / 思考 / 工具调用三类内容块
+     * @param array<mixed> $collect
+     * @param array<mixed> $ev
      */
     protected function handleAssistantEvent(array $ev, array &$collect, callable $emit): void
     {
@@ -1320,6 +1341,8 @@ class ClaudeCode
 
     /**
      * result 事件：本轮汇总（用量、费用、轮数、终止原因、被拒工具）
+     * @param array<mixed> $collect
+     * @param array<mixed> $ev
      */
     protected function handleResultEvent(array $ev, array &$collect, callable $emit): void
     {
@@ -1364,6 +1387,7 @@ class ClaudeCode
     /**
      * 尝试把最终文本解析为结构化数组（配合 --json-schema 使用），失败返回 null。
      * 兼容模型把 JSON 包在 ```json 代码块里的情况。
+     * @return array<mixed>
      */
     public static function decodeStructured(string $content): ?array
     {
@@ -1384,6 +1408,7 @@ class ClaudeCode
 
     /**
      * 解析一行 stream-json 输出为事件数组；非 JSON 或空行返回 null
+     * @return array<mixed>
      */
     public static function parseEventLine(string $line): ?array
     {
@@ -1400,6 +1425,7 @@ class ClaudeCode
 
     /**
      * 组装最终命令：{shellPrefix} {binary} --print {flags} [--resume id] < promptFile
+     * @param array<mixed> $options
      */
     public function buildCommand(string $binary, string $promptFile, string $workdir = '', array $options = []): string
     {
@@ -1410,6 +1436,7 @@ class ClaudeCode
      * 组装不含 stdin 重定向的基础命令（双工会话模式复用）
      *
      * @param string $suffix 追加在参数之后、cd/前缀包裹之前的片段
+     * @param array<mixed> $options
      */
     protected function buildBaseCommand(string $binary, string $workdir, array $options, string $suffix = ''): string
     {
@@ -1457,6 +1484,7 @@ class ClaudeCode
     /**
      * 获取登录 / 订阅状态（claude auth status --json）
      * 返回 ['loggedIn','authMethod','apiProvider','email','orgId','orgName','subscriptionType']
+     * @return array<mixed>
      */
     public function getAuthStatus(): array
     {
@@ -1488,6 +1516,7 @@ class ClaudeCode
      * @param bool $raw false 返回可直接传给 setModel() 的标识数组；
      *                  true 返回完整条目（含 resolvedModel、displayName、description、
      *                  supportsEffort、supportedEffortLevels、supportsFastMode 等）
+     * @return array<mixed>
      */
     public function listModels(bool $raw = false): array
     {
@@ -1513,6 +1542,7 @@ class ClaudeCode
      *  - subscription_type  订阅类型，如 max / pro
      *  - rate_limits        各限流窗口（five_hour、seven_day…）的 utilization 百分比与重置时间
      *  - behaviors          近一天 / 一周的请求数、会话数等统计
+     * @return array<mixed>
      */
     public function getUsage(): array
     {
@@ -1523,6 +1553,7 @@ class ClaudeCode
      * 获取精简后的限流额度概览，每项含
      * ['key','percent','severity','resets_at','resets_in','is_active']，
      * percent 为已用百分比。未提供限流数据（如 API Key 计费）时返回空数组。
+     * @return array<mixed>
      */
     public function getRateLimits(): array
     {
@@ -1568,6 +1599,7 @@ class ClaudeCode
     /**
      * 获取当前生效的设置（合并 user / project / local 之后的结果），
      * 含 env、permissions.allow/deny、model 等
+     * @return array<mixed>
      */
     public function getSettings(): array
     {
@@ -1576,6 +1608,7 @@ class ClaudeCode
 
     /**
      * 获取 MCP 服务器状态列表
+     * @return array<mixed>
      */
     public function getMcpServers(): array
     {
@@ -1585,6 +1618,7 @@ class ClaudeCode
 
     /**
      * 获取 CLI 构建信息 ['version' => '2.1.222', 'buildTime' => '...']
+     * @return array<mixed>
      */
     public function getBinaryVersion(): array
     {
@@ -1604,7 +1638,8 @@ class ClaudeCode
      * 执行任意 claude 子命令并收集完整输出。
      * 例：runCommand(['mcp', 'list'])、runCommand(['--version'])
      *
-     * @return array ['exit_code' => int, 'stdout' => string, 'stderr' => string]
+     * @return array<mixed> ['exit_code' => int, 'stdout' => string, 'stderr' => string]
+     * @param array<mixed> $args
      */
     public function runCommand(array $args, int $timeout = 60): array
     {
@@ -1645,6 +1680,8 @@ class ClaudeCode
      * ClaudeCodeSession 会覆盖此方法，复用自身已运行的进程。
      *
      * @throws ProcessException CLI 返回失败或超时
+     * @param array<mixed> $extra
+     * @return array<mixed>
      */
     protected function queryControl(string $subtype, array $extra = [], int $timeout = 60): array
     {
@@ -1679,6 +1716,8 @@ class ClaudeCode
 
     /**
      * 校验并取出控制响应的 response 主体
+     * @param array<mixed> $resp
+     * @return array<mixed>
      */
     protected static function unwrapControlResponse(string $subtype, array $resp): array
     {
@@ -1691,6 +1730,7 @@ class ClaudeCode
 
     /**
      * 距离给定 ISO8601 时间还有多少秒，无法解析或已过期返回 0
+     * @param mixed $isoTime
      */
     protected static function secondsUntil($isoTime): int
     {
@@ -1793,6 +1833,7 @@ class ClaudeCode
 
     /**
      * 构建本地执行环境变量（自动把 nvm 下 claude 所在目录加入 PATH）
+     * @return array<mixed>
      */
     protected function buildLocalEnv(): array
     {

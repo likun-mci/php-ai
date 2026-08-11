@@ -83,7 +83,8 @@ class Agent
                     'messages' => $messages,
                     'tools'    => $toolDefs,
                 ]);
-            } catch (\Exception $e) {
+            } catch (\Throwable $e) {
+                // 捕获 \Throwable：循环中途崩掉不如报成 error 事件，让调用方能收尾
                 $this->fire(['type' => 'error', 'message' => $e->getMessage()]);
                 return;
             }

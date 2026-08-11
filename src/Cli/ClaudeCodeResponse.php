@@ -197,12 +197,12 @@ class ClaudeCodeResponse extends AIResponse
     /**
      * 费用：优先返回 CLI 实测 total_cost_usd（无需价格表），否则回退按价格表估算
      */
-    public function cost(array $pricing = []): float
+    public function cost(array $pricing = [], int $perTokens = 1000): float
     {
         if ($this->costUsd > 0) {
             return $this->costUsd;
         }
-        return parent::cost($pricing);
+        return parent::cost($pricing, $perTokens);
     }
 
     /**

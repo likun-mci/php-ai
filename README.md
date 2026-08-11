@@ -109,7 +109,7 @@ $response = $ai->chat([
 ]);
 ```
 
-> **注意**：本库**不会**自动保存对话历史。多轮对话需要业务层自己维护 `messages` 数组并每次完整传入，参见 [多轮对话上下文](#多轮对话上下文)。
+> **多轮对话**：默认不保存历史（`messages` 由业务层完整传入）。若想让库自动维护上下文，设 `rounds` 即可，见 [多轮对话上下文](#多轮对话上下文)。
 
 ---
 
@@ -1001,15 +1001,18 @@ $full = $ai->chat($messages)->getContent();   // 返回值不受影响，仍是�
 用各平台真实的 SSE 报文逐个回放校验。三套测试都**不联网、不需要 Key、不依赖 PHPUnit**：
 
 ```bash
+php tests/smoke_test.php    # 全部类可加载/可实例化、继承链签名兼容
 php tests/stream_test.php   # 40 个协议 × 普通对话 / 流式 / token 统计
 php tests/tools_test.php    # 工具调用跨平台一致性
 php tests/lib_test.php      # 并发批量 / Memory 并发安全 / 计价 / 日志注入
 php tests/cli_test.php      # CLI 参数渲染与命令注入防护
 php tests/ssrf_test.php     # SSRF 防护的全部已知绕过向量
-composer test               # 依次跑上面全部五套
+
+composer test               # 依次跑上面全部六套
+composer analyse            # PHPStan level 5 静态分析
 ```
 
-CI 会在 **PHP 7.2 / 7.4 / 8.0 / 8.2 / 8.4** 上跑同样的检查。
+CI 会在 **PHP 7.2 / 7.4 / 8.0 / 8.2 / 8.4** 上跑同样的检查，并在 8.2 上额外跑一次静态分析。
 
 覆盖的报文差异（都踩过坑，已在传输层统一处理）：
 
@@ -1051,28 +1054,71 @@ $response = $ai->setAttachments([$image])->chat('描述这张图片');
 
 ## 多轮对话上下文
 
-本库不维护历史记录，多轮对话由业务层自行拼装（这样才能自由决定截断策略与持久化方式）。
+两种方式，按需选一：
+
+### 方式一：设 `rounds`，库自动维护（推荐）
 
 ```php
-// 取最近 N 条历史 + 本次消息
-$messages = [];
-foreach (array_slice($history, -20) as $h) {
-    if (!in_array($h['role'], ['user', 'assistant'], true)) continue;
-    $messages[] = ['role' => $h['role'], 'content' => $h['content']];
-}
-$messages[] = ['role' => 'user', 'content' => $message];
-
-$response = $ai->chat([
-    'system'   => $systemPrompt,   // Claude 协议
-    'messages' => $messages,
+$ai = AI::create([
+    'protocol' => 'qwen',
+    'model'    => 'qwen-plus',
+    'api_key'  => 'sk-xxx',
+    'rounds'   => 5,          // 保留最近 5 轮上下文；默认 0 = 不启用
 ]);
 
-// 回复成功后再追加进历史并持久化
-$history[] = ['role' => 'user',      'content' => $message, 'time' => time()];
-$history[] = ['role' => 'assistant', 'content' => $response->getContent(), 'time' => time()];
+echo $ai->chat('我叫小明')->getContent();
+echo $ai->chat('我叫什么名字？')->getContent();   // 模型能答出"小明"
 ```
 
----
+`rounds` 默认为 **0（不启用）**，此时库完全不碰历史，行为与旧版本一致。
+
+**多用户 / 常驻进程**下用 `setSessionId()` 隔离上下文，一个 AI 实例可服务多个会话：
+
+```php
+$ai->setSessionId('user-1001')->chat('我喜欢喝咖啡');
+$ai->setSessionId('user-2002')->chat('我喜欢喝茶');      // 与上一个会话互不干扰
+
+$ai->setSessionId('user-1001')->chat('我喜欢喝什么？');  // 答"咖啡"
+```
+
+历史存在内存里，进程退出即失。跨请求要持久化就自己落库：
+
+```php
+// 请求结束时存起来
+$redis->set("ai:history:{$uid}", json_encode($ai->exportHistory()));
+
+// 下次请求恢复
+$ai->importHistory(json_decode($redis->get("ai:history:{$uid}"), true) ?: []);
+```
+
+| 方法 | 说明 |
+|------|------|
+| `setSessionId(string)` / `getSessionId()` | 切换/读取当前会话，不同会话各自独立一份历史 |
+| `getHistory()` / `setHistory(array)` | 读写当前会话的历史消息 |
+| `clearHistory(bool $all = false)` | 清空当前会话；传 `true` 清空全部会话 |
+| `exportHistory()` / `importHistory(array)` | 导出/导入全部会话，用于持久化 |
+
+裁剪按「轮」而非按条数：一轮从一次真正的用户提问开始，只含 `tool_result` 的消息
+算作上一轮工具调用的一部分。这样不会把 `tool_use` 和对应的 `tool_result` 切散——
+切散会让下一次请求直接被平台拒绝。
+
+> `chatBatch()` 不读写历史：批量里每条都是独立请求，混进同一份上下文没有意义。
+
+### 方式二：自己维护 `messages`
+
+不设 `rounds` 时库完全不介入，业务层自行拼接：
+
+```php
+$messages = [];
+$messages[] = ['role' => 'user', 'content' => '我叫小明'];
+$resp = $ai->chat(['messages' => $messages]);
+
+$messages[] = ['role' => 'assistant', 'content' => $resp->getContent()];
+$messages[] = ['role' => 'user', 'content' => '我叫什么名字？'];
+$resp = $ai->chat(['messages' => $messages]);
+```
+
+需要完全掌控裁剪策略（按 token 数、按重要性摘要等）时用这种方式。
 
 ## 请求前后回调
 
@@ -1611,6 +1657,7 @@ php-ai/
 ├── autoload.php            # PSR-4 加载器（不用 Composer 时引入）
 ├── composer.json
 ├── tests/                  # 回归测试（纯 PHP，无需 PHPUnit、无需网络、无需 API Key）
+│   ├── smoke_test.php      # 全部类可加载/可实例化、继承链签名兼容
 │   ├── stream_test.php     # 40 个协议 × 普通对话 / 流式 / token 统计
 │   ├── tools_test.php      # 工具调用跨平台一致性（同一段代码跑两个协议家族）
 │   ├── lib_test.php        # 并发批量 / Memory 并发安全 / 计价 / 日志注入
@@ -1628,7 +1675,7 @@ php-ai/
 
 ## 已知限制
 
-- `setSessionId()` 与配置项 `rounds` 目前**只是占位**，库内部不会据此保存或拼接历史对话，多轮上下文需业务层自行维护；
+- 会话历史存在内存里，进程退出即失，跨请求需用 `exportHistory()` / `importHistory()` 自行落库；
 - 工具调用仅支持**非流式**：流式响应里 OpenAI 系的 `tool_calls` 是按分片累积的，尚未做重组，`getToolCalls()` 在流式下返回空数组。Agent 内部已固定用非流式，不受影响；
 - 流式输出只提取正文增量，推理模型的思维链（`reasoning_content` / `thinking` 块）不计入 `getContent()`，需要时从 `stream_chunk` 事件的 `raw` 字段自取；
 - 各平台的 `knownModels()` 常用模型清单是库内维护的静态快照，仅用于离线渲染下拉框与拉取失败兜底，最新可用模型请以 `listModels()` 的实时结果为准；

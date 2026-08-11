@@ -407,7 +407,9 @@ class CurlTransport implements TransportInterface
                 }
 
                 // 可重试：连接级瞬时错误，或 429/5xx
-                $retryable = ($body === false && in_array($errno, [35, 52, 55, 56], true))
+                // 注意：curl_multi_getcontent() 失败时返回 null 或空串，**不会返回 false**，
+                // 所以这里必须看 errno，不能像单条 post() 那样判 $body === false
+                $retryable = (in_array($errno, [35, 52, 55, 56], true))
                           || in_array($httpCode, $this->retryStatuses, true);
 
                 if ($retryable && $meta['tries'] <= $this->maxRetries) {
@@ -495,9 +497,13 @@ class CurlTransport implements TransportInterface
      */
     protected function buildConcurrentResult($body, int $errno, string $error, int $httpCode): array
     {
-        if ($body === false || $httpCode >= 400) {
+        // errno 非 0 或拿不到状态码都算失败。
+        // 不能只判 $body === false —— curl_multi_getcontent() 失败时返回 null/空串，
+        // 那样连不上目标端口会被当成「成功但响应为空」返回给调用方
+        if ($errno !== 0 || $httpCode === 0 || $httpCode >= 400) {
             $decoded = is_string($body) ? (json_decode($body, true) ?: []) : [];
-            $message = $error !== '' ? $error : "HTTP Error: {$httpCode}";
+            $message = $error !== '' ? $error
+                : ($httpCode === 0 ? '请求未完成（连接失败或被中断）' : "HTTP Error: {$httpCode}");
             if (isset($decoded['error']['message'])) {
                 $message .= ': ' . $decoded['error']['message'];
             } elseif (isset($decoded['message'])) {
@@ -805,8 +811,8 @@ class CurlTransport implements TransportInterface
             // 直接传递原始数据给回调，不在这里提取内容
             // 内容提取由协议层负责
             call_user_func($this->streamCallback, $decoded);
-        } catch (\Exception $e) {
-            // 回调异常不影响主流程
+        } catch (\Throwable $e) {
+            // 回调是调用方的代码，抛什么都不能影响主流程
             \Ai\Helpers\Log::warning('流式回调抛出异常（已忽略，不影响主流程）', ['error' => $e->getMessage()]);
         }
     }

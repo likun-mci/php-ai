@@ -81,11 +81,20 @@
     "minimum-stability": "stable",
     "scripts": {
         "test": [
+            "php tests/smoke_test.php",
             "php tests/stream_test.php",
             "php tests/tools_test.php",
             "php tests/lib_test.php",
             "php tests/cli_test.php",
             "php tests/ssrf_test.php"
+        ],
+        "analyse": "phpstan analyse --memory-limit=512M",
+        "check": [
+            "@test",
+            "@analyse"
         ]
+    },
+    "require-dev": {
+        "phpstan/phpstan": "^1.10"
     }
 }

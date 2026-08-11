@@ -85,7 +85,17 @@ class AI
      */
     protected $streamCallback = null;
 
-    protected $session_id = null;
+    /**
+     * 当前会话标识；不同标识各自独立一份历史，便于常驻进程里复用同一个 AI 实例
+     * @var string
+     */
+    protected $session_id = 'default';
+
+    /**
+     * 各会话的历史消息：[会话ID => [消息, ...]]
+     * @var array
+     */
+    protected $histories = [];
 
     /**
      * 可由运行时配置透传到请求体的生成参数白名单
@@ -176,10 +186,117 @@ class AI
         $this->setConfig($config);
     }
 
+    /**
+     * 切换会话
+     *
+     * 每个会话各自维护一份历史。常驻进程（Swoole / 队列 worker）里可以复用
+     * 同一个 AI 实例服务多个用户，靠这个方法隔离上下文。
+     * 仅在 rounds > 0 时有意义。
+     */
     public function setSessionId(string $sessionId): self
     {
-        $this->session_id = $sessionId;
+        $this->session_id = $sessionId !== '' ? $sessionId : 'default';
         return $this;
+    }
+
+    /**
+     * 当前会话标识
+     */
+    public function getSessionId(): string
+    {
+        return $this->session_id;
+    }
+
+    /**
+     * 读取当前会话的历史消息
+     * @return array 标准 messages 结构，可直接塞回 chat()
+     */
+    public function getHistory(): array
+    {
+        return $this->histories[$this->session_id] ?? [];
+    }
+
+    /**
+     * 覆盖当前会话的历史（从数据库/Redis 恢复上下文时用）
+     */
+    public function setHistory(array $messages): self
+    {
+        $this->histories[$this->session_id] = array_values($messages);
+        return $this;
+    }
+
+    /**
+     * 清空历史。不传参数清当前会话，传 true 清全部会话
+     */
+    public function clearHistory(bool $allSessions = false): self
+    {
+        if ($allSessions) {
+            $this->histories = [];
+        } else {
+            unset($this->histories[$this->session_id]);
+        }
+        return $this;
+    }
+
+    /**
+     * 导出全部会话的历史，便于业务层持久化
+     * @return array [会话ID => [消息, ...]]
+     */
+    public function exportHistory(): array
+    {
+        return $this->histories;
+    }
+
+    /**
+     * 导入全部会话的历史（与 exportHistory() 对应）
+     */
+    public function importHistory(array $histories): self
+    {
+        $this->histories = $histories;
+        return $this;
+    }
+
+    /**
+     * 按 rounds 裁剪历史：只保留最近 N 轮
+     *
+     * 一「轮」从一条真正的用户提问开始（只含 tool_result 的 user 消息不算新一轮，
+     * 它属于上一轮工具调用的一部分）。按轮切分而不是按条数切，
+     * 是为了避免把 assistant 的 tool_use 和对应的 tool_result 切散——
+     * 那会让下一次请求直接被平台拒绝。
+     */
+    protected function trimHistory(array $messages, int $rounds): array
+    {
+        if ($rounds <= 0 || !$messages) {
+            return $messages;
+        }
+
+        // 从后往前找第 $rounds 个「真正的用户提问」的位置
+        $starts = [];
+        foreach ($messages as $i => $msg) {
+            if (($msg['role'] ?? '') !== 'user') {
+                continue;
+            }
+            $content = $msg['content'] ?? '';
+            $isToolResultOnly = false;
+            if (is_array($content) && $content) {
+                $isToolResultOnly = true;
+                foreach ($content as $block) {
+                    if (!is_array($block) || ($block['type'] ?? '') !== 'tool_result') {
+                        $isToolResultOnly = false;
+                        break;
+                    }
+                }
+            }
+            if (!$isToolResultOnly) {
+                $starts[] = $i;
+            }
+        }
+
+        if (count($starts) <= $rounds) {
+            return $messages;
+        }
+        $from = $starts[count($starts) - $rounds];
+        return array_values(array_slice($messages, $from));
     }
 
     /**
@@ -199,7 +316,9 @@ class AI
      * - extra_body: 追加到请求体的私有参数
      * - organization: 组织 ID（OpenAI 可选）
      * - project_id: 项目 ID（DeepSeek 可选）
-     * - rounds: 自定义对话轮数，控制上下文保留多少轮对话
+     * - rounds: 保留多少轮上下文。**默认 0 表示不启用**，库不碰历史（与旧版本一致）；
+     *           设为 N 后 chat() 会自动拼接本会话最近 N 轮对话，并把本轮结果记进历史。
+     *           历史按 setSessionId() 分桶，可用 exportHistory() / importHistory() 持久化
      * - 其他生成参数，如 temperature、max_tokens、top_p 等（见 self::$payloadKeys）
      *
      * @param array $config 配置项数组
@@ -431,6 +550,17 @@ class AI
             ];
         }
         $payload['stream'] = $payload['stream'] ?? $this->stream;
+
+        // rounds > 0 时启用多轮上下文：把本会话的历史拼在本次消息前面。
+        // rounds = 0（默认）完全不介入，行为与旧版本一致。
+        $newMessages = $payload['messages'] ?? [];
+        if ($this->rounds > 0 && $newMessages) {
+            $history = $this->trimHistory($this->getHistory(), $this->rounds);
+            if ($history) {
+                $payload['messages'] = array_merge($history, $newMessages);
+            }
+        }
+
         // 重置流式累积状态
         $this->streamAccumulatedContent = '';
         $this->streamAccumulatedUsage = [];
@@ -556,13 +686,26 @@ class AI
             
             // 执行 after 回调
             $this->runCallbacks('after', $response);
-            
+
+            // 记录本轮对话到会话历史（仅 rounds > 0 时）
+            if ($this->rounds > 0 && $newMessages) {
+                $history = $this->getHistory();
+                foreach ($newMessages as $msg) {
+                    $history[] = $msg;
+                }
+                $history[] = $response->toAssistantMessage();
+                $this->histories[$this->session_id] = $this->trimHistory($history, $this->rounds);
+            }
+
             // 清空附件（避免影响下次对话）
             $this->attachments = [];
             
             return $response;
             
-        } catch (\Exception $e) {
+        } catch (\Throwable $e) {
+            // 捕获 \Throwable 而非 \Exception：协议层/回调里的 TypeError 等 Error 类异常
+            // 此前会直接穿透出去，调用方拿到的错误类型不统一。现在一律包装成 AIException，
+            // 原始异常通过 getPrevious() 保留，定位库自身 bug 时堆栈不丢。
             // 清空附件
             $this->attachments = [];
             
@@ -579,7 +722,8 @@ class AI
                 $e->getMessage(),
                 $this->model->getPlatform(),
                 $errorCode,
-                $rawResponse
+                $rawResponse,
+                $e                      // 保留原始异常，getPrevious() 可取完整堆栈
             );
         }
     }
@@ -628,7 +772,7 @@ class AI
             foreach ($payloads as $key => $payload) {
                 try {
                     $out[$key] = $this->chat($payload);
-                } catch (\Exception $e) {
+                } catch (\Throwable $e) {
                     $out[$key] = new \Ai\Response\AIResponse([
                         'success' => false,
                         'error'   => $e->getMessage(),
@@ -758,8 +902,8 @@ class AI
             foreach ($this->callbacks[$event] as $callback) {
                 try {
                     $callback($data);
-                } catch (\Exception $e) {
-                    // 回调异常不影响主流程
+                } catch (\Throwable $e) {
+                    // 回调是调用方的代码，抛什么都不能影响主流程
                     \Ai\Helpers\Log::warning('回调抛出异常（已忽略，不影响主流程）', ['event' => $event, 'error' => $e->getMessage()]);
                 }
             }

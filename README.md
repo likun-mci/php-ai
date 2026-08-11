@@ -1105,7 +1105,8 @@ $ai->onAfter(function ($response) {          // onResponse() 是它的别名
 | `tokens(): int` | 总 tokens |
 | `getModel(): string` | 实际返回的模型名 |
 | `isSuccess(): bool` | 是否成功 |
-| `cost(array $pricing): float` | 按传入价格表估算费用，**单位是每百万 tokens**（照抄官网数字即可），如 `['prompt'=>5.0,'completion'=>25.0,'cached'=>0.5]`；传第二个参数 `1000` 可沿用旧的每千口径 |
+| `cost(array $pricing): float` | 按价格表估算费用，默认**每千 tokens**（与旧版本一致，不改动已有代码的账） |
+| `costPerMillion(array $pricing): float` | 同上但按**每百万 tokens**，可直接抄官网数字，如 `['prompt'=>5.0,'completion'=>25.0,'cached'=>0.5]`；`cached` 为命中缓存的输入价，两大家族的字段名都认 |
 | `getToolCalls(): array` | 模型发起的工具调用，已归一：`[['id'=>..,'name'=>..,'input'=>[..]]]` |
 | `hasToolCalls(): bool` | 本轮是否要求调用工具 |
 | `getStopReason(): string` | 结束原因（已归一）：`end_turn` / `tool_use` / `max_tokens` / `content_filter` / `refusal` |

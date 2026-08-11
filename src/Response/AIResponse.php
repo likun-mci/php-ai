@@ -144,16 +144,13 @@ class AIResponse implements AIResponseInterface
     /**
      * 估算费用（需要自行传入价格表）
      *
-     * **单位是「每百万 token」**——各家官网现在都按百万计价，此前按每千计价
-     * 容易让人直接把官网数字抄进来，结果算出 1000 倍的费用。
+     * ⚠️ **本方法的默认计价基数是「每千 token」**，与旧版本保持一致，不会让
+     * 已有代码的账算错。但各家官网现在都按**每百万**标价，把官网数字直接抄进
+     * 这里会算出 1000 倍的费用——照抄官网数字请用 costPerMillion()。
      *
      * ```php
-     * // 价格照抄官网的「每百万 token」数字即可
-     * $response->cost([
-     *     'prompt'     => 3.00,   // 输入 $3 / 1M tokens
-     *     'completion' => 15.00,  // 输出 $15 / 1M tokens
-     *     'cached'     => 0.30,   // 可选：命中缓存的输入价（通常是输入价的 1/10）
-     * ]);
+     * $response->cost(['prompt' => 0.005, 'completion' => 0.025]);          // 每千
+     * $response->costPerMillion(['prompt' => 5.0, 'completion' => 25.0]);   // 每百万（推荐）
      * ```
      *
      * 缓存 token：多数平台把命中缓存的输入量单列（OpenAI 系放在
@@ -161,11 +158,13 @@ class AIResponse implements AIResponseInterface
      * `cache_read_input_tokens`）。传了 `cached` 价格时，这部分会从
      * 普通输入里扣除后单独按缓存价计算；不传则全按普通输入价算。
      *
-     * @param array $pricing ['prompt'=>每百万输入价, 'completion'=>每百万输出价, 'cached'=>每百万缓存输入价]
-     * @param int   $perTokens 计价基数，默认 1_000_000；传 1000 可沿用旧的「每千」口径
+     * @param array $pricing ['prompt'=>输入价, 'completion'=>输出价, 'cached'=>缓存输入价]
+     * @param int   $perTokens 计价基数，**默认 1000（每千 token）**，保持与旧版本一致。
+     *                         各家官网现在都按每百万标价，直接抄官网数字请用
+     *                         costPerMillion()，或显式传 1000000
      * @return float 估算费用，单位与价格表一致（通常是美元）
      */
-    public function cost(array $pricing = [], int $perTokens = 1000000): float
+    public function cost(array $pricing = [], int $perTokens = 1000): float
     {
         if (empty($pricing) || $perTokens <= 0) {
             return 0.0;
@@ -195,6 +194,30 @@ class AIResponse implements AIResponseInterface
         return $cost;
     }
     
+    /**
+     * 估算费用——价格按**每百万 token**计，可直接抄各家官网的数字
+     *
+     * ```php
+     * // Claude Opus 5 官网价：输入 $5/1M、输出 $25/1M、缓存读 $0.5/1M
+     * $response->costPerMillion([
+     *     'prompt'     => 5.0,
+     *     'completion' => 25.0,
+     *     'cached'     => 0.5,   // 可选，命中缓存的输入价
+     * ]);
+     * ```
+     *
+     * 缓存 token：多数平台把命中缓存的输入量单列（OpenAI 系在
+     * `prompt_tokens_details.cached_tokens`，Anthropic 系是
+     * `cache_read_input_tokens`）。传了 `cached` 价时这部分从普通输入里
+     * 扣除后单独计算；不传则全按普通输入价算。
+     *
+     * @param array $pricing ['prompt'=>每百万输入价, 'completion'=>每百万输出价, 'cached'=>每百万缓存输入价]
+     */
+    public function costPerMillion(array $pricing = []): float
+    {
+        return $this->cost($pricing, 1000000);
+    }
+
     /**
      * 转为数组
      */

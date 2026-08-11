@@ -109,8 +109,18 @@ class Claude implements ProtocolInterface
         $content = '';
         $usage = [];
 
-        if (isset($response['content'][0]['text'])) {
-            $content = $response['content'][0]['text'];
+        // content 是块数组，可能混有 thinking / tool_use 块（开启思考的模型必然如此）。
+        // 只取 text 块并按序拼接——直接读 content[0]['text'] 会在首块是 thinking 时拿到空串。
+        if (!empty($response['content']) && is_array($response['content'])) {
+            foreach ($response['content'] as $block) {
+                if (!is_array($block)) {
+                    continue;
+                }
+                $type = $block['type'] ?? '';
+                if (($type === 'text' || $type === '') && isset($block['text'])) {
+                    $content .= (string)$block['text'];
+                }
+            }
         }
 
         if (isset($response['usage'])) {
@@ -169,6 +179,41 @@ class Claude implements ProtocolInterface
         return null;
     }
     
+    /**
+     * 从流式数据块中解析 usage
+     *
+     * Anthropic 的用量分两帧下发，且位置不同：
+     *   message_start —— usage 嵌在 message 下，含 input_tokens
+     *   message_delta —— usage 在顶层，只有 output_tokens
+     * 只认顶层 usage 会漏掉 input_tokens，AI 层会把两帧的结果合并。
+     * @return array|null 该帧不含 usage 时返回 null
+     */
+    public function parseStreamUsage(array $chunk): ?array
+    {
+        if (($chunk['type'] ?? '') === 'message_start'
+            && !empty($chunk['message']['usage']) && is_array($chunk['message']['usage'])) {
+            return $chunk['message']['usage'];
+        }
+        return (!empty($chunk['usage']) && is_array($chunk['usage'])) ? $chunk['usage'] : null;
+    }
+
+    /**
+     * 从流式数据块中解析平台错误
+     * Anthropic 的流式错误帧形如 {"type":"error","error":{"type":...,"message":...}}
+     * @return string|null 该帧不含错误时返回 null
+     */
+    public function parseStreamError(array $chunk): ?string
+    {
+        if (!isset($chunk['error'])) {
+            return null;
+        }
+        $err = $chunk['error'];
+        if (is_array($err)) {
+            return (string)($err['message'] ?? json_encode($err, JSON_UNESCAPED_UNICODE));
+        }
+        return (string)$err;
+    }
+
     /**
      * 判断流式数据是否结束
      */

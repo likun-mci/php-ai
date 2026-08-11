@@ -68,6 +68,18 @@ class AI
     protected $streamAccumulatedContent = '';
 
     /**
+     * 流式输出累积的 usage（部分平台分多帧下发，需要逐帧合并）
+     * @var array
+     */
+    protected $streamAccumulatedUsage = [];
+
+    /**
+     * 流式过程中平台回传的错误信息
+     * @var string
+     */
+    protected $streamErrorMessage = '';
+
+    /**
      * 流式分片回调，注册后由调用方接管分片下发（见 setStreamCallback）
      * @var callable|null
      */
@@ -419,8 +431,10 @@ class AI
             ];
         }
         $payload['stream'] = $payload['stream'] ?? $this->stream;
-        // 重置流式累积内容
+        // 重置流式累积状态
         $this->streamAccumulatedContent = '';
+        $this->streamAccumulatedUsage = [];
+        $this->streamErrorMessage = '';
         
         // 合并配置：模型默认参数 < 运行时配置里的生成参数 < 本次 payload
         $payload = array_merge([
@@ -449,6 +463,23 @@ class AI
                 if ($content !== null) {
                     $this->streamAccumulatedContent .= $content;
                 }
+
+                // 累积 usage：Anthropic 等平台把 input/output tokens 拆在不同帧下发，
+                // 只保留最后一帧会丢字段，这里逐帧合并
+                if (method_exists($this->protocol, 'parseStreamUsage')) {
+                    $chunkUsage = $this->protocol->parseStreamUsage($data);
+                    if (!empty($chunkUsage)) {
+                        $this->streamAccumulatedUsage = array_merge($this->streamAccumulatedUsage, $chunkUsage);
+                    }
+                }
+
+                // 捕获平台在流中回传的错误（这类响应 HTTP 状态码仍是 200）
+                if ($this->streamErrorMessage === '' && method_exists($this->protocol, 'parseStreamError')) {
+                    $chunkError = $this->protocol->parseStreamError($data);
+                    if ($chunkError !== null && $chunkError !== '') {
+                        $this->streamErrorMessage = $chunkError;
+                    }
+                }
                 // 输出流式数据块
                 $this->emitStream([ 'type' => 'stream_chunk', 'content' => $content, 'raw' => $data ]);
             });
@@ -475,17 +506,36 @@ class AI
 
             // 流式模式：用累积的内容和 usage 直接构建响应，不走 parseResponse
             if ( $payload['stream'] ) {
-                // 从 transport 获取完整 usage（含 prompt_tokens_details 等）
-                $streamUsage = [];
-                if (method_exists($this->transport, 'getStreamUsage')) {
-                    $rawUsage = $this->transport->getStreamUsage();
-                    if (!empty($rawUsage)) {
-                        $streamUsage = $rawUsage; // 原样保留完整 usage
-                        // 确保三个标准字段向下兼容
-                        $streamUsage['prompt_tokens'] = $streamUsage['prompt_tokens'] ?? 0;
-                        $streamUsage['completion_tokens'] = $streamUsage['completion_tokens'] ?? 0;
-                        $streamUsage['total_tokens'] = $streamUsage['total_tokens'] ?? 0;
-                    }
+                // 平台在流里报了错（HTTP 200 但没有内容）时，按错误处理而不是返回空响应
+                $streamError = $this->streamErrorMessage;
+                if ($streamError === '' && method_exists($this->transport, 'getStreamError')) {
+                    $streamError = $this->transport->getStreamError();
+                }
+                if ($streamError !== '' && $this->streamAccumulatedContent === '') {
+                    throw new \Ai\Exceptions\RequestException(
+                        $streamError,
+                        $this->model->getPlatform(),
+                        '',
+                        $this->streamAccumulatedUsage
+                    );
+                }
+
+                // usage：优先用协议层逐帧合并的结果，回退到传输层的通用捕获
+                $streamUsage = $this->streamAccumulatedUsage;
+                if (empty($streamUsage) && method_exists($this->transport, 'getStreamUsage')) {
+                    $streamUsage = $this->transport->getStreamUsage();
+                }
+                if (!empty($streamUsage)) {
+                    // 原样保留完整 usage，同时补齐三个标准字段
+                    // （Anthropic 系用 input_tokens / output_tokens 命名，需要映射）
+                    $streamUsage['prompt_tokens'] = $streamUsage['prompt_tokens']
+                        ?? ($streamUsage['input_tokens'] ?? 0);
+                    $streamUsage['completion_tokens'] = $streamUsage['completion_tokens']
+                        ?? ($streamUsage['output_tokens'] ?? 0);
+                    $streamUsage['total_tokens'] = $streamUsage['total_tokens']
+                        ?? ((int)$streamUsage['prompt_tokens'] + (int)$streamUsage['completion_tokens']);
+                } else {
+                    $streamUsage = [];
                 }
                 $response = new \Ai\Response\AIResponse([
                     'content' => $this->streamAccumulatedContent,

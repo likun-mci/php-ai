@@ -151,6 +151,36 @@ class OpenAI implements ProtocolInterface
     }
     
     /**
+     * 从流式数据块中解析 usage
+     *
+     * OpenAI 系开启 stream_options.include_usage 后，在收尾帧的顶层返回完整 usage。
+     * @return array|null 该帧不含 usage 时返回 null
+     */
+    public function parseStreamUsage(array $chunk): ?array
+    {
+        return (!empty($chunk['usage']) && is_array($chunk['usage'])) ? $chunk['usage'] : null;
+    }
+
+    /**
+     * 从流式数据块中解析平台错误
+     *
+     * 有些平台出错时 HTTP 状态码仍是 200，错误信息混在流里，
+     * 不识别就会得到一个「成功但内容为空」的响应。
+     * @return string|null 该帧不含错误时返回 null
+     */
+    public function parseStreamError(array $chunk): ?string
+    {
+        if (!isset($chunk['error'])) {
+            return null;
+        }
+        $err = $chunk['error'];
+        if (is_array($err)) {
+            return (string)($err['message'] ?? json_encode($err, JSON_UNESCAPED_UNICODE));
+        }
+        return (string)$err;
+    }
+
+    /**
      * 判断流式数据是否结束
      */
     public function isStreamEnd(array $chunk): bool

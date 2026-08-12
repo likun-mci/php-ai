@@ -106,4 +106,18 @@ class SiliconFlow extends OpenAI
     {
         return ['alex', 'anna', 'bella', 'benjamin', 'charles', 'claire', 'david', 'diana'];
     }
+
+    /**
+     * 硅基流动没有独立的图像编辑端点
+     *
+     * 实测 2026-08：POST {origin}/v1/images/edits 返回 404，同前缀假路径同样 404
+     * （该平台路由优先，可确认）。它把图生图并进了 images/generations——
+     * 传 image 参数即为图生图，模型用 Qwen/Qwen-Image-Edit 系列。
+     *
+     * 返回空串让调用方得到明确报错，而不是往一个不存在的路径发 multipart。
+     */
+    public function imageEditPath(): string
+    {
+        return '';
+    }
 }

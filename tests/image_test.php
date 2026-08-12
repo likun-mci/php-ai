@@ -70,10 +70,13 @@ foreach ($expect as $key => $path) {
           $p->capabilityPath(Capabilities::IMAGE));
 }
 
-// 通义兼容模式实测无此路由（404，且该网关是路由优先），不能声明支持
+// 通义在 OpenAI 兼容模式下无图像路由（实测 404），走的是原生异步接口。
+// 它**声明**图像能力，但形态是异步的，详见第八节
 $qwen = new \Ai\Protocol\Qwen();
-check(!in_array(Capabilities::IMAGE, $qwen->capabilities(), true),
-      '  qwen 不声明图像能力（兼容模式实测 404，万相是异步接口）');
+check(in_array(Capabilities::IMAGE, $qwen->capabilities(), true),
+      '  qwen 声明图像能力（走原生异步接口，非兼容模式）');
+check($qwen->capabilityPath(Capabilities::IMAGE) !== '/v1/images/generations',
+      '  qwen 不走 OpenAI 兼容路径（实测 404）', $qwen->capabilityPath(Capabilities::IMAGE));
 
 // Anthropic 家族同样没有
 foreach (['claude', 'zhipu-anthropic'] as $key) {
@@ -310,15 +313,230 @@ foreach ($shapes as $k => $v) {
 }
 check($diff === [], '6 个平台的解析结果结构完全一致', implode(',', $diff));
 
-// 不支持的协议明确报错
+// 不支持同步生成的协议要明确报错并指路
 list($ai) = makeAI('qwen', 'qwen-plus');
 try {
     $ai->images()->generate('猫');
-    check(false, 'qwen 不支持时抛异常', '未抛出');
+    check(false, 'qwen 上同步 generate() 抛异常', '未抛出');
 } catch (\Ai\Exceptions\UnsupportedCapabilityException $e) {
-    check(strpos($e->getMessage(), '图像生成') !== false, 'qwen 不支持时抛异常并点名能力',
+    check(strpos($e->getMessage(), 'generateAsync') !== false,
+          'qwen 上同步 generate() 抛异常并指向 generateAsync()', $e->getMessage());
+}
+// 完全没有图像能力的协议族（Anthropic Messages 不走 OpenAiImages）
+list($ai) = makeAI('claude', 'claude-3-opus');
+try {
+    $ai->images()->edit(__FILE__, '猫');
+    check(false, 'Claude 无图像编辑能力时抛异常', '未抛出');
+} catch (\Ai\Exceptions\UnsupportedCapabilityException $e) {
+    check(strpos($e->getMessage(), '图像编辑') !== false, 'Claude 无图像编辑能力时抛异常并点名能力',
           $e->getMessage());
 }
+
+// 说明宽松声明策略：OpenAI 兼容协议会继承基线声明，是否真开通以平台为准。
+// DeepSeek 就属于这类——库不挡它，平台自己返回 404
+check((new \Ai\Protocol\DeepSeek())->capabilityPath(Capabilities::IMAGE_EDIT) === '/v1/images/edits',
+      'OpenAI 兼容协议继承编辑路径（是否真开通以平台为准）');
+
+// =====================================================================
+echo "\n=== 八、异步文生图（通义万相）===\n\n";
+
+$qwen = new \Ai\Protocol\Qwen();
+check($qwen->imageIsAsync(), '万相声明图像生成为异步任务式');
+check(!(new \Ai\Protocol\OpenAI())->imageIsAsync(), 'OpenAI 是同步的');
+check($qwen->capabilityPath(Capabilities::IMAGE) === '/api/v1/services/aigc/text2image/image-synthesis',
+      '万相图像端点是原生异步接口', $qwen->capabilityPath(Capabilities::IMAGE));
+check($qwen->capabilityHeaders(Capabilities::IMAGE) === ['X-DashScope-Async' => 'enable'],
+      '**万相图像也要带 X-DashScope-Async 头**');
+
+// 同步入口在异步平台上必须明确报错，而不是返回「成功但没有图」
+list($ai, $fake) = makeAI('qwen', 'wan2.2-t2i-flash');
+try {
+    $ai->images()->generate('猫');
+    check(false, '**异步平台上 generate() 明确报错**（不返回空结果）', '未抛出');
+} catch (\Ai\Exceptions\UnsupportedCapabilityException $e) {
+    check(strpos($e->getMessage(), 'generateAsync') !== false,
+          '**异步平台上 generate() 报错并指向 generateAsync()**', $e->getMessage());
+}
+// 反过来也要挡住
+list($ai2) = makeAI('openai', 'gpt-image-1');
+try {
+    $ai2->images()->generateAsync('猫');
+    check(false, '同步平台上 generateAsync() 报错', '未抛出');
+} catch (\Ai\Exceptions\UnsupportedCapabilityException $e) {
+    check(strpos($e->getMessage(), 'generate()') !== false,
+          '同步平台上 generateAsync() 报错并指向 generate()', $e->getMessage());
+}
+
+// 提交
+list($ai, $fake) = makeAI('qwen', 'wan2.2-t2i-flash');
+$fake->queuePost(['output' => ['task_id' => 'IMG1', 'task_status' => 'PENDING'], 'request_id' => 'r']);
+$task = $ai->images()->generateAsync('一只在看书的猫', ['size' => '1024x1024', 'n' => 2, 'negative_prompt' => '模糊']);
+
+check($task instanceof \Ai\Task\AsyncTask, 'generateAsync() 返回 AsyncTask');
+check($task->getId() === 'IMG1', '任务 ID 解析');
+check($task->getCapability() === Capabilities::IMAGE, '能力标识为 image');
+check(!$task->isDone(), '刚提交时未完成');
+
+$req = $fake->lastRequest();
+check(isset($req['data']['input']['prompt']) && $req['data']['input']['prompt'] === '一只在看书的猫',
+      '万相：prompt 进 input 段', json_encode($req['data'], JSON_UNESCAPED_UNICODE));
+check($req['data']['input']['negative_prompt'] === '模糊', '万相：negative_prompt 进 input 段');
+check($req['data']['parameters']['n'] === 2, '万相：n 进 parameters 段');
+check($req['data']['parameters']['size'] === '1024*1024',
+      '**万相：尺寸分隔符 x → \***（传错不会被容错，直接判非法参数）',
+      $req['data']['parameters']['size']);
+check(isset($req['headers']['X-DashScope-Async']), '万相：异步头随请求发出');
+
+// 轮询到成功，多图
+$fake->queueGet(['output' => ['task_status' => 'SUCCEEDED', 'results' => [
+    ['url' => 'https://cdn/a.png'], ['url' => 'https://cdn/b.png'],
+]]]);
+$task->refresh();
+check($task->isSucceeded(), '轮询到成功');
+$result = $task->getResult();
+check($result instanceof ImageResponse, '结果是 ImageResponse');
+check($result->getUrls() === ['https://cdn/a.png', 'https://cdn/b.png'],
+      '**output.results[] 数组全部取出**', json_encode($result->getUrls()));
+check(count($result) === 2, '张数正确');
+
+$gets = [];
+foreach ($fake->getRequests() as $r) {
+    if ($r['method'] === 'GET') { $gets[] = $r['url']; }
+}
+check(isset($gets[0]) && strpos($gets[0], '/api/v1/tasks/IMG1') !== false,
+      '查询地址是 /api/v1/tasks/{id}', isset($gets[0]) ? $gets[0] : '(无)');
+
+// 万相 2.6 换了结果结构，也要能解析
+$parsed = $qwen->parseTaskStatus(Capabilities::IMAGE, ['output' => [
+    'task_status' => 'SUCCEEDED',
+    'choices' => [['message' => ['content' => [['image' => 'https://cdn/new.png']]]]],
+]]);
+check($parsed['result'] instanceof ImageResponse
+      && $parsed['result']->getUrls() === ['https://cdn/new.png'],
+      '**万相 2.6 的 output.choices[] 结构也能解析**（只认一种会静默取不到图）');
+
+// 成功但没图要说清楚
+$parsed = $qwen->parseTaskStatus(Capabilities::IMAGE, ['output' => ['task_status' => 'SUCCEEDED']]);
+check(!$parsed['result']->isSuccess(), '成功但无图时不算成功');
+check(strpos($parsed['result']->getError(), '没有解析到图片') !== false, '给出可排查的说明');
+
+// 失败
+list($ai, $fake) = makeAI('qwen', 'wan2.2-t2i-flash');
+$fake->queuePost(['output' => ['task_id' => 'IMG2']]);
+$task = $ai->images()->generateAsync('x');
+$fake->queueGet(['output' => ['task_status' => 'FAILED', 'message' => '内容不合规']]);
+$task->refresh();
+check($task->isFailed(), '万相：FAILED 判为失败');
+check($task->getError() === '内容不合规', '错误信息透传', $task->getError());
+
+// 序列化恢复
+list($ai, $fake) = makeAI('qwen', 'wan2.2-t2i-flash');
+$fake->queuePost(['output' => ['task_id' => 'IMG3']]);
+$task = $ai->images()->generateAsync('x');
+$data = json_decode((string) json_encode($task->toArray()), true);
+
+list($ai3, $fake3) = makeAI('qwen', 'wan2.2-t2i-flash');
+$restored = \Ai\Task\AsyncTask::fromArray($data, $ai3);
+$fake3->queueGet(['output' => ['task_status' => 'SUCCEEDED', 'results' => [['url' => 'https://cdn/r.png']]]]);
+$restored->refresh();
+check($restored->isSucceeded() && $restored->getResult()->getUrl(0) === 'https://cdn/r.png',
+      '**图像任务同样能跨请求恢复**');
+
+// 自建网关下仍跟随
+list($ai, $fake) = makeAI('qwen', 'wan2.2-t2i-flash', ['base_url' => 'https://gw.internal/ds']);
+$m = new ReflectionMethod($ai->images(), 'endpoint');
+$m->setAccessible(true);
+check($m->invoke($ai->images()) === 'https://gw.internal/ds/api/v1/services/aigc/text2image/image-synthesis',
+      '自建网关下图像端点保留路径前缀', $m->invoke($ai->images()));
+
+// =====================================================================
+echo "\n=== 九、图像编辑 ===\n\n";
+
+$editPaths = [
+    'openai'  => '/v1/images/edits',
+    'stepfun' => '/v1/images/edits',
+    'grok'    => '/v1/images/edits',
+    'zhipu'   => '/v4/images/edits',
+];
+foreach ($editPaths as $key => $path) {
+    $class = \Ai\Helpers\Protocols::resolveClass($key);
+    $p = new $class();
+    check($p->capabilityPath(Capabilities::IMAGE_EDIT) === $path, sprintf('  %-8s → %s', $key, $path),
+          $p->capabilityPath(Capabilities::IMAGE_EDIT));
+}
+// 实测无该路由的两家
+check((new \Ai\Protocol\SiliconFlow())->capabilityPath(Capabilities::IMAGE_EDIT) === '',
+      '  硅基流动不声明（实测 404，图生图并进了 generations）');
+check((new \Ai\Protocol\Qwen())->capabilityPath(Capabilities::IMAGE_EDIT) === '',
+      '  通义不声明（兼容模式实测 404）');
+
+// 编辑请求：multipart
+$png = sys_get_temp_dir() . '/ai_edit_test_' . getmypid() . '.png';
+file_put_contents($png, base64_decode(tinyPngBase64()));
+$maskPng = sys_get_temp_dir() . '/ai_edit_mask_' . getmypid() . '.png';
+file_put_contents($maskPng, base64_decode(tinyPngBase64()));
+
+list($ai, $fake) = makeAI('openai', 'gpt-image-1');
+$fake->queuePost(['data' => [['b64_json' => tinyPngBase64()]]]);
+$res = $ai->images()->edit($png, '把背景换成星空', ['size' => '1024x1024']);
+
+check($res instanceof ImageResponse, '编辑返回 ImageResponse');
+check($res->isSuccess(), '编辑成功');
+$req = $fake->lastRequest();
+check(strpos($req['url'], '/v1/images/edits') !== false, '打到编辑端点', $req['url']);
+check(isset($req['headers']['Content-Type']) && $req['headers']['Content-Type'] === 'multipart/form-data',
+      '声明 multipart 意图（传输层负责摘除并交给 curl 生成 boundary）');
+check($req['data']['image'] instanceof \Ai\Helpers\AIFile, 'image 字段是 AIFile');
+check($req['data']['prompt'] === '把背景换成星空', '编辑指令就位');
+check($req['data']['size'] === '1024x1024', '其余参数透传');
+check(!isset($req['data']['mask']), '未传 mask 时不出现该字段');
+
+// 蒙版
+$fake->reset();
+$fake->queuePost(['data' => [['b64_json' => tinyPngBase64()]]]);
+$ai->images()->edit($png, '去掉这只手', ['mask' => $maskPng]);
+$req = $fake->lastRequest();
+check($req['data']['mask'] instanceof \Ai\Helpers\AIFile, 'mask 传入后是 AIFile');
+
+// AIFile 实例
+$fake->reset();
+$fake->queuePost(['data' => [['b64_json' => tinyPngBase64()]]]);
+check($ai->images()->edit(\Ai\Helpers\AIFile::fromPath($png), 'x')->isSuccess(), '接受 AIFile 实例');
+
+// 远端 URL 必须先落地
+try {
+    $ai->images()->edit(\Ai\Helpers\AIFile::fromUrl('https://example.com/a.png'), 'x');
+    check(false, '远端 URL 明确报错（不偷偷下载）', '未抛出');
+} catch (\Ai\Exceptions\RequestException $e) {
+    check(strpos($e->getMessage(), 'Media::download') !== false,
+          '远端 URL 明确报错并给出正确做法', $e->getMessage());
+}
+// 空指令
+try {
+    $ai->images()->edit($png, '  ');
+    check(false, '空编辑指令报错', '未抛出');
+} catch (\Ai\Exceptions\RequestException $e) {
+    check(true, '空编辑指令报错');
+}
+// 文件不存在
+try {
+    $ai->images()->edit('/no/such/file.png', 'x');
+    check(false, '文件不存在时报错', '未抛出');
+} catch (\InvalidArgumentException $e) {
+    check(true, '文件不存在时报错');
+}
+// 不支持的平台
+list($ai4) = makeAI('siliconflow', 'Kwai-Kolors/Kolors');
+try {
+    $ai4->images()->edit($png, 'x');
+    check(false, '硅基流动不支持编辑时报错', '未抛出');
+} catch (\Ai\Exceptions\UnsupportedCapabilityException $e) {
+    check(strpos($e->getMessage(), '图像编辑') !== false,
+          '硅基流动不支持编辑时报错并点名能力', $e->getMessage());
+}
+
+@unlink($png);
+@unlink($maskPng);
 
 echo "\n" . str_repeat('=', 64) . "\n";
 if ($failures) {

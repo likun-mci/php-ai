@@ -16,6 +16,9 @@ class Capabilities
     /** 文生图 / 图生图 */
     const IMAGE = 'image';
 
+    /** 图像编辑（图生图 / 局部重绘），与 IMAGE 分开是因为多数平台走的是另一个端点 */
+    const IMAGE_EDIT = 'image_edit';
+
     /** 语音合成（文本 → 音频） */
     const TTS = 'tts';
 
@@ -39,6 +42,7 @@ class Capabilities
     {
         return [
             self::IMAGE,
+            self::IMAGE_EDIT,
             self::TTS,
             self::ASR,
             self::VIDEO,
@@ -53,7 +57,8 @@ class Capabilities
     public static function label(string $capability): string
     {
         $labels = [
-            self::IMAGE     => '图像生成',
+            self::IMAGE      => '图像生成',
+            self::IMAGE_EDIT => '图像编辑',
             self::TTS       => '语音合成',
             self::ASR       => '语音识别',
             self::VIDEO     => '视频生成',

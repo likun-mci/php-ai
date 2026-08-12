@@ -51,7 +51,7 @@ trait CapabilityDefaults
     {
         $map = [];
         foreach (Capabilities::all() as $capability) {
-            $method = $capability . 'Path';           // embeddingPath / imagePath / ttsPath ...
+            $method = $this->capabilityMethodBase($capability) . 'Path';   // imagePath / imageEditPath ...
             if (!method_exists($this, $method)) {
                 continue;
             }
@@ -89,7 +89,7 @@ trait CapabilityDefaults
 
         // 同样按约定派发：定义了 buildEmbeddingRequest() 就用它，
         // 没定义就原样透传——多数 OpenAI 兼容平台的字段名本就一致
-        $method = 'build' . ucfirst($capability) . 'Request';
+        $method = 'build' . ucfirst($this->capabilityMethodBase($capability)) . 'Request';
         if (method_exists($this, $method)) {
             $built = $this->{$method}($payload);
             return is_array($built) ? $built : $payload;
@@ -104,7 +104,7 @@ trait CapabilityDefaults
     {
         $this->guardCapability($capability);
 
-        $method = 'parse' . ucfirst($capability) . 'Response';
+        $method = 'parse' . ucfirst($this->capabilityMethodBase($capability)) . 'Response';
         if (method_exists($this, $method)) {
             return $this->{$method}($response);
         }
@@ -154,6 +154,21 @@ trait CapabilityDefaults
     public function capabilityHeaders(string $capability): array
     {
         return [];
+    }
+
+    /**
+     * 能力标识 → 方法名词干
+     *
+     * 能力标识用下划线（image_edit），方法名用驼峰（imageEditPath），
+     * 两种写法各自符合所在处的惯例，这里做一次转换。
+     * 单段的标识（image / tts / asr）转换后不变。
+     */
+    protected function capabilityMethodBase(string $capability): string
+    {
+        if (strpos($capability, '_') === false) {
+            return $capability;
+        }
+        return lcfirst(str_replace(' ', '', ucwords(str_replace('_', ' ', $capability))));
     }
 
     /**

@@ -45,20 +45,89 @@ class Qwen extends OpenAI
     }
 
     /**
-     * 通义不提供 OpenAI 兼容格式的同步文生图
+     * 通义万相文生图（**异步任务式**）
      *
-     * 实测 2026-08：POST {dashscope}/compatible-mode/v1/images/generations 返回 404，
-     * 而同前缀下的假路径也返回 404（该网关是路由优先），可以确认此路由确实不存在。
+     * 实测 2026-08：OpenAI 兼容模式下的 /v1/images/generations 返回 404
+     * （同前缀假路径也 404，该网关路由优先，可确认不存在）。
+     * 万相走的是原生异步接口：提交后拿 task_id，再轮询 /api/v1/tasks/{id}。
      *
-     * 通义万相走的是原生**异步任务**接口
-     * （/api/v1/services/aigc/text2image/image-synthesis，提交后轮询 task_id），
-     * 形态与同步接口完全不同，安排在异步任务那一期实现。
+     * 因此本协议的图像生成必须用 $ai->images()->generateAsync()，
+     * generate() 会给出明确报错并指向前者，而不是返回一个「成功但没有图」的响应。
      *
-     * 返回空串即表示本协议不声明图像能力，调用方会得到明确报错而不是 404。
+     * 注：万相 2.6 用的是另一个端点（/api/v1/services/aigc/image-generation/generation，
+     * 请求体也改成了 input.messages 结构）。要用 2.6 请在配置里指定 image_endpoint，
+     * 解析侧已同时兼容两种结果结构。
      */
     public function imagePath(): string
     {
-        return '';
+        return '/api/v1/services/aigc/text2image/image-synthesis';
+    }
+
+    /**
+     * 万相的图像生成是异步任务式
+     */
+    public function imageIsAsync(): bool
+    {
+        return true;
+    }
+
+    /**
+     * 通义已登记的文生图模型（据官方文档，2026-08）
+     *
+     * wan2.6-t2i 走的是另一个端点，不在此列——列进来会让用户以为
+     * 直接换个模型名就能用。
+     *
+     * @return array<int, string>
+     */
+    public function knownImageModels(): array
+    {
+        return [
+            'wan2.5-t2i-preview',
+            'wan2.2-t2i-flash',
+            'wan2.2-t2i-plus',
+            'wanx2.1-t2i-turbo',
+            'wanx2.1-t2i-plus',
+            'wanx-v1',
+        ];
+    }
+
+    /**
+     * 万相的请求体是 input / parameters 两段式
+     *
+     * 尺寸写法也不同：库内统一的 "1024x1024"（小写 x）要转成万相的
+     * "1024*1024"（星号）。传错分隔符不会被容错，直接判为非法参数。
+     *
+     * @param array<string, mixed> $payload
+     * @return array<string, mixed>
+     */
+    public function buildImageRequest(array $payload): array
+    {
+        $input = ['prompt' => isset($payload['prompt']) ? $payload['prompt'] : ''];
+        foreach (['negative_prompt', 'ref_image'] as $key) {
+            if (!empty($payload[$key])) {
+                $input[$key] = $payload[$key];
+            }
+        }
+        // 库内统一用 image 表示参考图
+        if (empty($input['ref_image']) && !empty($payload['image']) && is_string($payload['image'])) {
+            $input['ref_image'] = $payload['image'];
+        }
+
+        $parameters = [];
+        foreach (['n', 'style', 'seed', 'ref_strength', 'ref_mode', 'prompt_extend', 'watermark'] as $key) {
+            if (isset($payload[$key])) {
+                $parameters[$key] = $payload[$key];
+            }
+        }
+        if (isset($payload['size']) && is_string($payload['size'])) {
+            $parameters['size'] = str_replace(['x', 'X', '×'], '*', $payload['size']);
+        }
+
+        $request = ['model' => isset($payload['model']) ? $payload['model'] : '', 'input' => $input];
+        if ($parameters) {
+            $request['parameters'] = $parameters;
+        }
+        return $request;
     }
 
     /**
@@ -118,18 +187,20 @@ class Qwen extends OpenAI
      */
     public function capabilityEndpoint(string $capability, string $chatEndpoint, array $config): string
     {
-        if ($capability !== \Ai\Helpers\Capabilities::VIDEO) {
+        if (!in_array($capability, [\Ai\Helpers\Capabilities::VIDEO, \Ai\Helpers\Capabilities::IMAGE], true)) {
             return '';
         }
-        // 剥掉「/compatible-mode + 对话路径」拿到根地址，再接视频路径。
+        $path = $capability === \Ai\Helpers\Capabilities::VIDEO ? $this->videoPath() : $this->imagePath();
+
+        // 剥掉「/compatible-mode + 对话路径」拿到根地址，再接目标路径。
         // 只取 scheme+host 会丢掉网关的路径前缀（如 https://gw.internal/ds 里的 /ds）
         $suffix = '/compatible-mode' . $this->chatPath();
         if (substr($chatEndpoint, -strlen($suffix)) === $suffix) {
-            return substr($chatEndpoint, 0, -strlen($suffix)) . $this->videoPath();
+            return substr($chatEndpoint, 0, -strlen($suffix)) . $path;
         }
 
         $origin = $this->taskOrigin($chatEndpoint);
-        return $origin === '' ? '' : $origin . $this->videoPath();
+        return $origin === '' ? '' : $origin . $path;
     }
 
     /**
@@ -139,7 +210,7 @@ class Qwen extends OpenAI
      */
     public function capabilityHeaders(string $capability): array
     {
-        if ($capability === \Ai\Helpers\Capabilities::VIDEO) {
+        if (in_array($capability, [\Ai\Helpers\Capabilities::VIDEO, \Ai\Helpers\Capabilities::IMAGE], true)) {
             return ['X-DashScope-Async' => 'enable'];
         }
         return [];
@@ -192,7 +263,11 @@ class Qwen extends OpenAI
         return [
             'id'        => $id,
             'query_url' => ($id !== '' && $submitUrl !== '')
-                ? $this->taskSiblingUrl($submitUrl, $this->videoPath(), '/api/v1/tasks/' . rawurlencode($id))
+                ? $this->taskSiblingUrl(
+                    $submitUrl,
+                    $capability === \Ai\Helpers\Capabilities::IMAGE ? $this->imagePath() : $this->videoPath(),
+                    '/api/v1/tasks/' . rawurlencode($id)
+                )
                 : '',
         ];
     }
@@ -207,7 +282,9 @@ class Qwen extends OpenAI
         $result = null;
         $error  = '';
 
-        if (strtoupper($status) === 'SUCCEEDED') {
+        if (strtoupper($status) === 'SUCCEEDED' && $capability === \Ai\Helpers\Capabilities::IMAGE) {
+            $result = $this->buildWanxImageResult($response);
+        } elseif (strtoupper($status) === 'SUCCEEDED') {
             $url = (string) $this->dig($response, 'output.video_url');
             $result = new \Ai\Response\VideoResponse(
                 $url,
@@ -226,5 +303,72 @@ class Qwen extends OpenAI
         }
 
         return ['status' => $status, 'error' => $error, 'result' => $result];
+    }
+
+    /**
+     * 从万相的任务结果里取出图片
+     *
+     * 兼容两种结构：
+     *   经典 image-synthesis 接口   output.results[].url
+     *   万相 2.6 的新接口           output.choices[].message.content[] 里 type=image 的元素
+     *
+     * 同时兼容而不是二选一，是因为用户可能通过 image_endpoint 指向 2.6 的端点，
+     * 那时结果结构会变，只认一种会静默解析不到图。
+     *
+     * @param array<string, mixed> $response
+     */
+    protected function buildWanxImageResult(array $response): \Ai\Response\ImageResponse
+    {
+        $urls = [];
+
+        $results = $this->dig($response, 'output.results');
+        if (is_array($results)) {
+            foreach ($results as $item) {
+                if (is_array($item) && !empty($item['url']) && is_string($item['url'])) {
+                    $urls[] = $item['url'];
+                }
+            }
+        }
+
+        if (!$urls) {
+            $choices = $this->dig($response, 'output.choices');
+            if (is_array($choices)) {
+                foreach ($choices as $choice) {
+                    $content = isset($choice['message']['content']) ? $choice['message']['content'] : null;
+                    if (!is_array($content)) {
+                        continue;
+                    }
+                    foreach ($content as $part) {
+                        if (is_array($part) && !empty($part['image']) && is_string($part['image'])) {
+                            $urls[] = $part['image'];
+                        }
+                    }
+                }
+            }
+        }
+
+        return new \Ai\Response\ImageResponse(
+            $urls,
+            [],
+            $response,
+            isset($response['model']) ? (string) $response['model'] : '',
+            isset($response['usage']) && is_array($response['usage']) ? $response['usage'] : [],
+            '',
+            $urls ? '' : '任务成功但响应里没有解析到图片地址，原始响应见 getRaw()'
+        );
+    }
+
+    /**
+     * 通义兼容模式没有图像编辑端点
+     *
+     * 实测 2026-08：POST {dashscope}/compatible-mode/v1/images/edits 返回 404，
+     * 同前缀假路径同样 404（该网关路由优先，可确认不存在）。
+     *
+     * 万相的图像编辑走原生异步接口，形态与 OpenAI 的 multipart 上传完全不同，
+     * 本期不接入。返回空串让调用方得到明确报错而不是往空路径发请求。
+     */
+    public function imageEditPath(): string
+    {
+        return '';
     }
 }

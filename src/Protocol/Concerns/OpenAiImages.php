@@ -32,6 +32,53 @@ trait OpenAiImages
     }
 
     /**
+     * 图像编辑接口路径（图生图 / 局部重绘）
+     *
+     * 多数平台走 .../images/edits，与文生图**不是同一个端点**。
+     * 硅基流动是例外：实测无该路由，它把图生图并进了 images/generations
+     * （靠传 image 参数区分），由该协议自行覆写。
+     */
+    public function imageEditPath(): string
+    {
+        return $this->siblingCapabilityPath('images/edits');
+    }
+
+    /**
+     * 图像生成是否为异步任务式
+     *
+     * 绝大多数平台同步返回；通义万相是提交任务再轮询，由它自己覆写为 true。
+     * 门面据此决定 generate() 能不能直接给出结果，而不是让调用方拿到
+     * 一个「成功但没有图」的响应。
+     */
+    public function imageIsAsync(): bool
+    {
+        return false;
+    }
+
+    /**
+     * 构建图像编辑请求
+     *
+     * 走 multipart 上传，image / mask 是文件字段，其余是普通表单字段。
+     *
+     * @param array<string, mixed> $payload
+     * @return array<string, mixed>
+     */
+    public function buildImageEditRequest(array $payload): array
+    {
+        return $payload;
+    }
+
+    /**
+     * 解析图像编辑响应。与文生图同一形态
+     *
+     * @param array<string, mixed> $response
+     */
+    public function parseImageEditResponse(array $response): ImageResponse
+    {
+        return $this->parseImageResponse($response);
+    }
+
+    /**
      * 本协议已登记的图像生成模型
      *
      * 供后台下拉框离线渲染。清单一律以**各平台官方文档**为准，

@@ -1718,7 +1718,7 @@ php-ai/
 > | 能力 | 状态 |
 > |------|------|
 > | 文本向量化 `embeddings()` | ✅ v1.15.0，35 个平台 |
-> | 图像生成 `images()` | ✅ v1.16.0，6 个平台字段已归一 |
+> | 图像生成 `images()` | ✅ v1.16.0 同步 / v1.20.0 异步与编辑 |
 > | 语音合成 / 识别 `audio()` | ✅ v1.17.0，二进制与 JSON-hex 两种形态已归一 |
 > | WebSocket `realtime()` | ✅ v1.18.0，讯飞语音（RFC 6455 纯 PHP 实现） |
 > | 视频生成 `video()` | ✅ v1.19.0，4 个平台异步任务已归一 |
@@ -1882,6 +1882,48 @@ $ai->images();  // 子门面
 
 其余 OpenAI 兼容协议会继承基线声明。是否真的开通以对方文档为准——
 未开通时你会收到该平台自己的 404，而不是库的猜测。
+
+#### 异步文生图（通义万相）
+
+通义万相的文生图是**提交任务再轮询**，一次请求拿不到图。这类平台上
+`generate()` 会明确报错并指向 `generateAsync()`——返回一个「成功但没有图」的
+响应是最坏的做法，调用方拿到空结果完全不知道去哪找原因。
+
+```php
+$ai = AI::create(['protocol' => 'qwen', 'model' => 'wan2.2-t2i-flash', 'api_key' => '...']);
+
+$task = $ai->images()->generateAsync('一只在看书的猫', ['size' => '1024x1024', 'n' => 2]);
+$db->save(['task' => json_encode($task->toArray())]);
+
+// ……稍后
+$task = AsyncTask::fromArray(json_decode($row['task'], true), $ai);
+if ($task->refresh()->isSucceeded()) {
+    $task->getResult()->saveTo('/var/www/uploads');
+}
+```
+
+和视频任务共用同一套 `AsyncTask`：不阻塞、可跨请求恢复、超时不算失败。
+
+> 库内会把统一写法的 `size: "1024x1024"` 转成万相要的 `"1024*1024"`（星号）。
+> 分隔符传错不会被容错，平台直接判为非法参数。
+
+#### 图像编辑（图生图 / 局部重绘）
+
+```php
+// 整图改写
+$ai->images()->edit('/path/cat.png', '把背景换成星空')->saveTo('/var/www/uploads');
+
+// 局部重绘：只改蒙版覆盖的区域
+$ai->images()->edit('/path/cat.png', '去掉这只手', ['mask' => '/path/mask.png']);
+```
+
+走 multipart 上传，与文生图**不是同一个端点**。只接受**本地文件**——
+远端图片请先用 `Ai\Helpers\Media::download()` 取回落盘，库不会顺手替你下载，
+因为那需要 SSRF 防护，不该由上传逻辑代劳。
+
+支持：OpenAI、阶跃星辰、xAI、智谱。
+**硅基流动不支持**（实测无 `/images/edits` 路由，它把图生图并进了
+`images/generations`，靠传 `image` 参数区分）；**通义也不支持**（兼容模式实测 404）。
 
 ### 语音合成与识别（已可用）
 
@@ -2166,7 +2208,8 @@ class MyProtocol implements ProtocolInterface
 - `chatBatch()` 并发批量不支持流式，也不走 `setAttachments()`（附件请写在各自 payload 里）；
 - `cost()` 需自行传入价格表，库不内置各平台价格（价格变动频繁，内置必然过期）；
 - `Ai\Cli\ClaudeCode` 依赖本机已安装 claude 程序；`proc_open` / `shell_exec` 被禁用的受限 PHP 环境需改用自定义执行器（如 SSH/SFTP）。
-- 视频生成只覆盖**文生视频与首帧图生视频**；异步式的文生图（通义万相图像）与图像编辑要等 v1.20.0；
+- 视频生成只覆盖**文生视频与首帧图生视频**；
+- 图像编辑只覆盖走 `/images/edits` 的平台；硅基流动与通义的图生图形态不同，未接入；
 - `wait()` 是阻塞的，只适合 CLI 与队列 worker；Web 请求里请用「提交存库 + 定时任务轮询」的写法；
 - WebSocket 通道只做「一次会话、发完收完就关」这一种模式，够覆盖讯飞 TTS/ASR；不支持并发多连接、自动重连、服务端模式与 permessage-deflate 压缩扩展；
 - MiniMax 的语音识别形态与 OpenAI 差异较大，暂未接入；

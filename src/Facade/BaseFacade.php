@@ -92,6 +92,17 @@ abstract class BaseFacade
 
         $chatEndpoint = $this->ai->resolveEndpoint();
 
+        // 逃生口：少数平台的能力接口根本不在对话路径的前缀之下。
+        // 例如通义的对话在 {origin}/compatible-mode/v1/...，而万相视频在
+        // {origin}/api/v1/services/... —— 无论怎么剥对话路径都推不出来。
+        // 这类协议自己给出完整地址，仍需保证跟随用户配置的 base_url
+        if (method_exists($protocol, 'capabilityEndpoint')) {
+            $full = $protocol->capabilityEndpoint($capability, $chatEndpoint, $config);
+            if (is_string($full) && $full !== '') {
+                return $full;
+            }
+        }
+
         // 优先用协议自己声明的对话路径来剥离——它知道自家路径长什么样。
         // deriveFromChat() 靠猜一组常见后缀，遇到 MiniMax 的
         // /v1/text/chatcompletion_v2 会剥不掉，拼出叠加路径且不报错，
@@ -146,7 +157,11 @@ abstract class BaseFacade
         $protocol   = $this->protocol($capability);
 
         $request  = $protocol->buildCapabilityRequest($capability, $payload);
-        $headers  = array_merge($protocol->buildHeaders($this->ai->getConfig()), $extraHeaders);
+        $headers  = $protocol->buildHeaders($this->ai->getConfig());
+        if (method_exists($protocol, 'capabilityHeaders')) {
+            $headers = array_merge($headers, $protocol->capabilityHeaders($capability));
+        }
+        $headers  = array_merge($headers, $extraHeaders);
         $endpoint = $this->endpoint($capability);
 
         // 扩展能力一律非流式，清掉可能残留在传输层上的对话流式回调，

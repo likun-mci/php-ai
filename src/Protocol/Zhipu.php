@@ -81,4 +81,81 @@ class Zhipu extends OpenAI
     {
         return ['glm-tts'];
     }
+
+    use \Ai\Protocol\Concerns\AsyncVideoTask;
+
+    /**
+     * 智谱视频生成（异步任务式）
+     *
+     * 据官方文档（2026-08）：提交 POST {origin}/api/paas/v4/videos/generations，
+     * 返回 {id, task_status}；查询 GET {origin}/api/paas/v4/async-result/{id}，
+     * task_status 取值 PROCESSING / SUCCESS / FAIL；
+     * 成功时视频在 video_result[].url，封面在 video_result[].cover_image_url。
+     */
+    public function videoPath(): string
+    {
+        return '/v4/videos/generations';
+    }
+
+    /**
+     * 智谱已登记的视频生成模型（据官方文档，2026-08）
+     * @return array<int, string>
+     */
+    public function knownVideoModels(): array
+    {
+        return [
+            'cogvideox-3', 'cogvideox-2', 'cogvideox-flash',
+            'viduq1-text', 'viduq1-image', 'viduq1-start-end',
+            'vidu2-image', 'vidu2-start-end', 'vidu2-reference',
+        ];
+    }
+
+    /**
+     * @param array<string, mixed> $response
+     * @return array{id: string, query_url: string}
+     */
+    public function parseTaskSubmit(string $capability, array $response, string $submitUrl = ''): array
+    {
+        $id = isset($response['id']) ? (string) $response['id'] : '';
+
+        // 查询走 /async-result/{id}，与提交同前缀，把最后两段换掉
+        $queryUrl = '';
+        if ($id !== '' && $submitUrl !== '') {
+            $base = preg_replace('#/videos/generations/?$#', '', $submitUrl);
+            $queryUrl = rtrim((string) $base, '/') . '/async-result/' . rawurlencode($id);
+        }
+
+        return ['id' => $id, 'query_url' => $queryUrl];
+    }
+
+    /**
+     * @param array<string, mixed> $response
+     * @return array{status: string, error: string, result: \Ai\Contracts\CapabilityResponseInterface|null}
+     */
+    public function parseTaskStatus(string $capability, array $response): array
+    {
+        $status = isset($response['task_status']) ? (string) $response['task_status'] : '';
+        $result = null;
+        $error  = '';
+
+        if (strtoupper($status) === 'SUCCESS') {
+            $first = isset($response['video_result'][0]) && is_array($response['video_result'][0])
+                ? $response['video_result'][0]
+                : [];
+            $url = isset($first['url']) ? (string) $first['url'] : '';
+            $result = new \Ai\Response\VideoResponse(
+                $url,
+                isset($first['cover_image_url']) ? (string) $first['cover_image_url'] : '',
+                0.0,
+                $response,
+                isset($response['model']) ? (string) $response['model'] : '',
+                isset($response['usage']) && is_array($response['usage']) ? $response['usage'] : [],
+                $url === '' ? '任务成功但 video_result 里没有 url' : ''
+            );
+        } elseif (strtoupper($status) === 'FAIL') {
+            $error = $this->taskError($response);
+        }
+
+        return ['status' => $status, 'error' => $error, 'result' => $result];
+    }
 }

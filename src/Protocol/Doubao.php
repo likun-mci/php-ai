@@ -85,4 +85,95 @@ class Doubao extends OpenAI
         }
         return $payload;
     }
+
+    use \Ai\Protocol\Concerns\AsyncVideoTask;
+
+    /**
+     * 火山方舟视频生成（异步任务式）
+     *
+     * 据官方文档（2026-08）：提交 POST {origin}/api/v3/contents/generations/tasks，
+     * 返回 {id}；查询 GET {origin}/api/v3/contents/generations/tasks/{id}，
+     * 状态字段 status（succeeded / failed 等）；
+     * 成功时视频在 content.video_url，用量在 usage。
+     */
+    public function videoPath(): string
+    {
+        return '/api/v3/contents/generations/tasks';
+    }
+
+    /**
+     * 方舟的请求体用 content 数组表达多模态输入
+     *
+     * @param array<string, mixed> $payload
+     * @return array<string, mixed>
+     */
+    public function buildVideoRequest(array $payload): array
+    {
+        if (isset($payload['content'])) {
+            return $payload;              // 调用方已按方舟结构写好，不动
+        }
+
+        $content = [];
+        if (!empty($payload['prompt'])) {
+            $content[] = ['type' => 'text', 'text' => (string) $payload['prompt']];
+        }
+        // 图生视频：首帧图
+        foreach (['image_url', 'image', 'first_frame_image'] as $key) {
+            if (!empty($payload[$key]) && is_string($payload[$key])) {
+                $content[] = ['type' => 'image_url', 'image_url' => ['url' => $payload[$key]]];
+                break;
+            }
+        }
+
+        $request = ['model' => isset($payload['model']) ? $payload['model'] : '', 'content' => $content];
+        foreach (['ratio', 'duration', 'resolution', 'watermark', 'seed', 'camerafixed'] as $key) {
+            if (isset($payload[$key])) {
+                $request[$key] = $payload[$key];
+            }
+        }
+        return $request;
+    }
+
+    /**
+     * @param array<string, mixed> $response
+     * @return array{id: string, query_url: string}
+     */
+    public function parseTaskSubmit(string $capability, array $response, string $submitUrl = ''): array
+    {
+        $id = isset($response['id']) ? (string) $response['id'] : '';
+        return [
+            'id'        => $id,
+            'query_url' => ($id !== '' && $submitUrl !== '')
+                ? $this->taskUrlFrom($submitUrl, '/' . rawurlencode($id))
+                : '',
+        ];
+    }
+
+    /**
+     * @param array<string, mixed> $response
+     * @return array{status: string, error: string, result: \Ai\Contracts\CapabilityResponseInterface|null}
+     */
+    public function parseTaskStatus(string $capability, array $response): array
+    {
+        $status = isset($response['status']) ? (string) $response['status'] : '';
+        $result = null;
+        $error  = '';
+
+        if (strtolower($status) === 'succeeded') {
+            $url = (string) $this->dig($response, 'content.video_url');
+            $result = new \Ai\Response\VideoResponse(
+                $url,
+                '',
+                0.0,
+                $response,
+                isset($response['model']) ? (string) $response['model'] : '',
+                isset($response['usage']) && is_array($response['usage']) ? $response['usage'] : [],
+                $url === '' ? '任务成功但响应里没有 content.video_url' : ''
+            );
+        } elseif (strtolower($status) === 'failed') {
+            $error = $this->taskError($response);
+        }
+
+        return ['status' => $status, 'error' => $error, 'result' => $result];
+    }
 }

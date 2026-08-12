@@ -16,8 +16,10 @@ namespace Ai\Protocol;
  *
  * @see https://www.xfyun.cn/doc/spark/HTTP%E8%B0%83%E7%94%A8%E6%96%87%E6%A1%A3.html
  */
-class Spark extends OpenAI
+class Spark extends OpenAI implements \Ai\Contracts\RealtimeProtocolInterface
 {
+    use \Ai\Protocol\Concerns\XfyunRealtime;
+
     /**
      * 协议官方默认接口根地址
      */
@@ -40,5 +42,27 @@ class Spark extends OpenAI
             'lite'        => '星火 Lite（免费）',
             'x1'          => '星火 X1（推理）',
         ];
+    }
+
+    /**
+     * 讯飞的语音合成只提供 WebSocket，没有 HTTP 接口
+     *
+     * 返回空串让 $ai->audio()->speech() 给出「不支持」的明确报错，
+     * 错误信息里会列出本协议支持的能力（含「实时通道」），把用户导向
+     * $ai->realtime()->useWebSocket()->speech()。
+     *
+     * 比让请求打到一个不存在的 HTTP 路径、再拿一个含糊的 404 要好。
+     */
+    public function ttsPath(): string
+    {
+        return '';
+    }
+
+    /**
+     * 同上，语音听写也只有 WebSocket 通道
+     */
+    public function asrPath(): string
+    {
+        return '';
     }
 }

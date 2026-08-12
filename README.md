@@ -1720,7 +1720,7 @@ php-ai/
 > | 文本向量化 `embeddings()` | ✅ v1.15.0，35 个平台 |
 > | 图像生成 `images()` | ✅ v1.16.0，6 个平台字段已归一 |
 > | 语音合成 / 识别 `audio()` | ✅ v1.17.0，二进制与 JSON-hex 两种形态已归一 |
-> | WebSocket `realtime()` | ⏳ 计划 v1.18.0 |
+> | WebSocket `realtime()` | ✅ v1.18.0，讯飞语音（RFC 6455 纯 PHP 实现） |
 > | 视频生成 `video()` | ⏳ 计划 v1.19.0 |
 >
 > 未交付的能力调用时会抛 `UnsupportedCapabilityException` 并说明原因，
@@ -1959,6 +1959,68 @@ OpenAI 的 `voice` 是**必填**参数，不传直接 400。库内会补一个�
 
 **讯飞只提供 WebSocket**，走 `$ai->realtime()`，计划 v1.18.0。
 
+### WebSocket 实时通道（已可用）
+
+讯飞的语音能力**只提供 WebSocket**，没有等价的 HTTP 接口。本库把它纳了进来，
+省得你为一个平台单独写一套 WS 对接。
+
+```php
+$ai = AI::create([
+    'protocol' => 'spark',
+    'app_id'   => '<控制台的 APPID>',
+    'api_key'  => '<APIKey>:<APISecret>',   // 冒号拼接
+]);
+
+// 必须显式启用 WebSocket 通道
+$ai->realtime()->useWebSocket()->speech('你好世界')->saveTo('/tmp/hello.mp3');
+
+$text = $ai->realtime()->useWebSocket()->transcribe('/tmp/record.wav')->getText();
+```
+
+#### 为什么必须显式调用 `useWebSocket()`
+
+通道默认是 `null`，不显式启用就不会建立任何连接。这不是啰嗦——
+WebSocket 是长连接，超时语义、错误形态都和普通 HTTP 请求不同，
+**握手成功之后**仍可能因帧格式问题静默挂死（服务端既不回数据也不发 close）。
+这种行为差异不该在你不知情时自动发生。
+
+不启用直接调用会得到明确提示，而不是含糊的失败：
+
+```
+未指定实时通道协议。当前平台的语音能力只能通过 WebSocket 访问，
+请显式调用 ->useWebSocket() 启用。……
+```
+
+#### 零新增依赖
+
+RFC 6455 客户端是纯 PHP 实现的，只用到 `stream_socket_client` /
+`stream_socket_enable_crypto` / `random_bytes` / `pack` 这些**核心函数**，
+不需要 `ext-sockets`，也不引入任何 composer 包。
+
+`wss://` 需要 `ext-openssl`（绝大多数环境都有）。缺失时会给出明确提示，
+不会变成一个难懂的连接错误。已在 `composer.json` 的 `suggest` 里声明。
+
+#### 凭据与 HTTP 接口不同
+
+讯飞语音的鉴权**不走请求头**：用 APIKey/APISecret 算 HMAC-SHA256 签名后拼进 URL 查询串。
+签名带时间戳且有效期很短，**每次连接都要重算**，不能缓存 URL。另外还需要 `app_id`，
+是 APIKey/APISecret 之外的第三个凭据。这些库内都处理好了，你只要把三个值配上。
+
+#### 语音识别要的是裸 PCM
+
+讯飞听写接受 16k / 16bit / 单声道的裸 PCM。传 `.wav` 时库会自动剥掉文件头取出
+`data` 块——直接把整个 wav 灌进去，头部那几十字节会被当成音频采样，
+表现为开头一小段噪音或识别结果异常，**不会报错**，很难往文件格式上想。
+
+其它容器格式（mp3 / m4a 等）请自行转码后再传。本库不做转码，
+那需要引入 ffmpeg 之类的外部依赖。
+
+#### 讯飞的 HTTP 语音接口不存在
+
+`$ai->audio()->speech()` 在讯飞协议上会明确报「不支持」，并在错误信息里列出
+本协议支持的能力（含「实时通道」），把你导向 `$ai->realtime()`。
+比让请求打到一个不存在的 HTTP 路径、再拿一个含糊的 404 要好。
+
 ### 异步任务：视频生成不要阻塞等待
 
 视频接口全都是「提交 → 轮询 → 取结果」三段式，一次生成动辄几分钟。
@@ -2058,7 +2120,8 @@ class MyProtocol implements ProtocolInterface
 - `cost()` 需自行传入价格表，库不内置各平台价格（价格变动频繁，内置必然过期）；
 - `Ai\Cli\ClaudeCode` 依赖本机已安装 claude 程序；`proc_open` / `shell_exec` 被禁用的受限 PHP 环境需改用自定义执行器（如 SSH/SFTP）。
 - 视频生成能力目前**只有骨架**：入口、响应对象、异步任务与传输层支持已就位，但尚无平台声明支持，调用会抛 `UnsupportedCapabilityException`。按 v1.18.0（WebSocket）→ v1.19.0（视频）逐版交付；
-- 语音只覆盖 HTTP 通道；讯飞等只提供 WebSocket 的平台要等 v1.18.0；MiniMax 的语音识别形态与 OpenAI 差异较大，暂未接入；
+- WebSocket 通道只做「一次会话、发完收完就关」这一种模式，够覆盖讯飞 TTS/ASR；不支持并发多连接、自动重连、服务端模式与 permessage-deflate 压缩扩展；
+- MiniMax 的语音识别形态与 OpenAI 差异较大，暂未接入；
 - 图像生成只支持**同步返回**的平台；通义万相等异步任务式的文生图要等 v1.19.0 的异步任务能力落地；
 - 向量化默认不分批，超出平台单次上限时需自行传 `batch_size`——各平台上限差异大且文档未必写明，库不预设一个「保险的小值」，那会让本可一次发完的平台白白多发几十个请求；
 - WebSocket 通道（讯飞语音）计划在 v1.18.0 交付，当前调用 `realtime()->useWebSocket()` 后会明确提示尚未实现；

@@ -46,6 +46,17 @@ class MiniMax extends OpenAI
     }
 
     /**
+     * 向量化接口路径
+     *
+     * MiniMax 的对话路径是 /v1/text/chatcompletion_v2，不是标准的
+     * .../chat/completions 形态，同级推导拿不到结果，只能显式写出来
+     */
+    public function embeddingPath(): string
+    {
+        return '/v1/embeddings';
+    }
+
+    /**
      * 解析响应数据
      *
      * MiniMax 出错时仍返回 HTTP 200，错误信息放在 base_resp 里（status_code 非 0），

@@ -365,7 +365,24 @@ check($sent !== null && strpos($sent['url'], '/chat/completions') !== false, '�
 check(method_exists($ai, 'images') && method_exists($ai, 'audio')
       && method_exists($ai, 'video') && method_exists($ai, 'embeddings')
       && method_exists($ai, 'realtime'), '五个扩展能力入口已就位');
-check($ai->capabilities() === [], '阶段 0 尚无协议声明扩展能力（符合预期）');
+// 协议声明扩展能力之后，对话链路必须一点不受影响。
+// 断言的是「加了能力不影响 chat」这个持久性质，而不是某一版的能力清单快照——
+// 快照会随每期交付过期，性质不会
+$fake2 = new FakeTransport();
+$fake2->queuePost([
+    'model'   => 'gpt-4o',
+    'choices' => [['message' => ['role' => 'assistant', 'content' => 'ok'], 'finish_reason' => 'stop']],
+    'usage'   => ['total_tokens' => 3],
+]);
+$ai2 = new AI(['api_key' => 'sk-test', 'model' => 'gpt-4o']);
+$ai2->setTransport($fake2);
+$before = $ai2->resolveEndpoint();
+$ai2->chat('你好');
+$sent2 = $fake2->lastRequest();
+check($sent2 !== null && $sent2['url'] === $before, '声明扩展能力后对话端点不变', $before);
+check($sent2 !== null && array_keys($sent2['data']) === array_keys($sent['data']),
+      '声明扩展能力后对话请求体结构不变');
+check(!isset($sent2['data']['input']), '对话请求体不含向量化字段（两条链路互不串味）');
 
 // =====================================================================
 echo "\n" . str_repeat('=', 64) . "\n";

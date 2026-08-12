@@ -35,6 +35,13 @@ trait CapabilityDefaults
     /**
      * 能力标识 => 接口相对路径
      *
+     * 默认按**约定**装配：协议类只要定义 `{能力}Path()` 方法并返回非空路径，
+     * 就自动被视为支持该能力。例如定义了 embeddingPath() 就支持向量化，
+     * 定义了 imagePath() 就支持图像生成。
+     *
+     * 这样每新增一种能力，协议类不用再维护一份映射表，也不用覆写本方法——
+     * 少一处需要同步的地方，就少一类「声明了却没实现」的错位。
+     *
      * 用方法而不是属性来承载，是因为 trait 里的属性一旦被使用它的类
      * 以不同初始值重新声明，PHP 会直接抛致命错误；方法则可以自由覆写。
      *
@@ -42,7 +49,18 @@ trait CapabilityDefaults
      */
     public function capabilityPathMap(): array
     {
-        return [];
+        $map = [];
+        foreach (Capabilities::all() as $capability) {
+            $method = $capability . 'Path';           // embeddingPath / imagePath / ttsPath ...
+            if (!method_exists($this, $method)) {
+                continue;
+            }
+            $path = $this->{$method}();
+            if (is_string($path) && $path !== '') {
+                $map[$capability] = $path;
+            }
+        }
+        return $map;
     }
 
     /**
@@ -68,6 +86,14 @@ trait CapabilityDefaults
     public function buildCapabilityRequest(string $capability, array $payload): array
     {
         $this->guardCapability($capability);
+
+        // 同样按约定派发：定义了 buildEmbeddingRequest() 就用它，
+        // 没定义就原样透传——多数 OpenAI 兼容平台的字段名本就一致
+        $method = 'build' . ucfirst($capability) . 'Request';
+        if (method_exists($this, $method)) {
+            $built = $this->{$method}($payload);
+            return is_array($built) ? $built : $payload;
+        }
         return $payload;
     }
 
@@ -78,12 +104,18 @@ trait CapabilityDefaults
     {
         $this->guardCapability($capability);
 
+        $method = 'parse' . ucfirst($capability) . 'Response';
+        if (method_exists($this, $method)) {
+            return $this->{$method}($response);
+        }
+
         // 能声明支持、却没实现解析，属于库自身的实现遗漏，不是用户用错了。
         // 说清楚是哪个协议缺哪个方法，免得排查时怀疑到调用方去
         throw new UnsupportedCapabilityException(sprintf(
-            '协议 %s 声明支持「%s」但未实现响应解析，请在该协议类中覆写 parseCapabilityResponse()',
+            '协议 %s 声明支持「%s」但未实现响应解析，请在该协议类中补上 %s() 方法',
             $this->protocolLabel(),
-            Capabilities::label($capability)
+            Capabilities::label($capability),
+            $method
         ));
     }
 

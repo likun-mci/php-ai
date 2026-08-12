@@ -451,4 +451,19 @@ class OpenAI implements ProtocolInterface
         }
         return ['alloy', 'ash', 'ballad', 'coral', 'echo', 'sage', 'shimmer', 'verse', 'marin', 'cedar'];
     }
+
+    /**
+     * OpenAI 向量化模型（据官方 OpenAPI 规范，2026-08-12）
+     *
+     * text-embedding-3-* 支持 dimensions 降维；ada-002 不支持。
+     *
+     * @return array<int, string>
+     */
+    public function knownEmbeddingModels(): array
+    {
+        if (get_class($this) !== self::class) {
+            return [];
+        }
+        return ['text-embedding-3-small', 'text-embedding-3-large', 'text-embedding-ada-002'];
+    }
 }

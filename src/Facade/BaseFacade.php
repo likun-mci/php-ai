@@ -49,14 +49,25 @@ abstract class BaseFacade
             throw new ConfigException('尚未设置模型，请先调用 setModel() 或在构造时传入 model');
         }
 
+        // 逃生口：用户显式配了 `{能力}_endpoint`，说明他知道这个接口存在。
+        // 库的判断可能过时或有遗漏——本轮平台审计就查出 Gemini 的图像能力
+        // 被误判为「没有」——不该由库的判断把用户挡死。
+        $config = $this->ai->getConfig();
+        if (!empty($config[$capability . '_endpoint']) && method_exists($protocol, 'forceCapability')) {
+            $protocol->forceCapability($capability);
+        }
+
         if (!in_array($capability, $protocol->capabilities(), true)) {
             $supported = $protocol->capabilities();
             throw new UnsupportedCapabilityException(sprintf(
-                '当前模型使用的协议不支持「%s」能力。%s',
+                '当前模型使用的协议不支持「%s」能力。%s。'
+                . '若你确知该平台支持此接口，可在配置中直接给出 %s_endpoint 绕过库的判断——'
+                . '库的判断可能过时或有遗漏。',
                 Capabilities::label($capability),
                 $supported
                     ? '本协议支持：' . implode('、', array_map([Capabilities::class, 'label'], $supported))
-                    : '本协议目前只支持对话（chat）'
+                    : '本协议目前只支持对话（chat）',
+                $capability
             ));
         }
 
@@ -75,19 +86,23 @@ abstract class BaseFacade
         $capability = $capability !== '' ? $capability : $this->capability();
         $protocol   = $this->protocol($capability);
 
-        $path = $protocol->capabilityPath($capability);
-        if ($path === '') {
-            throw new UnsupportedCapabilityException(sprintf(
-                '协议未提供「%s」能力的接口路径',
-                Capabilities::label($capability)
-            ));
-        }
-
-        // 用户显式配了整条能力端点时优先（配置键形如 image_endpoint / tts_endpoint）
+        // 用户显式配了整条能力端点时**最优先**（配置键形如 image_endpoint / tts_endpoint）。
+        // 这一步必须在「协议是否提供路径」之前——它就是给协议判断有误或过时时用的
+        // 逃生口，放在后面等于逃生口被它要绕开的那道检查挡住了
         $config = $this->ai->getConfig();
         $key    = $capability . '_endpoint';
         if (!empty($config[$key]) && is_string($config[$key])) {
             return Endpoint::withScheme($config[$key]);
+        }
+
+        $path = $protocol->capabilityPath($capability);
+        if ($path === '') {
+            throw new UnsupportedCapabilityException(sprintf(
+                '协议未提供「%s」能力的接口路径。若你确知该平台支持，'
+                . '可在配置中直接给出 %s 绕过库的判断',
+                Capabilities::label($capability),
+                $key
+            ));
         }
 
         $chatEndpoint = $this->ai->resolveEndpoint();

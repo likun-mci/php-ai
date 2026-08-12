@@ -234,6 +234,87 @@ foreach (['claude', 'qwen-anthropic', 'zhipu-anthropic', 'moonshot-anthropic'] a
           implode(',', proto($key)->capabilities()));
 }
 
+// =====================================================================
+echo "\n=== 五、配置逃生口 ===\n\n";
+
+// 库的判断可能过时或有遗漏——本轮审计就查出 Gemini 图像被误判为「没有」。
+// 用户显式配了 {能力}_endpoint 时，不该被库的判断挡死。
+
+$png = tempnam(sys_get_temp_dir(), 'p') . '.png';
+file_put_contents($png, 'x');
+
+// 场景 A：协议有该形态的解析器，只是不声明路径（通义的图像编辑实测 404）
+$fake = new FakeTransport();
+$ai = new AI(['api_key' => 'k', 'model' => 'qwen-plus', 'protocol' => 'qwen']);
+$ai->setTransport($fake);
+try {
+    $ai->images()->edit($png, '改');
+    check(false, '未配逃生口时仍明确报错', '未抛出');
+} catch (\Ai\Exceptions\UnsupportedCapabilityException $e) {
+    check(true, '未配逃生口时仍明确报错');
+    check(strpos($e->getMessage(), 'image_edit_endpoint') !== false,
+          '  报错里给出逃生口的用法', $e->getMessage());
+}
+
+$ai2 = new AI(['api_key' => 'k', 'model' => 'qwen-plus', 'protocol' => 'qwen',
+               'image_edit_endpoint' => 'https://gw.internal/edit']);
+$ai2->setTransport($fake);
+$fake->queuePost(['data' => [['url' => 'https://cdn/e.png']]]);
+$res = $ai2->images()->edit($png, '改');
+check($res->getUrls() === ['https://cdn/e.png'], '**配了 image_edit_endpoint 后放行**');
+check($fake->lastRequest()['url'] === 'https://gw.internal/edit', '  请求打到用户指定的地址');
+
+// 场景 B：协议族根本没有该形态的解析器——逃生口绕不过这一层，
+// 但要说清楚是哪一层挡住的，别让用户以为是配置没生效
+$ai3 = new AI(['api_key' => 'k', 'model' => 'claude-3-opus', 'protocol' => 'claude',
+               'image_endpoint' => 'https://gw.internal/img']);
+$ai3->setTransport(new FakeTransport());
+try {
+    $ai3->images()->generate('猫');
+    check(false, 'Claude 无图像解析器时仍报错', '未抛出');
+} catch (\Ai\Exceptions\UnsupportedCapabilityException $e) {
+    check(strpos($e->getMessage(), '没有「图像生成」的响应解析器') !== false,
+          '**无解析器时报错点明是哪一层挡住的**', $e->getMessage());
+    check(strpos($e->getMessage(), 'protocol 改成 openai') !== false,
+          '  并给出可行的替代做法');
+}
+@unlink($png);
+
+// 逃生口不能影响未配置时的正常判断
+check(!in_array(Capabilities::IMAGE_EDIT, proto('qwen')->capabilities(), true),
+      '逃生口不污染协议的默认声明（新实例仍不声明）');
+
+// =====================================================================
+echo "\n=== 六、第 2 批：已接入平台清单补全 ===\n\n";
+
+$batch2 = [
+    ['openai',      'knownEmbeddingModels', 'text-embedding-3-small',      'OpenAI 向量'],
+    ['openai',      'knownTtsModels',       'gpt-4o-mini-tts',             'OpenAI TTS'],
+    ['openai',      'knownAsrModels',       'gpt-4o-transcribe',           'OpenAI ASR'],
+    ['siliconflow', 'knownAsrModels',       'FunAudioLLM/SenseVoiceSmall', '硅基流动 ASR'],
+    ['minimax',     'knownVideoModels',     'MiniMax-Hailuo-02',           'MiniMax 视频'],
+    ['gemini',      'knownEmbeddingModels', 'gemini-embedding-001',        'Gemini 向量'],
+];
+foreach ($batch2 as [$key, $method, $expect, $label]) {
+    $list = proto($key)->{$method}();
+    check(in_array($expect, $list, true), sprintf('  %-14s 含 %s', $label, $expect),
+          implode(',', $list) ?: '(空)');
+}
+
+// OpenAI 的清单必须与官方 OpenAPI 规范一致，不能凭印象
+$o = proto('openai');
+check($o->knownTtsModels() === ['gpt-4o-mini-tts', 'gpt-4o-mini-tts-2025-12-15', 'tts-1-hd', 'tts-1'],
+      '  OpenAI TTS 清单与官方规范逐项一致', implode(',', $o->knownTtsModels()));
+check(count($o->knownAsrModels()) === 6, '  OpenAI ASR 清单 6 项（与规范一致）',
+      (string) count($o->knownAsrModels()));
+
+// 各厂商子类不继承 OpenAI 的清单
+foreach (['deepseek', 'moonshot', 'groq'] as $key) {
+    $p = proto($key);
+    check($p->knownEmbeddingModels() === [] && $p->knownTtsModels() === [],
+          "  {$key} 不继承 OpenAI 的模型清单");
+}
+
 echo "\n" . str_repeat('=', 66) . "\n";
 if ($failures) {
     echo count($failures) . " 项未通过：\n";

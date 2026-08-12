@@ -120,4 +120,17 @@ class SiliconFlow extends OpenAI
     {
         return '';
     }
+
+    /**
+     * 硅基流动语音识别模型（据官方文档，2026-08-12）
+     *
+     * 端点 /v1/audio/transcriptions，multipart 上传，
+     * 音频限时长 ≤1 小时、体积 ≤50MB；响应只有 text 一个字段。
+     *
+     * @return array<int, string>
+     */
+    public function knownAsrModels(): array
+    {
+        return ['FunAudioLLM/SenseVoiceSmall', 'TeleAI/TeleSpeechASR'];
+    }
 }

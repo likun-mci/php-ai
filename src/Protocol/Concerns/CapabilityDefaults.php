@@ -33,6 +33,35 @@ use Ai\Helpers\Protocols;
 trait CapabilityDefaults
 {
     /**
+     * 被调用方强制开启的能力
+     *
+     * 库的判断可能过时或有遗漏（本轮审计就查出 Gemini 图像被误判为「没有」）。
+     * 用户显式配了 `{能力}_endpoint` 时，说明他知道这个接口存在，
+     * 不该被库的判断挡死。
+     *
+     * @var array<string, bool>
+     */
+    protected $forcedCapabilities = [];
+
+    /**
+     * 强制开启某项能力，绕过声明检查
+     *
+     * 由门面在检测到用户配置了 `{能力}_endpoint` 时调用，不需要用户直接使用。
+     */
+    public function forceCapability(string $capability): void
+    {
+        $this->forcedCapabilities[$capability] = true;
+    }
+
+    /**
+     * 该能力是否被强制开启
+     */
+    public function isCapabilityForced(string $capability): bool
+    {
+        return !empty($this->forcedCapabilities[$capability]);
+    }
+
+    /**
      * 能力标识 => 接口相对路径
      *
      * 默认按**约定**装配：协议类只要定义 `{能力}Path()` 方法并返回非空路径，
@@ -68,7 +97,13 @@ trait CapabilityDefaults
      */
     public function capabilities(): array
     {
-        return array_keys($this->capabilityPathMap());
+        $caps = array_keys($this->capabilityPathMap());
+        foreach (array_keys($this->forcedCapabilities) as $forced) {
+            if (!in_array($forced, $caps, true)) {
+                $caps[] = $forced;
+            }
+        }
+        return $caps;
     }
 
     public function capabilityPath(string $capability): string
@@ -109,7 +144,24 @@ trait CapabilityDefaults
             return $this->{$method}($response);
         }
 
-        // 能声明支持、却没实现解析，属于库自身的实现遗漏，不是用户用错了。
+        // 分两种情况说，否则用户会被引到错误的方向去排查
+
+        if ($this->isCapabilityForced($capability)) {
+            // 用户用 {能力}_endpoint 绕过了声明检查，但这个协议族根本没有
+            // 对应形态的解析器——逃生口能绕开「库认为不支持」，
+            // 绕不开「库不认识这个响应格式」
+            throw new UnsupportedCapabilityException(sprintf(
+                '已通过 %s_endpoint 绕过能力声明，但协议 %s 没有「%s」的响应解析器'
+                . '（缺 %s() 方法），无法理解该接口返回的数据。'
+                . '若目标接口是 OpenAI 兼容格式，请把 protocol 改成 openai 再配 base_url。',
+                $capability,
+                $this->protocolLabel(),
+                Capabilities::label($capability),
+                $method
+            ));
+        }
+
+        // 声明支持却没实现解析，属于库自身的实现遗漏，不是用户用错了。
         // 说清楚是哪个协议缺哪个方法，免得排查时怀疑到调用方去
         throw new UnsupportedCapabilityException(sprintf(
             '协议 %s 声明支持「%s」但未实现响应解析，请在该协议类中补上 %s() 方法',
@@ -124,7 +176,7 @@ trait CapabilityDefaults
      */
     protected function guardCapability(string $capability): void
     {
-        if (in_array($capability, $this->capabilities(), true)) {
+        if (in_array($capability, $this->capabilities(), true) || $this->isCapabilityForced($capability)) {
             return;
         }
 

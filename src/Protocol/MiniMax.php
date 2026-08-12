@@ -361,4 +361,17 @@ class MiniMax extends OpenAI
             $url === '' ? '取回文件时没有拿到 download_url，原始响应见 getRaw()' : ''
         );
     }
+
+    /**
+     * MiniMax 视频生成模型（据官方文档，2026-08-12）
+     *
+     * 请求体除 model / prompt 外还有 prompt_optimizer（默认 true）、
+     * duration（默认 6 秒）、resolution（720P/768P/1080P）、callback_url。
+     *
+     * @return array<int, string>
+     */
+    public function knownVideoModels(): array
+    {
+        return ['MiniMax-Hailuo-2.3', 'MiniMax-Hailuo-02', 'T2V-01-Director', 'T2V-01'];
+    }
 }

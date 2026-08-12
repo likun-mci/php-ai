@@ -76,4 +76,21 @@ class Azure extends OpenAI
     {
         return [];
     }
+
+    /**
+     * Azure OpenAI 的能力面随**部署**而定，无法探测
+     *
+     * 端点形如 https://{资源名}.openai.azure.com，每个用户的资源名都不同，
+     * 且能力取决于该资源下部署了哪些模型。因此与本地推理同样保留宽松声明。
+     *
+     * ⚠️ 需要注意 Azure 与 OpenAI 官方的模型可用性**并不一致**：
+     * 例如 dall-e-3 在 Azure 已于 2026-03-04 退役、现有部署不再可用，
+     * 而 OpenAI 官方规范里它仍在。选型时以 Azure 自己的文档为准。
+     *
+     * @return array<string, string>
+     */
+    public function capabilityPathMap(): array
+    {
+        return parent::capabilityPathMap();
+    }
 }

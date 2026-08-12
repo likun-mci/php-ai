@@ -39,4 +39,64 @@ class Llama extends OpenAI
             'Llama-3.3-70B-Instruct'                 => 'Llama 3.3 70B',
         ];
     }
+
+    /**
+     * 本平台没有图像生成接口
+     *
+     * 实测 2026-08-12：带 Authorization 头 POST 该路径返回 404，
+     * 同前缀假路径同样 404、而对话路径返回 401，可确认此路由不存在。
+     * 此前是从 OpenAI 基线继承来的声明，与事实不符。
+     */
+    public function imagePath(): string
+    {
+        return '';
+    }
+
+    /**
+     * 本平台没有图像编辑接口
+     *
+     * 实测 2026-08-12：带 Authorization 头 POST 该路径返回 404，
+     * 同前缀假路径同样 404、而对话路径返回 401，可确认此路由不存在。
+     * 此前是从 OpenAI 基线继承来的声明，与事实不符。
+     */
+    public function imageEditPath(): string
+    {
+        return '';
+    }
+
+    /**
+     * 本平台没有语音合成接口
+     *
+     * 实测 2026-08-12：带 Authorization 头 POST 该路径返回 404，
+     * 同前缀假路径同样 404、而对话路径返回 401，可确认此路由不存在。
+     * 此前是从 OpenAI 基线继承来的声明，与事实不符。
+     */
+    public function ttsPath(): string
+    {
+        return '';
+    }
+
+    /**
+     * 本平台没有语音识别接口
+     *
+     * 实测 2026-08-12：带 Authorization 头 POST 该路径返回 404，
+     * 同前缀假路径同样 404、而对话路径返回 401，可确认此路由不存在。
+     * 此前是从 OpenAI 基线继承来的声明，与事实不符。
+     */
+    public function asrPath(): string
+    {
+        return '';
+    }
+
+    /**
+     * 本平台没有文本向量化接口
+     *
+     * 实测 2026-08-12：带 Authorization 头 POST 该路径返回 404，
+     * 同前缀假路径同样 404、而对话路径返回 401，可确认此路由不存在。
+     * 此前是从 OpenAI 基线继承来的声明，与事实不符。
+     */
+    public function embeddingPath(): string
+    {
+        return '';
+    }
 }

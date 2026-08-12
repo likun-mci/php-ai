@@ -374,6 +374,90 @@ $dsModels = array_keys(proto('deepseek')->knownModels());
 check(in_array('deepseek-v4-pro', $dsModels, true), '  DeepSeek 含官方文档的 deepseek-v4-pro');
 check(in_array('deepseek-chat', $dsModels, true), '  DeepSeek 保留旧别名 deepseek-chat（仍可用）');
 
+// =====================================================================
+echo "\n=== 八、第 4、5 批：海外 / 聚合 / 本地 ===\n\n";
+
+// 探测前先验对话端点是否通——这一步很关键：NVIDIA 连 /v1/chat/completions
+// 都返回 404，说明探测方法对它不可靠，那批 404 结论必须作废，
+// 不能当成「这些能力不存在」。
+$expected = [
+    'mistral'    => ['tts', 'asr', 'embedding'],                  // 有语音没图像
+    'cohere'     => ['asr', 'embedding'],                          // 文档：images 明确不支持
+    'llama'      => [],
+    'perplexity' => [],
+    'cerebras'   => [],
+    'openrouter' => ['image', 'tts', 'asr', 'embedding'],
+    'groq'       => ['tts', 'asr', 'embedding'],                   // Whisper 有，图像没有
+    'together'   => ['image', 'tts', 'asr', 'embedding'],
+    'fireworks'  => ['tts', 'asr', 'embedding'],
+    'deepinfra'  => ['image', 'image_edit', 'tts', 'asr', 'embedding'],
+    'nvidia'     => ['embedding'],                                 // 探测不可靠，仅保留有文档依据的
+];
+foreach ($expected as $key => $want) {
+    $got = proto($key)->capabilities();
+    sort($got);
+    $w = $want;
+    sort($w);
+    check($got === $w, sprintf('  %-11s → %s', $key, $w ? implode(',', $w) : '(仅对话)'),
+          implode(',', $got) ?: '(仅对话)');
+}
+
+check(in_array(Capabilities::ASR, proto('cohere')->capabilities(), true)
+      && !in_array(Capabilities::IMAGE, proto('cohere')->capabilities(), true),
+      '  **Cohere 有 ASR 没图像**（官方文档明确写了不支持 images）');
+check(!in_array(Capabilities::IMAGE, proto('groq')->capabilities(), true)
+      && in_array(Capabilities::ASR, proto('groq')->capabilities(), true),
+      '  Groq 有语音没图像（与常见印象相反，实测为准）');
+check(in_array('cohere-transcribe-03-2026', proto('cohere')->knownAsrModels(), true),
+      '  Cohere ASR 模型据文档登记');
+
+// 本地推理与 Azure：能力取决于用户装了什么 / 部署了什么，刻意保留宽松声明
+foreach (['ollama', 'lmstudio', 'vllm', 'azure'] as $key) {
+    $caps = proto($key)->capabilities();
+    check(count($caps) === 5,
+          sprintf('  %-9s 保留宽松声明（能力由用户的模型/部署决定，库无从判断）', $key),
+          implode(',', $caps));
+}
+
+// =====================================================================
+echo "\n=== 九、审计总体结果 ===\n\n";
+
+$total = 0;
+$chatOnly = [];
+foreach (glob(__DIR__ . '/../src/Protocol/*.php') as $f) {
+    $b = basename($f, '.php');
+    $c = 'Ai\\Protocol\\' . $b;
+    if (!class_exists($c)) {
+        continue;
+    }
+    $p = new $c();
+    $caps = $p->capabilities();
+    $total += count($caps);
+    if (!$caps) {
+        $chatOnly[] = $b;
+    }
+}
+// 审计前：26 个协议各声明 4 项（image/image_edit/tts/asr）+ embedding 广播 + 已查证平台的能力
+check($total > 0, sprintf('全库声明的扩展能力共 %d 项', $total));
+check(count($chatOnly) >= 9,
+      sprintf('仅对话的协议 %d 个：%s', count($chatOnly), implode(', ', $chatOnly)));
+
+// 收回声明后，逃生口必须对每一个被收回的平台都有效
+foreach (['deepseek', 'perplexity', 'cerebras', 'llama'] as $key) {
+    $fake = new FakeTransport();
+    $ai = new AI(['api_key' => 'k', 'model' => 'm', 'protocol' => $key,
+                  'image_endpoint' => 'https://gw.internal/img']);
+    $ai->setTransport($fake);
+    $fake->queuePost(['data' => [['url' => 'https://cdn/x.png']]]);
+    $ok = false;
+    try {
+        $ok = $ai->images()->generate('猫')->getUrls() === ['https://cdn/x.png'];
+    } catch (\Throwable $e) {
+        $ok = false;
+    }
+    check($ok, "  {$key} 被收回后配逃生口仍可用");
+}
+
 echo "\n" . str_repeat('=', 66) . "\n";
 if ($failures) {
     echo count($failures) . " 项未通过：\n";

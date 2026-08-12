@@ -80,7 +80,6 @@ $expectPaths = [
     'ernie'      => '/v2/embeddings',
     'azure'      => '/openai/v1/embeddings',
     'minimax'    => '/v1/embeddings',
-    'perplexity' => '/embeddings',
 ];
 foreach ($expectPaths as $key => $expected) {
     $class = \Ai\Helpers\Protocols::resolveClass($key);
@@ -89,9 +88,13 @@ foreach ($expectPaths as $key => $expected) {
     check($got === $expected, sprintf('  %-11s → %s', $key, $expected), $got);
 }
 
-// DeepSeek 官方文档明确只有 /chat/completions，v1.23.0 起不再声明向量化
-check(!in_array(Capabilities::EMBEDDING, (new \Ai\Protocol\DeepSeek())->capabilities(), true),
-      '  deepseek 不声明向量化（官方文档：只有 /chat/completions）');
+// 平台审计（v1.23.0 / v1.24.0）按实测与官方文档收回了一批向量化声明
+foreach (['deepseek', 'perplexity', 'cerebras', 'llama', 'sensenova'] as $noEmbed) {
+    $cls = \Ai\Helpers\Protocols::resolveClass($noEmbed);
+    $obj = new $cls();
+    check(!in_array(Capabilities::EMBEDDING, $obj->capabilities(), true),
+          "  {$noEmbed} 不声明向量化（实测 404 或官方文档确认）");
+}
 
 // Anthropic 家族没有向量化接口，不能声明支持
 foreach (['claude', 'qwen-anthropic', 'zhipu-anthropic'] as $key) {
@@ -390,5 +393,5 @@ if ($failures) {
     }
     exit(1);
 }
-echo "全部通过：同一套代码可在 35 个平台上做文本向量化\n";
+echo "全部通过：同一套代码可在 31 个平台上做文本向量化（审计后按实测与文档收敛）\n";
 exit(0);

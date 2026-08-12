@@ -56,10 +56,6 @@
         "ext-json": "*",
         "ext-mbstring": "*"
     },
-    "suggest": {
-        "ext-dom": "Ai\\Tools\\WebContent 的 HTML 转换需要，缺失时降级为正则回退",
-        "league/html-to-markdown": "更高质量的 HTML → Markdown 转换，安装后 Ai\\Tools\\WebContent 会自动优先使用"
-    },
     "autoload": {
         "psr-4": {
             "Ai\\": "src/"
@@ -96,5 +92,8 @@
     },
     "require-dev": {
         "phpstan/phpstan": "^1.10"
+    },
+    "suggest": {
+        "ext-openssl": "使用 WebSocket 语音接口（wss://，如讯飞 TTS/ASR）时必需；对话、图像、HTTP 语音等其余能力不需要"
     }
 }

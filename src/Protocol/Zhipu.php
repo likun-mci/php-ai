@@ -57,4 +57,15 @@ class Zhipu extends OpenAI
             'glm-4v-plus' => 'GLM-4V-Plus（视觉）',
         ];
     }
+
+    /**
+     * 智谱已知的图像生成模型（据官方文档，2026-08）
+     *
+     * 注意：智谱的图像接口**没有 n 参数**，一次只生成一张。
+     * @return array<int, string>
+     */
+    public function knownImageModels(): array
+    {
+        return ['glm-image', 'cogview-4-250304', 'cogview-4', 'cogview-3-flash'];
+    }
 }

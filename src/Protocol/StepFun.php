@@ -37,4 +37,13 @@ class StepFun extends OpenAI
             'step-1v-8k'  => 'Step-1V 8K（视觉）',
         ];
     }
+
+    /**
+     * 阶跃星辰已知的图像生成模型（据官方文档，2026-08）
+     * @return array<int, string>
+     */
+    public function knownImageModels(): array
+    {
+        return ['step-1x-medium'];
+    }
 }

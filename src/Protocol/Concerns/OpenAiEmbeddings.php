@@ -33,23 +33,6 @@ trait OpenAiEmbeddings
     }
 
     /**
-     * 把对话路径的动作后缀换成另一个动作，得到同级路径
-     *
-     * @return string 推导不出时返回空串
-     */
-    protected function siblingCapabilityPath(string $action): string
-    {
-        $chat   = $this->chatPath();
-        $suffix = '/chat/completions';
-        $len    = strlen($suffix);
-
-        if (strlen($chat) < $len || substr($chat, -$len) !== $suffix) {
-            return '';
-        }
-        return substr($chat, 0, -$len) . '/' . $action;
-    }
-
-    /**
      * 单次请求可提交的最大文本条数，0 表示不限制、不分批
      *
      * 各平台上限差异很大（OpenAI 上千条，部分国产平台只有一二十条），

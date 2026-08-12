@@ -41,4 +41,47 @@ class SiliconFlow extends OpenAI
             'zai-org/GLM-4.6'               => 'GLM-4.6',
         ];
     }
+
+    /**
+     * 硅基流动已知的图像生成模型（据官方文档，2026-08）
+     * @return array<int, string>
+     */
+    public function knownImageModels(): array
+    {
+        return [
+            'Kwai-Kolors/Kolors',
+            'Qwen/Qwen-Image-Edit',
+            'Qwen/Qwen-Image-Edit-2509',
+        ];
+    }
+
+    /**
+     * 硅基流动的图像参数名与 OpenAI 不同
+     *
+     * 据官方文档（2026-08）：尺寸叫 image_size，张数叫 batch_size（仅 Kolors 支持，1-4），
+     * 另有 negative_prompt / seed / num_inference_steps / guidance_scale。
+     *
+     * 这里把库内统一的 size / n 映射过去，让调用方在各平台间用同一套写法；
+     * 平台私有参数（seed 等）原样透传，不做映射。
+     *
+     * @param array<string, mixed> $payload
+     * @return array<string, mixed>
+     */
+    public function buildImageRequest(array $payload): array
+    {
+        if (isset($payload['size']) && !isset($payload['image_size'])) {
+            $payload['image_size'] = $payload['size'];
+        }
+        unset($payload['size']);
+
+        if (isset($payload['n']) && !isset($payload['batch_size'])) {
+            $payload['batch_size'] = (int) $payload['n'];
+        }
+        unset($payload['n']);
+
+        // 该平台不认这个参数，留着会被判为非法字段
+        unset($payload['response_format']);
+
+        return $payload;
+    }
 }

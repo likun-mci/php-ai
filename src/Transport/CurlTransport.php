@@ -760,6 +760,19 @@ class CurlTransport implements TransportInterface
             );
         }
 
+        // 与 post() 一致：只有明确属于二进制媒体时才跳过 json_decode 并原样带回字节。
+        // GET 也需要这条路径——异步任务取结果时，部分平台（如 Gemini 的
+        // /videos/{id}/content）直接回视频字节而不是一个下载地址，
+        // 少了这里就会被 json_decode 成空数组，表现为「任务成功但没有内容」
+        $respType = (string) ($this->lastInfo['content_type'] ?? '');
+        if (is_string($response) && Media::isBinaryContentType($respType)) {
+            return [
+                '_raw'          => $response,
+                '_content_type' => $respType,
+                '_status'       => (int) $httpCode,
+            ];
+        }
+
         // curl_exec() 未开 RETURNTRANSFER 时会返回 true；本类始终开启，
         // 但静态类型仍是 string|bool，取值前显式收窄，避免把 bool 喂给 json_decode()
         $decoded = is_string($response) ? json_decode($response, true) : null;

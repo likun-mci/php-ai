@@ -158,4 +158,18 @@ class Zhipu extends OpenAI
 
         return ['status' => $status, 'error' => $error, 'result' => $result];
     }
+
+    /**
+     * 智谱语音识别模型（据官方文档，2026-08-12）
+     *
+     * 端点 /api/paas/v4/audio/transcriptions，multipart 上传，
+     * 音频限 .wav/.mp3、≤25MB、≤30 秒；响应 {id, created, request_id, model, text}。
+     * 另支持 hotwords 热词表（最多 100 项）提升特定领域识别率。
+     *
+     * @return array<int, string>
+     */
+    public function knownAsrModels(): array
+    {
+        return ['glm-asr-2512'];
+    }
 }

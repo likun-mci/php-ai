@@ -1866,6 +1866,8 @@ $paths = $img->saveTo('/var/www/uploads', 'cat');
 | 平台 | 模型 |
 |------|------|
 | OpenAI | `gpt-image-1.5`、`gpt-image-1`、`gpt-image-1-mini`、`dall-e-3`、`dall-e-2` |
+| **Gemini** | `gemini-3.1-flash-image`、`gemini-3.1-flash-lite-image`、`gemini-3-pro-image`、`gemini-2.5-flash-image` |
+| **讯飞星火** | 走独立的 TTI 接口（`maas-api.cn-huabei-1.xf-yun.com/v2.1/tti`），需 `app_id` |
 | 智谱 | `glm-image`、`cogview-4-250304`、`cogview-4`、`cogview-3-flash` |
 | xAI | `grok-imagine-image-quality`、`grok-imagine-image-2.0` |
 | 硅基流动 | `Kwai-Kolors/Kolors`、`Qwen/Qwen-Image-Edit`、`Qwen/Qwen-Image-Edit-2509` |

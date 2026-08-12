@@ -58,17 +58,6 @@ class Doubao extends OpenAI
     }
 
     /**
-     * 火山方舟已知的图像生成模型（据官方文档，2026-08）
-     * @return array<int, string>
-     */
-    public function knownImageModels(): array
-    {
-        return [
-            'doubao-seedream-4-0-250828',
-        ];
-    }
-
-    /**
      * 方舟的 response_format 取值是 "base64"，不是 OpenAI 的 "b64_json"
      *
      * 据官方文档（2026-08）：response_format 取 url / base64，另有
@@ -175,5 +164,22 @@ class Doubao extends OpenAI
         }
 
         return ['status' => $status, 'error' => $error, 'result' => $result];
+    }
+
+    /**
+     * 火山方舟图片生成模型（据官方文档，2026-08-12）
+     *
+     * 只有 4.0 / 4.5 / 5.0-lite 支持一次生成多张（参考图 + 生成图 ≤ 15 张）。
+     *
+     * @return array<int, string>
+     */
+    public function knownImageModels(): array
+    {
+        return [
+            'doubao-seedream-5.0-lite',
+            'doubao-seedream-4.5',
+            'doubao-seedream-4.0',
+            'doubao-seedream-3.0-t2i',
+        ];
     }
 }

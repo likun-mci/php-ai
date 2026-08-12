@@ -149,7 +149,7 @@ $req = $fake->lastRequest();
 check($req['data']['aspect_ratio'] === '3:2', 'xAI：用户显式传 aspect_ratio 时不被覆盖');
 
 // 豆包：response_format 取值不同
-list($ai, $fake) = makeAI('doubao', 'doubao-seedream-4-0-250828');
+list($ai, $fake) = makeAI('doubao', 'doubao-seedream-4.0');
 $fake->queuePost(['data' => [['url' => 'https://x/a.png']]]);
 $ai->images()->generate('一只猫', ['response_format' => 'b64_json']);
 $req = $fake->lastRequest();
@@ -206,7 +206,7 @@ check($res->getUrls() === ['https://sf/a.png'], '硅基流动：images[] 容器�
       json_encode($res->getUrls()));
 
 // 豆包：base64 字段名
-list($ai, $fake) = makeAI('doubao', 'doubao-seedream-4-0-250828');
+list($ai, $fake) = makeAI('doubao', 'doubao-seedream-4.0');
 $fake->queuePost(['data' => [['base64' => tinyPngBase64()]]]);
 $res = $ai->images()->generate('猫');
 check(count($res->getBase64()) === 1, '豆包：base64 字段名也能解析');
@@ -280,7 +280,7 @@ $models = [
     'grok'        => 'grok-imagine-image-quality',
     'siliconflow' => 'Kwai-Kolors/Kolors',
     'stepfun'     => 'step-1x-medium',
-    'doubao'      => 'doubao-seedream-4-0-250828',
+    'doubao'      => 'doubao-seedream-4.0',   // 审计后按官方文档更正（原为带日期的版本号）
 ];
 foreach ($models as $key => $expectModel) {
     $class = \Ai\Helpers\Protocols::resolveClass($key);

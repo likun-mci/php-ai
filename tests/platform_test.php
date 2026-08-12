@@ -315,6 +315,65 @@ foreach (['deepseek', 'moonshot', 'groq'] as $key) {
           "  {$key} 不继承 OpenAI 的模型清单");
 }
 
+// =====================================================================
+echo "\n=== 七、第 3 批：国内平台能力更正 ===\n\n";
+
+// 更正前，这 11 个协议一共多声明了 26 项不存在的能力——全是从 OpenAI 基线
+// 继承来的。业务层用 capabilities() 渲染功能开关时，会点亮一堆点下去就 404
+// 的按钮。下面每一条都有实测或官方文档依据。
+//
+// 探测方法：带 Authorization 头 POST 真实路径 + 同前缀假路径作对照；
+// 只有「假路径 404 且真实路径非 404」才算证实。
+
+$expected = [
+    // 平台          => 应当声明的能力（其余一律不声明）
+    'deepseek'   => [],                                            // 官方文档：只有 /chat/completions
+    'moonshot'   => ['image', 'embedding'],
+    'ernie'      => ['image', 'image_edit', 'embedding'],
+    'hunyuan'    => ['embedding'],
+    'sensenova'  => [],                                            // 连 embeddings 都是 404
+    'yi'         => ['image', 'embedding'],
+    'baichuan'   => ['asr', 'embedding'],                          // 有 ASR 没 TTS
+    'zhinao'     => ['image', 'image_edit', 'tts', 'embedding'],   // 有 TTS 没 ASR
+    'modelscope' => ['image', 'embedding'],
+    'modelarts'  => ['image', 'embedding'],
+    'zai'        => ['image', 'video', 'embedding'],               // 文档：图像 + 视频
+];
+foreach ($expected as $key => $want) {
+    $got = proto($key)->capabilities();
+    sort($got);
+    $w = $want;
+    sort($w);
+    check($got === $w, sprintf('  %-11s → %s', $key, $w ? implode(',', $w) : '(仅对话)'),
+          implode(',', $got) ?: '(仅对话)');
+}
+
+// 几条值得单独盯住的结论
+check(!in_array(Capabilities::EMBEDDING, proto('deepseek')->capabilities(), true),
+      '  **DeepSeek 连向量化都不声明**（官方文档：只有 /chat/completions）');
+check(!in_array(Capabilities::EMBEDDING, proto('sensenova')->capabilities(), true),
+      '  **商汤连 embeddings 都是 404**（实测，路由优先可判定）');
+check(in_array(Capabilities::ASR, proto('baichuan')->capabilities(), true)
+      && !in_array(Capabilities::TTS, proto('baichuan')->capabilities(), true),
+      '  百川有 ASR 没 TTS（不是对称的，别想当然）');
+check(in_array(Capabilities::TTS, proto('zhinao')->capabilities(), true)
+      && !in_array(Capabilities::ASR, proto('zhinao')->capabilities(), true),
+      '  360 智脑有 TTS 没 ASR（同样不对称）');
+
+// 被收回声明的平台，配了逃生口仍然能用
+$fake = new FakeTransport();
+$ai = new AI(['api_key' => 'k', 'model' => 'deepseek-chat', 'protocol' => 'deepseek',
+              'image_endpoint' => 'https://my-gw.com/v1/images/generations']);
+$ai->setTransport($fake);
+$fake->queuePost(['data' => [['url' => 'https://cdn/x.png']]]);
+check($ai->images()->generate('猫')->getUrls() === ['https://cdn/x.png'],
+      '  **被收回声明的平台配逃生口后仍可用**（这是收回声明的前提）');
+
+// DeepSeek 模型清单按文档更新，旧别名保留
+$dsModels = array_keys(proto('deepseek')->knownModels());
+check(in_array('deepseek-v4-pro', $dsModels, true), '  DeepSeek 含官方文档的 deepseek-v4-pro');
+check(in_array('deepseek-chat', $dsModels, true), '  DeepSeek 保留旧别名 deepseek-chat（仍可用）');
+
 echo "\n" . str_repeat('=', 66) . "\n";
 if ($failures) {
     echo count($failures) . " 项未通过：\n";
@@ -323,5 +382,5 @@ if ($failures) {
     }
     exit(1);
 }
-echo "全部通过：第 1 批平台的能力声明与模型清单已与官方文档对齐\n";
+echo "全部通过：各平台能力声明与模型清单已与实测和官方文档对齐\n";
 exit(0);

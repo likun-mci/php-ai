@@ -73,7 +73,6 @@ echo "=== 一、能力声明与路径推导 ===\n\n";
 
 $expectPaths = [
     'openai'     => '/v1/embeddings',
-    'deepseek'   => '/v1/embeddings',
     'qwen'       => '/v1/embeddings',
     'zhipu'      => '/v4/embeddings',
     'doubao'     => '/api/v3/embeddings',
@@ -89,6 +88,10 @@ foreach ($expectPaths as $key => $expected) {
     $got = $p->capabilityPath(Capabilities::EMBEDDING);
     check($got === $expected, sprintf('  %-11s → %s', $key, $expected), $got);
 }
+
+// DeepSeek 官方文档明确只有 /chat/completions，v1.23.0 起不再声明向量化
+check(!in_array(Capabilities::EMBEDDING, (new \Ai\Protocol\DeepSeek())->capabilities(), true),
+      '  deepseek 不声明向量化（官方文档：只有 /chat/completions）');
 
 // Anthropic 家族没有向量化接口，不能声明支持
 foreach (['claude', 'qwen-anthropic', 'zhipu-anthropic'] as $key) {
@@ -336,7 +339,7 @@ try {
 echo "\n=== 六、跨平台一致性 ===\n\n";
 
 // 同一套调用代码，在不同协议上应产出结构一致的请求
-$platforms = ['openai', 'deepseek', 'qwen', 'zhipu', 'doubao', 'moonshot', 'siliconflow', 'gemini', 'minimax'];
+$platforms = ['openai', 'qwen', 'zhipu', 'doubao', 'moonshot', 'siliconflow', 'gemini', 'minimax'];
 $shapes = [];
 foreach ($platforms as $key) {
     list($ai, $fake) = makeAI($key, 'embed-model');

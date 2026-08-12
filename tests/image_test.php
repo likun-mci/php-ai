@@ -332,10 +332,13 @@ try {
           $e->getMessage());
 }
 
-// 说明宽松声明策略：OpenAI 兼容协议会继承基线声明，是否真开通以平台为准。
-// DeepSeek 就属于这类——库不挡它，平台自己返回 404
-check((new \Ai\Protocol\DeepSeek())->capabilityPath(Capabilities::IMAGE_EDIT) === '/v1/images/edits',
-      'OpenAI 兼容协议继承编辑路径（是否真开通以平台为准）');
+// 声明策略在 v1.23.0 的平台审计中改成了「查证优先」：
+// DeepSeek 官方文档明确只有 /chat/completions，故不再继承任何扩展能力声明。
+// 确知可用时仍可用 image_edit_endpoint 逃生口绕过
+check((new \Ai\Protocol\DeepSeek())->capabilityPath(Capabilities::IMAGE_EDIT) === '',
+      'DeepSeek 不再继承编辑路径（官方文档确认无此接口）');
+check((new \Ai\Protocol\Moonshot())->capabilityPath(Capabilities::IMAGE) === '/v1/images/generations',
+      '月之暗面保留图像声明（实测存在：401 vs 假路径 404）');
 
 // =====================================================================
 echo "\n=== 八、异步文生图（通义万相）===\n\n";

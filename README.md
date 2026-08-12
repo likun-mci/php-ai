@@ -1713,14 +1713,18 @@ php-ai/
 
 ## 扩展能力：图像 / 语音 / 视频 / 向量
 
-> **v1.14.0 交付的是骨架，不是能力本身。**
-> 这一版把入口、响应对象、异步任务、传输层的二进制与表单支持都铺好了，
-> 但**还没有任何平台声明支持这些能力**——调用它们会抛
-> `UnsupportedCapabilityException` 并说明原因，不会静默返回空结果。
-> 各能力按 v1.15.0（向量）→ v1.16.0（文生图）→ v1.17.0（语音）
-> → v1.18.0（WebSocket）→ v1.19.0（视频）逐版交付。
+> **当前进度：向量化已可用（v1.15.0），其余能力仍是骨架。**
 >
-> 对话（`chat()`）功能完全不受影响，本版对已有接口没有任何行为改动。
+> | 能力 | 状态 |
+> |------|------|
+> | 文本向量化 `embeddings()` | ✅ 35 个平台可用 |
+> | 图像生成 `images()` | ⏳ 计划 v1.16.0 |
+> | 语音 `audio()` | ⏳ 计划 v1.17.0 |
+> | WebSocket `realtime()` | ⏳ 计划 v1.18.0 |
+> | 视频生成 `video()` | ⏳ 计划 v1.19.0 |
+>
+> 未交付的能力调用时会抛 `UnsupportedCapabilityException` 并说明原因，
+> 不会静默返回空结果。对话（`chat()`）功能完全不受影响。
 
 ### 入口
 
@@ -1755,6 +1759,66 @@ $ai->capabilities();   // 当前模型支持的能力清单，如 ['embedding', 
 ```
 当前模型使用的协议不支持「图像生成」能力。本协议目前只支持对话（chat）
 ```
+
+### 文本向量化（已可用）
+
+```php
+$ai = new AI(['api_key' => '...', 'model' => 'text-embedding-3-small']);
+
+// 单条
+$vec = $ai->embeddings()->create('这是一段文本')->getVector(0);
+
+// 批量：返回顺序**始终**与输入顺序一致
+$res = $ai->embeddings()->create(['第一段', '第二段', '第三段']);
+$res->getVectors();      // [[...], [...], [...]]
+$res->getVector(1);      // 第二段的向量
+$res->getDimensions();   // 1536
+count($res);             // 3
+$res->getUsage();        // ['prompt_tokens' => .., 'total_tokens' => ..]
+```
+
+**顺序一致是有代价换来的**：多数平台不保证响应里 `data` 数组的顺序与输入一致，
+库会按每条返回的 `index` 归位。这类错位不会报任何错，只会让后续检索莫名其妙地不准。
+
+#### 平台参数直接透传
+
+```php
+$ai->embeddings()->create($texts, [
+    'dimensions'      => 512,      // OpenAI text-embedding-3-* 支持降维
+    'encoding_format' => 'base64', // 返回 base64 时库会自动解回 float 数组
+]);
+```
+
+只归一 `model` / `input` 两个字段，其余原样透传给平台。
+`dimensions` 这类参数各平台支持度不同，以对方文档为准——库不替你猜，
+不支持的平台会直接返回它自己的错误信息。
+
+#### 超长批量自动分批
+
+各平台单次可提交的条数上限不同（OpenAI 上千条，部分平台只有一二十条），
+且官方文档未必写明。默认**不分批**（一次发完，不无谓拆分请求），
+需要时用 `batch_size` 指定：
+
+```php
+$res = $ai->embeddings()->create($tenThousandTexts, ['batch_size' => 25]);
+// 自动分成 400 个请求，结果按原顺序合并，usage 逐批累加
+```
+
+分批时若某一批返回的向量数与提交的文本数对不上，会**当场抛异常**而不是继续——
+数量对不上意味着后面所有下标都会错位，静默继续比失败危险得多。
+
+#### 支持情况
+
+35 个协议声明支持向量化，路径由各自的对话路径同级推导
+（`/v1/chat/completions` → `/v1/embeddings`，`/v4/chat/completions` → `/v4/embeddings`），
+所以带前缀的网关、Azure、Gemini 兼容端点都自动正确。
+
+Anthropic Messages 协议家族（`claude` / `qwen-anthropic` / `zhipu-anthropic` /
+`moonshot-anthropic` / `deepseek-anthropic`）**不支持**——Anthropic 没有向量化接口。
+用这些协议调用会得到明确报错。
+
+> 库声明「支持」指的是该协议的接口形态与路径已适配。某个具体平台是否真的开通了
+> 这个接口，以对方文档为准；未开通时你会收到该平台自己的 404，而不是库的猜测。
 
 ### 异步任务：视频生成不要阻塞等待
 
@@ -1854,7 +1918,8 @@ class MyProtocol implements ProtocolInterface
 - `chatBatch()` 并发批量不支持流式，也不走 `setAttachments()`（附件请写在各自 payload 里）；
 - `cost()` 需自行传入价格表，库不内置各平台价格（价格变动频繁，内置必然过期）；
 - `Ai\Cli\ClaudeCode` 依赖本机已安装 claude 程序；`proc_open` / `shell_exec` 被禁用的受限 PHP 环境需改用自定义执行器（如 SSH/SFTP）。
-- 图像 / 语音 / 视频 / 向量能力目前**只有骨架**：入口、响应对象、异步任务与传输层支持已就位，但尚无平台声明支持，调用会抛 `UnsupportedCapabilityException`。各能力按 v1.15.0 起逐版交付；
+- 图像 / 语音 / 视频能力目前**只有骨架**：入口、响应对象、异步任务与传输层支持已就位，但尚无平台声明支持，调用会抛 `UnsupportedCapabilityException`。按 v1.16.0（图像）→ v1.17.0（语音）→ v1.18.0（WebSocket）→ v1.19.0（视频）逐版交付；
+- 向量化默认不分批，超出平台单次上限时需自行传 `batch_size`——各平台上限差异大且文档未必写明，库不预设一个「保险的小值」，那会让本可一次发完的平台白白多发几十个请求；
 - WebSocket 通道（讯飞语音）计划在 v1.18.0 交付，当前调用 `realtime()->useWebSocket()` 后会明确提示尚未实现；
 - 视频生成一律异步，`AsyncTask::wait()` 会阻塞，不可在 Web 请求中使用；跨请求恢复需自行把 `toArray()` 的结果落库。
 

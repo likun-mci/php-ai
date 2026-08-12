@@ -1713,12 +1713,12 @@ php-ai/
 
 ## 扩展能力：图像 / 语音 / 视频 / 向量
 
-> **当前进度：向量化已可用（v1.15.0），其余能力仍是骨架。**
+> **当前进度**
 >
 > | 能力 | 状态 |
 > |------|------|
-> | 文本向量化 `embeddings()` | ✅ 35 个平台可用 |
-> | 图像生成 `images()` | ⏳ 计划 v1.16.0 |
+> | 文本向量化 `embeddings()` | ✅ v1.15.0，35 个平台 |
+> | 图像生成 `images()` | ✅ v1.16.0，6 个平台字段已归一 |
 > | 语音 `audio()` | ⏳ 计划 v1.17.0 |
 > | WebSocket `realtime()` | ⏳ 计划 v1.18.0 |
 > | 视频生成 `video()` | ⏳ 计划 v1.19.0 |
@@ -1820,6 +1820,69 @@ Anthropic Messages 协议家族（`claude` / `qwen-anthropic` / `zhipu-anthropic
 > 库声明「支持」指的是该协议的接口形态与路径已适配。某个具体平台是否真的开通了
 > 这个接口，以对方文档为准；未开通时你会收到该平台自己的 404，而不是库的猜测。
 
+### 图像生成（已可用）
+
+```php
+$ai = new AI(['api_key' => '...', 'model' => 'gpt-image-1']);
+
+$img = $ai->images()->generate('一只在看书的猫', ['size' => '1024x1024', 'n' => 2]);
+
+$img->getUrls();            // ['https://...', 'https://...']
+$img->getBase64();          // 平台返回 base64 时在这里
+$img->getRevisedPrompt();   // 部分平台会改写提示词，原样回传
+count($img);                // 2
+
+// ⚠️ 及时落地：各平台的图片 URL 都有有效期
+$paths = $img->saveTo('/var/www/uploads', 'cat');
+// ['/var/www/uploads/cat_1.png', '/var/www/uploads/cat_2.png']
+```
+
+**URL 有效期是这里最容易踩的坑**：万相约 24 小时、硅基流动**只有 1 小时**。
+把 URL 存进数据库，用户过一阵回来看就全是坏图。要长期保留必须调 `saveTo()` 落盘。
+
+`saveTo()` 的目录**必须已存在**，不会自动创建——多模态接口常在循环里落盘，
+路径拼错时自动 `mkdir` 会在磁盘上散落一堆空目录，等发现时已经很难收拾。
+下载走库内的 `HttpFetch`（带完整 SSRF 防护），不是裸 `file_get_contents()`。
+
+#### 各平台字段差异已归一
+
+图像接口远没有对话那么统一。下面这些差异（据各平台官方文档 2026-08 核对）
+库内已经处理掉，**调用方在所有平台上写法一致**：
+
+| 平台 | 实际字段 | 你仍然写 |
+|------|---------|---------|
+| 硅基流动 | `image_size` / `batch_size`，响应是 `images[]` | `size` / `n` |
+| xAI | `aspect_ratio` + `resolution`，没有 `size` | `size`（自动换算成最接近的比例档） |
+| 火山方舟（豆包） | `response_format: "base64"` | `response_format: "b64_json"` |
+| OpenAI `gpt-image-*` | 只返回 `b64_json`，不支持 `url` | 取 `getUrls()` 或 `getBase64()` 都行 |
+
+平台私有参数（`seed`、`guidance_scale`、`watermark`、`negative_prompt` 等）原样透传，
+不做映射——把所有平台的所有参数都归一，归一层会厚到没法维护。
+
+#### 支持的平台与模型
+
+模型清单**据各平台官方文档**登记（不是靠端点探测猜的）：
+
+| 平台 | 模型 |
+|------|------|
+| OpenAI | `gpt-image-1.5`、`gpt-image-1`、`gpt-image-1-mini`、`dall-e-3`、`dall-e-2` |
+| 智谱 | `glm-image`、`cogview-4-250304`、`cogview-4`、`cogview-3-flash` |
+| xAI | `grok-imagine-image-quality`、`grok-imagine-image-2.0` |
+| 硅基流动 | `Kwai-Kolors/Kolors`、`Qwen/Qwen-Image-Edit`、`Qwen/Qwen-Image-Edit-2509` |
+| 阶跃星辰 | `step-1x-medium` |
+| 火山方舟（豆包） | `doubao-seedream-4-0-250828` |
+
+```php
+$ai->images();  // 子门面
+(new \Ai\Protocol\Zhipu())->knownImageModels();   // 取某协议的图像模型清单
+```
+
+**通义（qwen）暂不支持**：其 OpenAI 兼容模式没有同步文生图接口（实测 404），
+万相走的是异步任务接口，安排在 v1.19.0 那一期。现在调用会得到明确报错。
+
+其余 OpenAI 兼容协议会继承基线声明。是否真的开通以对方文档为准——
+未开通时你会收到该平台自己的 404，而不是库的猜测。
+
 ### 异步任务：视频生成不要阻塞等待
 
 视频接口全都是「提交 → 轮询 → 取结果」三段式，一次生成动辄几分钟。
@@ -1918,7 +1981,8 @@ class MyProtocol implements ProtocolInterface
 - `chatBatch()` 并发批量不支持流式，也不走 `setAttachments()`（附件请写在各自 payload 里）；
 - `cost()` 需自行传入价格表，库不内置各平台价格（价格变动频繁，内置必然过期）；
 - `Ai\Cli\ClaudeCode` 依赖本机已安装 claude 程序；`proc_open` / `shell_exec` 被禁用的受限 PHP 环境需改用自定义执行器（如 SSH/SFTP）。
-- 图像 / 语音 / 视频能力目前**只有骨架**：入口、响应对象、异步任务与传输层支持已就位，但尚无平台声明支持，调用会抛 `UnsupportedCapabilityException`。按 v1.16.0（图像）→ v1.17.0（语音）→ v1.18.0（WebSocket）→ v1.19.0（视频）逐版交付；
+- 语音 / 视频能力目前**只有骨架**：入口、响应对象、异步任务与传输层支持已就位，但尚无平台声明支持，调用会抛 `UnsupportedCapabilityException`。按 v1.17.0（语音）→ v1.18.0（WebSocket）→ v1.19.0（视频）逐版交付；
+- 图像生成只支持**同步返回**的平台；通义万相等异步任务式的文生图要等 v1.19.0 的异步任务能力落地；
 - 向量化默认不分批，超出平台单次上限时需自行传 `batch_size`——各平台上限差异大且文档未必写明，库不预设一个「保险的小值」，那会让本可一次发完的平台白白多发几十个请求；
 - WebSocket 通道（讯飞语音）计划在 v1.18.0 交付，当前调用 `realtime()->useWebSocket()` 后会明确提示尚未实现；
 - 视频生成一律异步，`AsyncTask::wait()` 会阻塞，不可在 Web 请求中使用；跨请求恢复需自行把 `toArray()` 的结果落库。

@@ -142,6 +142,32 @@ trait CapabilityDefaults
     }
 
     /**
+     * 把对话路径的动作后缀换成另一个动作，得到同级路径
+     *
+     * /v1/chat/completions      + 'embeddings'        → /v1/embeddings
+     * /api/v3/chat/completions  + 'images/generations' → /api/v3/images/generations
+     *
+     * 各能力的路径都靠它从对话路径推出来，于是带前缀的网关、Azure、
+     * 各家自定的版本号前缀全都自动正确，不必 40 个协议类各写一遍。
+     *
+     * @return string 对话路径不是标准 .../chat/completions 形态时推不出来，返回空串
+     */
+    protected function siblingCapabilityPath(string $action): string
+    {
+        if (!method_exists($this, 'chatPath')) {
+            return '';
+        }
+        $chat   = $this->chatPath();
+        $suffix = '/chat/completions';
+        $len    = strlen($suffix);
+
+        if (strlen($chat) < $len || substr($chat, -$len) !== $suffix) {
+            return '';
+        }
+        return substr($chat, 0, -$len) . '/' . $action;
+    }
+
+    /**
      * 协议在错误信息里的显示名，优先用注册表里的短标识（如 qwen），拿不到就用类名
      */
     protected function protocolLabel(): string

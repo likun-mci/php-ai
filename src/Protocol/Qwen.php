@@ -43,4 +43,21 @@ class Qwen extends OpenAI
             'qwen-vl-max' => '通义千问 VL Max（视觉）',
         ];
     }
+
+    /**
+     * 通义不提供 OpenAI 兼容格式的同步文生图
+     *
+     * 实测 2026-08：POST {dashscope}/compatible-mode/v1/images/generations 返回 404，
+     * 而同前缀下的假路径也返回 404（该网关是路由优先），可以确认此路由确实不存在。
+     *
+     * 通义万相走的是原生**异步任务**接口
+     * （/api/v1/services/aigc/text2image/image-synthesis，提交后轮询 task_id），
+     * 形态与同步接口完全不同，安排在异步任务那一期实现。
+     *
+     * 返回空串即表示本协议不声明图像能力，调用方会得到明确报错而不是 404。
+     */
+    public function imagePath(): string
+    {
+        return '';
+    }
 }

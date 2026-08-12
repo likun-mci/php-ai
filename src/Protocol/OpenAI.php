@@ -12,6 +12,7 @@ class OpenAI implements ProtocolInterface
 {
     use \Ai\Protocol\Concerns\CapabilityDefaults;
     use \Ai\Protocol\Concerns\OpenAiEmbeddings;
+    use \Ai\Protocol\Concerns\OpenAiImages;
 
     use ModelCatalog;
 
@@ -368,5 +369,30 @@ class OpenAI implements ProtocolInterface
             \Ai\Helpers\Log::warning('拉取模型列表失败', ['protocol' => static::class, 'error' => $e->getMessage()]);
             return $this->fallbackModels($config);
         }
+    }
+
+    /**
+     * OpenAI 图像生成模型（据官方 OpenAPI 规范，2026-08）
+     *
+     * 注意 gpt-image-* 系列**不支持 url 返回**，只会给 b64_json；
+     * dall-e-* 两种都支持。
+     *
+     * 只在协议是 OpenAI 本身时返回，子类（各厂商）各自覆写——
+     * 否则会把 OpenAI 的模型名报给别家平台，是比空清单更糟的错误信息。
+     *
+     * @return array<int, string>
+     */
+    public function knownImageModels(): array
+    {
+        if (get_class($this) !== self::class) {
+            return [];
+        }
+        return [
+            'gpt-image-1.5',
+            'gpt-image-1',
+            'gpt-image-1-mini',
+            'dall-e-3',
+            'dall-e-2',
+        ];
     }
 }

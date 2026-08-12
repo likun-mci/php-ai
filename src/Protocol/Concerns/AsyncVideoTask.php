@@ -13,6 +13,20 @@ use Ai\Helpers\Endpoint;
 trait AsyncVideoTask
 {
     /**
+     * 本协议已登记的视频生成模型
+     *
+     * 一律以各平台官方文档为准。查不到时**返回空数组而不是凭印象填**——
+     * 空清单会让调用方回退到平台自己的模型列表接口，错清单则会让用户
+     * 拿着一个不存在的模型名去调，还以为是自己配错了。
+     *
+     * @return array<int, string>
+     */
+    public function knownVideoModels(): array
+    {
+        return [];
+    }
+
+    /**
      * 取提交端点的同源前缀，用于拼查询地址
      *
      * 必须由**实际提交端点**推导，不能写死官方域名——用户把 base_url

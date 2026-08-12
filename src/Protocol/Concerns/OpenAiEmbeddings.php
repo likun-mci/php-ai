@@ -33,6 +33,19 @@ trait OpenAiEmbeddings
     }
 
     /**
+     * 本协议已登记的向量化模型（据官方文档）
+     *
+     * 审计时发现的空白：向量能力从 v1.15.0 起就支持 35 个平台，
+     * 却一个模型清单都没有——用户在后台下拉框里选不到，只能手打模型名。
+     *
+     * @return array<int, string>
+     */
+    public function knownEmbeddingModels(): array
+    {
+        return [];
+    }
+
+    /**
      * 单次请求可提交的最大文本条数，0 表示不限制、不分批
      *
      * 各平台上限差异很大（OpenAI 上千条，部分国产平台只有一二十条），

@@ -93,6 +93,22 @@ trait XfyunRealtime
 
         list($apiKey, $apiSecret) = $this->splitXfyunKey($config);
 
+        return $this->xfyunSignedUrl($base, 'GET', $apiKey, $apiSecret);
+    }
+
+    /**
+     * 给讯飞的地址加上签名查询串
+     *
+     * WebSocket 与 HTTP 两套接口用的是**同一套签名规则**，只有请求行里的
+     * 方法不同（WS 握手是 GET，图片生成是 POST）。抽出来共用，
+     * 免得两处各写一遍、改一处漏一处。
+     *
+     * @param string $base      不带查询串的完整地址
+     * @param string $method    请求行里的方法，GET 或 POST
+     * @throws RealtimeException 地址无法解析
+     */
+    protected function xfyunSignedUrl(string $base, string $method, string $apiKey, string $apiSecret): string
+    {
         $parts = parse_url($base);
         $host  = isset($parts['host']) ? $parts['host'] : '';
         $path  = isset($parts['path']) ? $parts['path'] : '/';
@@ -100,10 +116,10 @@ trait XfyunRealtime
             throw new RealtimeException("无法解析讯飞地址：{$base}", '', 'xfyun_bad_endpoint', []);
         }
 
-        // RFC1123 GMT。签名有时效，每次连接都要重算，缓存 URL 会导致鉴权失败
+        // RFC1123 GMT。签名有时效，每次请求都要重算，缓存 URL 会导致鉴权失败
         $date = gmdate('D, d M Y H:i:s') . ' GMT';
 
-        $signatureOrigin = "host: {$host}\ndate: {$date}\nGET {$path} HTTP/1.1";
+        $signatureOrigin = "host: {$host}\ndate: {$date}\n{$method} {$path} HTTP/1.1";
         $signature       = base64_encode(hash_hmac('sha256', $signatureOrigin, $apiSecret, true));
 
         $authorizationOrigin = sprintf(

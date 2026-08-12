@@ -12,6 +12,8 @@ class Gemini implements ProtocolInterface
 {
     use \Ai\Protocol\Concerns\CapabilityDefaults;
     use \Ai\Protocol\Concerns\OpenAiEmbeddings;
+    use \Ai\Protocol\Concerns\OpenAiImages;
+    use \Ai\Protocol\Concerns\AsyncVideoTask;
 
     use ModelCatalog;
 
@@ -331,11 +333,17 @@ class Gemini implements ProtocolInterface
      */
     public function knownModels(): array
     {
+        // 据官方模型文档核对，2026-08-12。
+        // 移除了 gemini-2.0-flash —— 它**已经关闭**，留在清单里等于让用户
+        // 拿一个不存在的模型名去调，还以为是自己配错了
         return [
-            'gemini-2.5-pro'        => 'Gemini 2.5 Pro',
-            'gemini-2.5-flash'      => 'Gemini 2.5 Flash',
-            'gemini-2.5-flash-lite' => 'Gemini 2.5 Flash Lite',
-            'gemini-2.0-flash'      => 'Gemini 2.0 Flash',
+            'gemini-3.6-flash'       => 'Gemini 3.6 Flash（最新）',
+            'gemini-3.5-flash'       => 'Gemini 3.5 Flash',
+            'gemini-3.5-flash-lite'  => 'Gemini 3.5 Flash Lite',
+            'gemini-3.1-flash-lite'  => 'Gemini 3.1 Flash Lite',
+            'gemini-2.5-pro'         => 'Gemini 2.5 Pro',
+            'gemini-2.5-flash'       => 'Gemini 2.5 Flash',
+            'gemini-2.5-flash-lite'  => 'Gemini 2.5 Flash Lite',
         ];
     }
 
@@ -383,5 +391,159 @@ class Gemini implements ProtocolInterface
             \Ai\Helpers\Log::warning('拉取模型列表失败', ['protocol' => static::class, 'error' => $e->getMessage()]);
             return $this->fallbackModels($config);
         }
+    }
+
+    // =================================================================
+    // 图像与视频（据官方文档核对，2026-08-12）
+    //
+    // 更正一处早先的误判：v1.16.0 曾判定 Gemini 没有图像能力，依据是
+    // POST /v1beta/openai/images/generations 返回 404——但那次探测**没带
+    // Authorization 头**。带上假 Bearer 后返回 400（路由存在），
+    // 而同前缀假路径返回 404。Gemini 是有图像生成的。
+    //
+    // 实测（带鉴权头）：
+    //   /v1beta/openai/chat/completions   400 ✅
+    //   /v1beta/openai/embeddings         400 ✅
+    //   /v1beta/openai/images/generations 400 ✅
+    //   /v1beta/openai/videos             400 ✅（Sora 兼容形态）
+    //   /v1beta/openai/images/edits       404 ❌
+    //   /v1beta/openai/audio/speech       404 ❌
+    //   /v1beta/openai/audio/transcriptions 404 ❌
+    //   /v1beta/openai/zzz-fake-zzz       404（对照组）
+    //
+    // Gemini 确有 TTS 模型（gemini-*-tts-preview），但只在原生
+    // generateContent 接口下，OpenAI 兼容层没有 audio/speech，故不声明语音能力。
+    // =================================================================
+
+    /**
+     * Gemini 图像生成模型（据官方文档，2026-08-12）
+     * @return array<int, string>
+     */
+    public function knownImageModels(): array
+    {
+        return [
+            'gemini-3.1-flash-image',        // Nano Banana 2
+            'gemini-3.1-flash-lite-image',   // Nano Banana 2 Lite
+            'gemini-3-pro-image',            // Nano Banana Pro
+            'gemini-2.5-flash-image',        // Nano Banana
+        ];
+    }
+
+    /**
+     * OpenAI 兼容层没有图像编辑端点（实测 404，假路径同为 404，可确认）
+     */
+    public function imageEditPath(): string
+    {
+        return '';
+    }
+
+    /**
+     * Gemini 视频生成端点
+     *
+     * 路径是 /videos 而不是 /videos/generations —— 这是 **Sora 兼容形态**，
+     * 不是 OpenAI 图像那套。实测 /videos/generations 返回 404。
+     */
+    public function videoPath(): string
+    {
+        return '/v1beta/openai/videos';
+    }
+
+    /**
+     * Gemini 视频生成模型（据官方文档，2026-08-12）
+     * @return array<int, string>
+     */
+    public function knownVideoModels(): array
+    {
+        return [
+            'veo-3.1-generate-preview',
+            'veo-3.1-lite-generate-preview',
+            'gemini-omni-flash',
+        ];
+    }
+
+    /**
+     * 提交视频任务后解析回执
+     *
+     * Sora 形态的回执是 VideoResource：{id, object:"video", status, progress, ...}
+     *
+     * @param array<string, mixed> $response
+     * @return array{id: string, query_url: string}
+     */
+    public function parseTaskSubmit(string $capability, array $response, string $submitUrl = ''): array
+    {
+        $id = isset($response['id']) ? (string) $response['id'] : '';
+        return [
+            'id'        => $id,
+            'query_url' => ($id !== '' && $submitUrl !== '')
+                ? rtrim($submitUrl, '/') . '/' . rawurlencode($id)
+                : '',
+        ];
+    }
+
+    /**
+     * 轮询视频任务
+     *
+     * status 取值 queued / in_progress / completed / failed（据 Sora 规范）。
+     *
+     * **完成时响应体里没有下载地址**——内容要从 /videos/{id}/content 单独取，
+     * 且那是带鉴权的二进制流，不是公开 URL。所以这里返回 result_url 触发第三跳，
+     * 由 AsyncTask 去发请求（协议层拿不到传输层）。
+     *
+     * @param array<string, mixed> $response
+     * @return array{status: string, error: string, result: \Ai\Contracts\CapabilityResponseInterface|null, result_url: string}
+     */
+    public function parseTaskStatus(string $capability, array $response, string $queryUrl = ''): array
+    {
+        $status = isset($response['status']) ? (string) $response['status'] : '';
+        $error  = '';
+
+        if (isset($response['error']) && is_array($response['error'])) {
+            $error = isset($response['error']['message'])
+                ? (string) $response['error']['message']
+                : (string) json_encode($response['error'], JSON_UNESCAPED_UNICODE);
+        }
+
+        $resultUrl = '';
+        if (strtolower($status) === 'completed' && $queryUrl !== '') {
+            $resultUrl = rtrim($queryUrl, '/') . '/content';
+        }
+
+        return ['status' => $status, 'error' => $error, 'result' => null, 'result_url' => $resultUrl];
+    }
+
+    /**
+     * 第三跳的响应：视频二进制内容
+     *
+     * 传输层按响应的实际 Content-Type 把字节包成 ['_raw' => ...]，
+     * 这里取出来交给 VideoResponse 直接落盘——不走公开 URL 下载那条路，
+     * 因为这个端点要带鉴权头。
+     *
+     * @param array<string, mixed> $response
+     */
+    public function parseTaskResult(string $capability, array $response): \Ai\Contracts\CapabilityResponseInterface
+    {
+        $bytes = isset($response['_raw']) && is_string($response['_raw']) ? $response['_raw'] : '';
+
+        $video = new \Ai\Response\VideoResponse(
+            '',
+            '',
+            0.0,
+            ['_content_type' => isset($response['_content_type']) ? $response['_content_type'] : '',
+             '_bytes'        => strlen($bytes)],
+            '',
+            [],
+            $bytes === '' ? '取回视频内容为空，原始响应见 getRaw()' : ''
+        );
+
+        return $bytes === '' ? $video : $video->setBytes($bytes);
+    }
+
+    /**
+     * Gemini 向量化模型（据官方文档，2026-08-12）
+     * @return array<int, string>
+     */
+    public function knownEmbeddingModels(): array
+    {
+        return ['gemini-embedding-2-preview', 'gemini-embedding-001'];
     }
 }

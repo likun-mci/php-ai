@@ -39,4 +39,62 @@ class Cohere extends OpenAI
             'command-r7b-12-2024'    => 'Command R7B',
         ];
     }
+
+    /**
+     * 本平台没有图像生成接口
+     *
+     * 据官方兼容层文档（2026-08-12）：只支持 chat/completions、embeddings、
+     * audio/transcriptions 三个端点，**图像端点文档里明确写了不支持**。
+     * 该平台网关是鉴权优先的（任何路径都回 401），探测给不出结论，以文档为准。
+     */
+    public function imagePath(): string
+    {
+        return '';
+    }
+
+    /**
+     * 本平台没有图像编辑接口
+     *
+     * 据官方兼容层文档（2026-08-12）：只支持 chat/completions、embeddings、
+     * audio/transcriptions 三个端点，**图像端点文档里明确写了不支持**。
+     * 该平台网关是鉴权优先的（任何路径都回 401），探测给不出结论，以文档为准。
+     */
+    public function imageEditPath(): string
+    {
+        return '';
+    }
+
+    /**
+     * 本平台没有语音合成接口
+     *
+     * 据官方兼容层文档（2026-08-12）：只支持 chat/completions、embeddings、
+     * audio/transcriptions 三个端点，**图像端点文档里明确写了不支持**。
+     * 该平台网关是鉴权优先的（任何路径都回 401），探测给不出结论，以文档为准。
+     */
+    public function ttsPath(): string
+    {
+        return '';
+    }
+
+    /**
+     * Cohere 兼容层的向量化模型（据官方文档，2026-08-12）
+     * @return array<int, string>
+     */
+    public function knownEmbeddingModels(): array
+    {
+        return ['embed-v4.0'];
+    }
+
+    /**
+     * Cohere 兼容层的语音识别模型（据官方文档，2026-08-12）
+     *
+     * 注意：该接口**要求必须指定 language 参数**（与 OpenAI 不同），
+     * 且不支持 MP4 / M4A / WEBM 等格式。
+     *
+     * @return array<int, string>
+     */
+    public function knownAsrModels(): array
+    {
+        return ['cohere-transcribe-03-2026'];
+    }
 }

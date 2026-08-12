@@ -39,4 +39,60 @@ class Nvidia extends OpenAI
             'nvidia/llama-3.1-nemotron-70b-instruct' => 'Nemotron 70B',
         ];
     }
+
+    /**
+     * 本平台没有图像生成接口
+     *
+     * 未查证，按「查不到就不声明」处理：integrate.api.nvidia.com 连对话端点
+     * 都返回 404（而库里那条路径对真实用户是可用的），说明探测方法对该平台
+     * 不可靠；官方文档描述的图像/音频 NIM 是自托管容器，与托管端点未必一致。
+     *
+     * 确知可用时请配 {能力}_endpoint 逃生口。
+     */
+    public function imagePath(): string
+    {
+        return '';
+    }
+
+    /**
+     * 本平台没有图像编辑接口
+     *
+     * 未查证，按「查不到就不声明」处理：integrate.api.nvidia.com 连对话端点
+     * 都返回 404（而库里那条路径对真实用户是可用的），说明探测方法对该平台
+     * 不可靠；官方文档描述的图像/音频 NIM 是自托管容器，与托管端点未必一致。
+     *
+     * 确知可用时请配 {能力}_endpoint 逃生口。
+     */
+    public function imageEditPath(): string
+    {
+        return '';
+    }
+
+    /**
+     * 本平台没有语音合成接口
+     *
+     * 未查证，按「查不到就不声明」处理：integrate.api.nvidia.com 连对话端点
+     * 都返回 404（而库里那条路径对真实用户是可用的），说明探测方法对该平台
+     * 不可靠；官方文档描述的图像/音频 NIM 是自托管容器，与托管端点未必一致。
+     *
+     * 确知可用时请配 {能力}_endpoint 逃生口。
+     */
+    public function ttsPath(): string
+    {
+        return '';
+    }
+
+    /**
+     * 本平台没有语音识别接口
+     *
+     * 未查证，按「查不到就不声明」处理：integrate.api.nvidia.com 连对话端点
+     * 都返回 404（而库里那条路径对真实用户是可用的），说明探测方法对该平台
+     * 不可靠；官方文档描述的图像/音频 NIM 是自托管容器，与托管端点未必一致。
+     *
+     * 确知可用时请配 {能力}_endpoint 逃生口。
+     */
+    public function asrPath(): string
+    {
+        return '';
+    }
 }

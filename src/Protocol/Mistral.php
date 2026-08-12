@@ -39,4 +39,28 @@ class Mistral extends OpenAI
             'pixtral-large-latest'    => 'Pixtral Large（视觉）',
         ];
     }
+
+    /**
+     * 本平台没有图像生成接口
+     *
+     * 实测 2026-08-12：带 Authorization 头 POST 该路径返回 404，
+     * 同前缀假路径同样 404、而对话路径返回 401，可确认此路由不存在。
+     * 此前是从 OpenAI 基线继承来的声明，与事实不符。
+     */
+    public function imagePath(): string
+    {
+        return '';
+    }
+
+    /**
+     * 本平台没有图像编辑接口
+     *
+     * 实测 2026-08-12：带 Authorization 头 POST 该路径返回 404，
+     * 同前缀假路径同样 404、而对话路径返回 401，可确认此路由不存在。
+     * 此前是从 OpenAI 基线继承来的声明，与事实不符。
+     */
+    public function imageEditPath(): string
+    {
+        return '';
+    }
 }

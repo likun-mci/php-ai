@@ -34,4 +34,24 @@ class VLLM extends OpenAI
     {
         return [];
     }
+
+    /**
+     * 本地推理服务的能力取决于**用户加载了哪些模型**，不是平台固定的
+     *
+     * 因此这里刻意保留宽松声明（继承 OpenAI 基线的全部能力路径），
+     * 与远程平台「查证优先」的策略不同：
+     *
+     *   - 远程平台的接口面是厂商定的，探测/查文档能得出确定结论，
+     *     多声明就是在对用户撒谎
+     *   - 本地服务的接口面由用户自己决定：装了 stable-diffusion 就有图像，
+     *     装了 whisper 就有 ASR。库无从判断，替用户关掉才是错的
+     *
+     * 实际不支持时，本地服务会返回它自己的 404，信息同样清楚。
+     *
+     * @return array<string, string>
+     */
+    public function capabilityPathMap(): array
+    {
+        return parent::capabilityPathMap();
+    }
 }

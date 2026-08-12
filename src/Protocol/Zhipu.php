@@ -68,4 +68,17 @@ class Zhipu extends OpenAI
     {
         return ['glm-image', 'cogview-4-250304', 'cogview-4', 'cogview-3-flash'];
     }
+
+    /**
+     * 智谱语音合成模型（据官方文档，2026-08）
+     *
+     * 音色复刻（glm-tts-clone）走的是另一个端点 /api/paas/v4/voice/clone，
+     * 不在语音合成这条路径上，故不列入。
+     *
+     * @return array<int, string>
+     */
+    public function knownTtsModels(): array
+    {
+        return ['glm-tts'];
+    }
 }

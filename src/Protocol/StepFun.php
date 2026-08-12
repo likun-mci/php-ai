@@ -46,4 +46,13 @@ class StepFun extends OpenAI
     {
         return ['step-1x-medium'];
     }
+
+    /**
+     * 阶跃星辰语音合成模型（据官方文档，2026-08）
+     * @return array<int, string>
+     */
+    public function knownTtsModels(): array
+    {
+        return ['step-tts-mini', 'step-tts-2', 'step-tts-vivid'];
+    }
 }

@@ -129,6 +129,45 @@ class Endpoint
     }
 
     /**
+     * 用协议**自己声明的对话路径**推导同源的能力端点
+     *
+     * 比 deriveFromChat() 准确：后者靠猜一组常见后缀
+     * （chat/completions、messages……），遇到 MiniMax 的
+     * /v1/text/chatcompletion_v2 这类非标准路径就剥不掉，
+     * 会拼出 .../chatcompletion_v2/v1/embeddings 这种叠加路径——
+     * 而且不报错，只表现为请求 404。
+     *
+     * 协议既然自己知道对话路径长什么样，直接拿来剥即可。
+     *
+     * @param string $chatEndpoint 实际对话端点（已含用户的 base_url 定制）
+     * @param string $chatPath     该协议声明的对话路径，如 /v1/text/chatcompletion_v2
+     * @param string $path         目标能力路径，如 /v1/t2a_v2
+     * @return string 对话端点末尾不是该对话路径时返回空串，由调用方回退
+     */
+    public static function deriveByChatPath(string $chatEndpoint, string $chatPath, string $path): string
+    {
+        $up = parse_url(self::withScheme($chatEndpoint));
+        if (empty($up['host'])) {
+            return '';
+        }
+
+        $urlPath = rtrim(isset($up['path']) ? $up['path'] : '', '/');
+        $tail    = '/' . trim($chatPath, '/');
+        if ($tail === '/') {
+            return '';
+        }
+        if (substr($urlPath, -strlen($tail)) !== $tail) {
+            return '';
+        }
+
+        $origin = (isset($up['scheme']) ? $up['scheme'] : 'https') . '://' . $up['host']
+                . (isset($up['port']) ? ':' . $up['port'] : '');
+        $base   = substr($urlPath, 0, -strlen($tail));
+
+        return self::join($origin . $base, $path);
+    }
+
+    /**
      * 智能拼接「接口根地址」与「路径」
      *
      * - $base 缺 scheme 时按 https 处理

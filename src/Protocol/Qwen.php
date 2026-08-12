@@ -60,4 +60,24 @@ class Qwen extends OpenAI
     {
         return '';
     }
+
+    /**
+     * 通义兼容模式不提供语音合成
+     *
+     * 实测 2026-08：POST {dashscope}/compatible-mode/v1/audio/speech 返回 404，
+     * 同前缀假路径同样 404（该网关路由优先），可确认此路由不存在。
+     * 通义的语音走 DashScope 原生接口，形态与 OpenAI 差异很大，暂不接入。
+     */
+    public function ttsPath(): string
+    {
+        return '';
+    }
+
+    /**
+     * 同上，兼容模式亦无语音识别接口
+     */
+    public function asrPath(): string
+    {
+        return '';
+    }
 }

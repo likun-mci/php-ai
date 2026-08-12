@@ -13,6 +13,7 @@ class OpenAI implements ProtocolInterface
     use \Ai\Protocol\Concerns\CapabilityDefaults;
     use \Ai\Protocol\Concerns\OpenAiEmbeddings;
     use \Ai\Protocol\Concerns\OpenAiImages;
+    use \Ai\Protocol\Concerns\OpenAiAudio;
 
     use ModelCatalog;
 
@@ -394,5 +395,60 @@ class OpenAI implements ProtocolInterface
             'dall-e-3',
             'dall-e-2',
         ];
+    }
+
+    /**
+     * OpenAI 默认音色（据官方 OpenAPI 规范，voice 为必填字段）
+     */
+    public function defaultVoice(): string
+    {
+        return get_class($this) === self::class ? 'alloy' : '';
+    }
+
+    /**
+     * OpenAI 语音合成模型（据官方 OpenAPI 规范，2026-08）
+     * @return array<int, string>
+     */
+    public function knownTtsModels(): array
+    {
+        if (get_class($this) !== self::class) {
+            return [];
+        }
+        return ['gpt-4o-mini-tts', 'gpt-4o-mini-tts-2025-12-15', 'tts-1-hd', 'tts-1'];
+    }
+
+    /**
+     * OpenAI 语音识别模型（据官方 OpenAPI 规范，2026-08）
+     * @return array<int, string>
+     */
+    public function knownAsrModels(): array
+    {
+        if (get_class($this) !== self::class) {
+            return [];
+        }
+        return [
+            'gpt-4o-transcribe',
+            'gpt-4o-mini-transcribe',
+            'gpt-4o-mini-transcribe-2025-12-15',
+            'gpt-4o-transcribe-diarize',
+            'gpt-transcribe',
+            'whisper-1',
+        ];
+    }
+
+    /**
+     * OpenAI 音色（据官方 OpenAPI 规范，2026-08）
+     *
+     * 注意这份清单已与早期文档不同：早年的 fable / nova / onyx 已不在枚举里，
+     * 新增了 marin / cedar。写死记忆里的音色名会直接 400。
+     *
+     * @return array<int, string>
+     */
+    public function knownVoices(): array
+    {
+        if (get_class($this) !== self::class) {
+            return [];
+        }
+        return ['alloy', 'ash', 'ballad', 'coral', 'echo', 'sage', 'shimmer', 'verse', 'marin', 'cedar'];
     }
 }

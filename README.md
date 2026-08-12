@@ -6,6 +6,8 @@
 
 本文档中的示例均来自真实业务系统（一套 CodeIgniter 3 的建站系统）中的实际用法，非伪代码。
 
+> 🌏 English documentation: [README-en.md](README-en.md)
+
 ---
 
 ## 特性
@@ -1809,7 +1811,7 @@ $res = $ai->embeddings()->create($tenThousandTexts, ['batch_size' => 25]);
 
 #### 支持情况
 
-35 个协议声明支持向量化，路径由各自的对话路径同级推导
+31 个协议声明支持向量化，路径由各自的对话路径同级推导
 （`/v1/chat/completions` → `/v1/embeddings`，`/v4/chat/completions` → `/v4/embeddings`），
 所以带前缀的网关、Azure、Gemini 兼容端点都自动正确。
 
@@ -1817,8 +1819,9 @@ Anthropic Messages 协议家族（`claude` / `qwen-anthropic` / `zhipu-anthropic
 `moonshot-anthropic` / `deepseek-anthropic`）**不支持**——Anthropic 没有向量化接口。
 用这些协议调用会得到明确报错。
 
-> 库声明「支持」指的是该协议的接口形态与路径已适配。某个具体平台是否真的开通了
-> 这个接口，以对方文档为准；未开通时你会收到该平台自己的 404，而不是库的猜测。
+> 平台审计（v1.21.0 ~ v1.24.0）已逐个核对官方文档与端点实测。
+> DeepSeek、商汤、Llama、Perplexity、Cerebras 经确认**没有**向量化接口，不再声明。
+> 若你确知某平台可用，配 `embedding_endpoint` 即可绕过库的判断。
 
 ### 图像生成（已可用）
 
@@ -1872,18 +1875,19 @@ $paths = $img->saveTo('/var/www/uploads', 'cat');
 | xAI | `grok-imagine-image-quality`、`grok-imagine-image-2.0` |
 | 硅基流动 | `Kwai-Kolors/Kolors`、`Qwen/Qwen-Image-Edit`、`Qwen/Qwen-Image-Edit-2509` |
 | 阶跃星辰 | `step-1x-medium` |
-| 火山方舟（豆包） | `doubao-seedream-4-0-250828` |
+| 火山方舟（豆包） | `doubao-seedream-5.0-lite`、`doubao-seedream-4.5`、`doubao-seedream-4.0`、`doubao-seedream-3.0-t2i` |
+| 通义万相 | 异步任务式，见下节 |
 
 ```php
 $ai->images();  // 子门面
 (new \Ai\Protocol\Zhipu())->knownImageModels();   // 取某协议的图像模型清单
 ```
 
-**通义（qwen）暂不支持**：其 OpenAI 兼容模式没有同步文生图接口（实测 404），
-万相走的是异步任务接口，安排在 v1.19.0 那一期。现在调用会得到明确报错。
+**通义（qwen）走异步接口**：其 OpenAI 兼容模式没有同步文生图（实测 404），
+万相是「提交任务再轮询」，用 `generateAsync()`，见下节。
 
-其余 OpenAI 兼容协议会继承基线声明。是否真的开通以对方文档为准——
-未开通时你会收到该平台自己的 404，而不是库的猜测。
+> 某个平台是否真的开通了这个接口以对方文档为准——未开通时你会收到该平台自己的 404，
+> 而不是库的猜测。库的判断有误或过时时，配 `image_endpoint` 即可绕过。
 
 #### 异步文生图（通义万相）
 
@@ -1993,15 +1997,17 @@ OpenAI 的 `voice` 是**必填**参数，不传直接 400。库内会补一个�
 | 平台 | TTS 模型 | ASR |
 |------|---------|-----|
 | OpenAI | `gpt-4o-mini-tts`、`tts-1-hd`、`tts-1` | `gpt-4o-transcribe`、`whisper-1` 等 |
-| 硅基流动 | `FunAudioLLM/CosyVoice2-0.5B`、`fnlp/MOSS-TTSD-v0.5` | ✅ |
+| 硅基流动 | `FunAudioLLM/CosyVoice2-0.5B`、`fnlp/MOSS-TTSD-v0.5` | `FunAudioLLM/SenseVoiceSmall`、`TeleAI/TeleSpeechASR` |
 | 阶跃星辰 | `step-tts-mini`、`step-tts-2`、`step-tts-vivid` | ✅ |
-| 智谱 | `glm-tts` | ✅ |
+| 智谱 | `glm-tts` | `glm-asr-2512` |
 | MiniMax | `speech-2.8-hd`、`speech-2.8-turbo` 等 8 个 | ✖（形态不同，未接入） |
+| Cohere | ✖ | `cohere-transcribe-03-2026`（须显式传 `language`） |
+| Mistral / Groq / Together / Fireworks / OpenRouter / DeepInfra | ✅ | ✅ |
 
 **通义（qwen）暂不支持**：其 OpenAI 兼容模式没有语音接口（实测 404），
 原生 DashScope 语音接口形态差异很大，暂未接入。
 
-**讯飞只提供 WebSocket**，走 `$ai->realtime()`，计划 v1.18.0。
+**讯飞只提供 WebSocket**，走 `$ai->realtime()`。
 
 ### WebSocket 实时通道（已可用）
 
@@ -2111,6 +2117,7 @@ $task->getMessage();  // 「任务仍在平台侧处理中……请保存 task_i
 | 智谱 CogVideoX | `task_status` | PROCESSING / SUCCESS / FAIL |
 | 火山方舟 Seedance | `status` | queued / running / succeeded / failed |
 | MiniMax 海螺 | `status` | Preparing / Queueing / Processing / Success / Fail |
+| Gemini Veo | `status` | queued / in_progress / completed / failed |
 
 库内统一成 `pending` / `running` / `succeeded` / `failed` / `timeout` 五种。
 **平台新增了库里没见过的状态值时，按「处理中」对待而不是失败**——
@@ -2136,7 +2143,9 @@ $task->getMessage();  // 「任务仍在平台侧处理中……请保存 task_i
 | 通义万相 | `wan2.7-t2v`、`wan2.7-t2v-2026-06-12` |
 | 智谱 | `cogvideox-3`、`cogvideox-2`、`cogvideox-flash`、`viduq1-*`、`vidu2-*` |
 | 火山方舟 | Seedance 系列 |
-| MiniMax | 海螺系列 |
+| MiniMax | `MiniMax-Hailuo-2.3`、`MiniMax-Hailuo-02`、`T2V-01-Director`、`T2V-01` |
+| Gemini | `veo-3.1-generate-preview`、`veo-3.1-lite-generate-preview`、`gemini-omni-flash` |
+| Z.ai | 视频生成（据 z.ai 文档） |
 
 ⚠️ **结果 URL 都有有效期**（万相约 24 小时、MiniMax 仅 9 小时），
 存 URL 进库很快就会失效,必须及时 `saveTo()` 落地。
@@ -2157,7 +2166,7 @@ $video->saveTo('/var/www/v.mp4');          // 视频，默认上限 64MB
 
 ### WebSocket 通道默认关闭
 
-讯飞等平台的语音能力只提供 WebSocket。本库会集成（v1.18.0），
+讯飞等平台的语音能力只提供 WebSocket。本库已集成，
 但**必须显式启用**，因为 WS 是长连接，超时与错误语义都和普通 HTTP 请求不同：
 
 ```php
@@ -2179,6 +2188,11 @@ $ai = new AI([
     'image_endpoint' => 'https://another-host.com/v1/images/generations',  // 可选
 ]);
 ```
+
+这个配置项同时是**逃生口**：库对某平台能力的判断有误或过时时，配上
+`<能力名>_endpoint` 就能绕过声明检查。若该协议族本身没有对应形态的解析器
+（比如 Claude 之于图像），仍会报错，但会点明是哪一层挡住的，并建议改用
+`protocol` + `base_url`。
 
 ### 给自定义协议类的迁移说明
 
@@ -2215,10 +2229,9 @@ class MyProtocol implements ProtocolInterface
 - `wait()` 是阻塞的，只适合 CLI 与队列 worker；Web 请求里请用「提交存库 + 定时任务轮询」的写法；
 - WebSocket 通道只做「一次会话、发完收完就关」这一种模式，够覆盖讯飞 TTS/ASR；不支持并发多连接、自动重连、服务端模式与 permessage-deflate 压缩扩展；
 - MiniMax 的语音识别形态与 OpenAI 差异较大，暂未接入；
-- 图像生成只支持**同步返回**的平台；通义万相等异步任务式的文生图要等 v1.19.0 的异步任务能力落地；
 - 向量化默认不分批，超出平台单次上限时需自行传 `batch_size`——各平台上限差异大且文档未必写明，库不预设一个「保险的小值」，那会让本可一次发完的平台白白多发几十个请求；
-- WebSocket 通道（讯飞语音）计划在 v1.18.0 交付，当前调用 `realtime()->useWebSocket()` 后会明确提示尚未实现；
-- 视频生成一律异步，`AsyncTask::wait()` 会阻塞，不可在 Web 请求中使用；跨请求恢复需自行把 `toArray()` 的结果落库。
+- 视频生成一律异步，`AsyncTask::wait()` 会阻塞，不可在 Web 请求中使用；跨请求恢复需自行把 `toArray()` 的结果落库；
+- 火山方舟的视频模型清单与阶跃星辰的 ASR/音色清单**刻意留空**：其文档站是 JS 渲染的，未能查证。留空会回退到平台自己的模型列表接口，填错则会让用户拿着不存在的模型名去调。
 
 ---
 

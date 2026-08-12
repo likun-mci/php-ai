@@ -1721,7 +1721,7 @@ php-ai/
 > | 图像生成 `images()` | ✅ v1.16.0，6 个平台字段已归一 |
 > | 语音合成 / 识别 `audio()` | ✅ v1.17.0，二进制与 JSON-hex 两种形态已归一 |
 > | WebSocket `realtime()` | ✅ v1.18.0，讯飞语音（RFC 6455 纯 PHP 实现） |
-> | 视频生成 `video()` | ⏳ 计划 v1.19.0 |
+> | 视频生成 `video()` | ✅ v1.19.0，4 个平台异步任务已归一 |
 >
 > 未交付的能力调用时会抛 `UnsupportedCapabilityException` 并说明原因，
 > 不会静默返回空结果。对话（`chat()`）功能完全不受影响。
@@ -2021,34 +2021,81 @@ RFC 6455 客户端是纯 PHP 实现的，只用到 `stream_socket_client` /
 本协议支持的能力（含「实时通道」），把你导向 `$ai->realtime()`。
 比让请求打到一个不存在的 HTTP 路径、再拿一个含糊的 404 要好。
 
-### 异步任务：视频生成不要阻塞等待
+### 视频生成 / 异步任务（已可用）
 
-视频接口全都是「提交 → 轮询 → 取结果」三段式，一次生成动辄几分钟。
-所以 `generate()` **返回任务而不是结果，立即返回**：
+视频接口**无一例外都是异步任务式**，所以 `generate()` 返回的是任务而不是视频。
 
 ```php
-// Web 请求里：提交完存库就结束，不占着 PHP-FPM worker
-$task = $ai->video()->generate('日落的海边');
+// Web 请求里：提交后存库就结束，不阻塞
+$task = $ai->video()->generate('日落的海边', ['duration' => 5, 'ratio' => '16:9']);
 $db->save(['task' => json_encode($task->toArray())]);
 
-// 定时任务 / 队列 worker 里：恢复后继续查
-$task = Ai\Task\AsyncTask::fromArray(json_decode($row['task'], true), $ai);
+// 定时任务 / 队列 worker 里：恢复并查询
+$task = AsyncTask::fromArray(json_decode($row['task'], true), $ai);
 if ($task->refresh()->isSucceeded()) {
     $task->getResult()->saveTo('/var/www/videos/x.mp4');
 }
 ```
 
-`wait()` 是阻塞版本，**只适合 CLI 脚本和队列 worker**，不要放进 Web 请求。
-它超时后**不抛异常**——任务在平台侧还在跑，抛异常会诱导调用方当失败处理，
-白丢一次已经付费的生成：
+#### 为什么不直接等结果
+
+视频生成动辄几分钟。`wait()` 存在，但**不要在 Web 请求里调用**——
+它会占死一个 PHP-FPM worker，并发一上来整站就挂。那个方法是给 CLI 脚本和队列 worker 用的。
 
 ```php
-$task->wait(300);              // 最多等 5 分钟
-if ($task->isTimeout()) {
-    echo $task->getMessage();  // 「任务仍在平台侧处理中……请保存 task_id 稍后再查」
-    // isDone() 仍为 false，所以 if ($task->isDone()) 的写法天然不会误判
-}
+// 只在 CLI / worker 里这么用
+$task->wait(300, 3);   // 最多等 300 秒，起始间隔 3 秒后指数退避
 ```
+
+#### 超时不是失败
+
+`wait()` 超时**不抛异常**。任务在平台侧仍然在跑，抛异常会诱导你 `catch` 之后当失败处理，
+白白丢掉一次已经付费的生成。超时后：
+
+```php
+$task->isTimeout();   // true
+$task->isDone();      // false —— 所以 if ($task->isDone()) 的写法天然安全
+$task->isFailed();    // false —— 不会被误当失败
+$task->getMessage();  // 「任务仍在平台侧处理中……请保存 task_id「xxx」，稍后恢复后再查询」
+```
+
+#### 四家平台的状态取值差异已归一
+
+| 平台 | 状态字段 | 取值 |
+|------|---------|------|
+| 通义万相 | `task_status` | PENDING / RUNNING / SUCCEEDED / FAILED / CANCELED |
+| 智谱 CogVideoX | `task_status` | PROCESSING / SUCCESS / FAIL |
+| 火山方舟 Seedance | `status` | queued / running / succeeded / failed |
+| MiniMax 海螺 | `status` | Preparing / Queueing / Processing / Success / Fail |
+
+库内统一成 `pending` / `running` / `succeeded` / `failed` / `timeout` 五种。
+**平台新增了库里没见过的状态值时，按「处理中」对待而不是失败**——
+让用户的任务因为平台加了个新状态就全变失败，是最糟的降级方式。
+
+#### MiniMax 是三段流程
+
+其余三家是「提交 → 轮询」两步，MiniMax 多一步:
+
+```
+提交 POST /v1/video_generation           → task_id
+查询 GET  /v1/query/video_generation     → status=Success，但只给 file_id
+再取 GET  /v1/files/retrieve             → 真正的下载地址（有效期 9 小时）
+```
+
+库内自动走完三步，调用方感知不到差别。另外 MiniMax 的失败**不体现在 HTTP 状态码上**——
+`base_resp.status_code` 非 0 才是失败，此时 HTTP 仍是 200，库内会检查这个字段。
+
+#### 支持的平台与模型
+
+| 平台 | 模型（据官方文档） |
+|------|------|
+| 通义万相 | `wan2.7-t2v`、`wan2.7-t2v-2026-06-12` |
+| 智谱 | `cogvideox-3`、`cogvideox-2`、`cogvideox-flash`、`viduq1-*`、`vidu2-*` |
+| 火山方舟 | Seedance 系列 |
+| MiniMax | 海螺系列 |
+
+⚠️ **结果 URL 都有有效期**（万相约 24 小时、MiniMax 仅 9 小时），
+存 URL 进库很快就会失效,必须及时 `saveTo()` 落地。
 
 ### 媒体结果要及时落地
 
@@ -2119,7 +2166,8 @@ class MyProtocol implements ProtocolInterface
 - `chatBatch()` 并发批量不支持流式，也不走 `setAttachments()`（附件请写在各自 payload 里）；
 - `cost()` 需自行传入价格表，库不内置各平台价格（价格变动频繁，内置必然过期）；
 - `Ai\Cli\ClaudeCode` 依赖本机已安装 claude 程序；`proc_open` / `shell_exec` 被禁用的受限 PHP 环境需改用自定义执行器（如 SSH/SFTP）。
-- 视频生成能力目前**只有骨架**：入口、响应对象、异步任务与传输层支持已就位，但尚无平台声明支持，调用会抛 `UnsupportedCapabilityException`。按 v1.18.0（WebSocket）→ v1.19.0（视频）逐版交付；
+- 视频生成只覆盖**文生视频与首帧图生视频**；异步式的文生图（通义万相图像）与图像编辑要等 v1.20.0；
+- `wait()` 是阻塞的，只适合 CLI 与队列 worker；Web 请求里请用「提交存库 + 定时任务轮询」的写法；
 - WebSocket 通道只做「一次会话、发完收完就关」这一种模式，够覆盖讯飞 TTS/ASR；不支持并发多连接、自动重连、服务端模式与 permessage-deflate 压缩扩展；
 - MiniMax 的语音识别形态与 OpenAI 差异较大，暂未接入；
 - 图像生成只支持**同步返回**的平台；通义万相等异步任务式的文生图要等 v1.19.0 的异步任务能力落地；

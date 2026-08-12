@@ -58,8 +58,11 @@ class VideoFacade extends BaseFacade
             ));
         }
 
+        // 把提交端点一并交给协议：各平台的查询地址都是从提交地址同源推导出来的
+        // （.../tasks/{id}、.../async-result/{id}、.../query/video_generation?task_id=），
+        // 协议只拿响应体是推不出来的，尤其在用户配了自建网关时
         /** @var array{id?: string, query_url?: string} $info */
-        $info = $protocol->parseTaskSubmit(Capabilities::VIDEO, $response);
+        $info = $protocol->parseTaskSubmit(Capabilities::VIDEO, $response, $this->endpoint());
 
         $id = isset($info['id']) ? (string) $info['id'] : '';
         if ($id === '') {

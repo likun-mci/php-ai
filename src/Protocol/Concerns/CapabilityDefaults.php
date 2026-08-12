@@ -142,6 +142,21 @@ trait CapabilityDefaults
     }
 
     /**
+     * 某项能力需要的额外请求头
+     *
+     * 少数平台的扩展能力要求对话接口没有的头，比如通义万相的异步视频生成
+     * 必须带 X-DashScope-Async: enable，不带会退化成同步调用然后超时。
+     *
+     * 不改 buildHeaders()，是因为那条路是对话链路在走的，动它波及面太大。
+     *
+     * @return array<string, string>
+     */
+    public function capabilityHeaders(string $capability): array
+    {
+        return [];
+    }
+
+    /**
      * 把对话路径的动作后缀换成另一个动作，得到同级路径
      *
      * /v1/chat/completions      + 'embeddings'        → /v1/embeddings

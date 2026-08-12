@@ -253,4 +253,112 @@ class MiniMax extends OpenAI
             ''
         );
     }
+
+    use \Ai\Protocol\Concerns\AsyncVideoTask;
+
+    /**
+     * MiniMax 视频生成（异步任务式，**三段流程**）
+     *
+     * 据官方文档（2026-08）：
+     *   1) 提交 POST {origin}/v1/video_generation           → task_id
+     *   2) 查询 GET  {origin}/v1/query/video_generation?task_id=…
+     *      status 取值 Preparing / Queueing / Processing / Success / Fail，
+     *      成功时只给 **file_id**，没有下载地址
+     *   3) 再取 GET  {origin}/v1/files/retrieve?file_id=…    → 下载地址（有效期 9 小时）
+     *
+     * 比其它三家多一步，靠 parseTaskStatus() 返回 result_url 触发，
+     * 由 AsyncTask 去发第三次请求——协议层拿不到传输层，
+     * 让它自己发请求会把两层职责搅在一起。
+     */
+    public function videoPath(): string
+    {
+        return '/v1/video_generation';
+    }
+
+    /**
+     * @param array<string, mixed> $response
+     * @return array{id: string, query_url: string}
+     */
+    public function parseTaskSubmit(string $capability, array $response, string $submitUrl = ''): array
+    {
+        $id = isset($response['task_id']) ? (string) $response['task_id'] : '';
+
+        return [
+            'id'        => $id,
+            'query_url' => ($id !== '' && $submitUrl !== '')
+                ? $this->taskSiblingUrl(
+                    $submitUrl,
+                    $this->videoPath(),
+                    '/v1/query/video_generation?task_id=' . rawurlencode($id)
+                )
+                : '',
+        ];
+    }
+
+    /**
+     * @param array<string, mixed> $response
+     * @return array{status: string, error: string, result: \Ai\Contracts\CapabilityResponseInterface|null, result_url: string}
+     */
+    public function parseTaskStatus(string $capability, array $response, string $queryUrl = ''): array
+    {
+        $status = isset($response['status']) ? (string) $response['status'] : '';
+        $error  = '';
+
+        // MiniMax 的失败不体现在 HTTP 状态码上，base_resp.status_code 非 0 才是失败
+        $code = (int) $this->dig($response, 'base_resp.status_code');
+        if ($code !== 0) {
+            return [
+                'status'     => 'Fail',
+                'error'      => $this->taskError($response) ?: ('MiniMax 返回错误码 ' . $code),
+                'result'     => null,
+                'result_url' => '',
+            ];
+        }
+
+        $resultUrl = '';
+        if (strtolower($status) === 'success') {
+            $fileId = isset($response['file_id']) ? (string) $response['file_id'] : '';
+            if ($fileId !== '') {
+                // 第三步的地址由**查询地址**同级推导，而不是写死官方域名——
+                // 用户配了自建网关时这一跳也得走同一个网关
+                $base = $queryUrl !== '' ? $queryUrl : $this->defaultBaseUrl() . '/v1/query/video_generation';
+                $pos  = strpos($base, '?');
+                if ($pos !== false) {
+                    $base = substr($base, 0, $pos);
+                }
+                $resultUrl = $this->taskSiblingUrl(
+                    $base,
+                    '/v1/query/video_generation',
+                    '/v1/files/retrieve?file_id=' . rawurlencode($fileId)
+                );
+            }
+        } elseif (strtolower($status) === 'fail') {
+            $error = $this->taskError($response);
+        }
+
+        return ['status' => $status, 'error' => $error, 'result' => null, 'result_url' => $resultUrl];
+    }
+
+    /**
+     * 第三步的响应：文件下载地址
+     *
+     * @param array<string, mixed> $response
+     */
+    public function parseTaskResult(string $capability, array $response): \Ai\Contracts\CapabilityResponseInterface
+    {
+        $url = (string) $this->dig($response, 'file.download_url');
+        if ($url === '') {
+            $url = (string) $this->dig($response, 'file.backup_download_url');
+        }
+
+        return new \Ai\Response\VideoResponse(
+            $url,
+            '',
+            0.0,
+            $response,
+            '',
+            [],
+            $url === '' ? '取回文件时没有拿到 download_url，原始响应见 getRaw()' : ''
+        );
+    }
 }

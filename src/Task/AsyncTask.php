@@ -220,8 +220,8 @@ class AsyncTask
         $response = $ai->transport()->get($url, [], $headers);
         $this->raw = $response;
 
-        /** @var array{status?: string, error?: string, result?: CapabilityResponseInterface|null} $parsed */
-        $parsed = $protocol->parseTaskStatus($this->capability, $response);
+        /** @var array{status?: string, error?: string, result?: CapabilityResponseInterface|null, result_url?: string} $parsed */
+        $parsed = $protocol->parseTaskStatus($this->capability, $response, $url);
 
         $status = isset($parsed['status']) ? (string) $parsed['status'] : self::STATUS_RUNNING;
         $this->status  = $this->normalizeStatus($status);
@@ -229,6 +229,24 @@ class AsyncTask
         $this->result  = isset($parsed['result']) && $parsed['result'] instanceof CapabilityResponseInterface
             ? $parsed['result']
             : null;
+
+        // 三段式平台：查状态只拿到一个文件 ID，还要再取一次才有真正的下载地址
+        // （MiniMax 就是这样：status=Success 时给 file_id，得再调 files/retrieve）。
+        // 多一跳而不是把它塞进 parseTaskStatus，是因为协议层拿不到传输层，
+        // 让协议自己发请求会把两层职责搅在一起
+        if ($this->status === self::STATUS_SUCCEEDED
+            && $this->result === null
+            && !empty($parsed['result_url'])
+            && method_exists($protocol, 'parseTaskResult')
+        ) {
+            $this->polls++;
+            $final = $ai->transport()->get((string) $parsed['result_url'], [], $headers);
+            $built = $protocol->parseTaskResult($this->capability, $final);
+            if ($built instanceof CapabilityResponseInterface) {
+                $this->result = $built;
+            }
+            $this->raw = array_merge($this->raw, ['_final' => $final]);
+        }
 
         if ($this->status === self::STATUS_SUCCEEDED) {
             $this->message = '任务已完成';
@@ -345,9 +363,9 @@ class AsyncTask
         $s = strtolower(trim($status));
 
         $succeeded = ['succeeded', 'success', 'successful', 'completed', 'done', 'finished', '2'];
-        $failed    = ['failed', 'failure', 'error', 'cancelled', 'canceled', 'rejected', '3'];
+        $failed    = ['failed', 'failure', 'fail', 'error', 'cancelled', 'canceled', 'rejected', '3'];
         $running   = ['running', 'processing', 'in_progress', 'inprogress', 'generating', '1'];
-        $pending   = ['pending', 'queued', 'queuing', 'submitted', 'waiting', '0'];
+        $pending   = ['pending', 'queued', 'queuing', 'queueing', 'preparing', 'submitted', 'waiting', '0'];
 
         if (in_array($s, $succeeded, true)) {
             return self::STATUS_SUCCEEDED;

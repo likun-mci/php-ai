@@ -49,7 +49,11 @@ class FakeTransport implements TransportInterface
 
     /**
      * 全部收到过的请求，用于断言请求体是否正确
-     * @return array<int, array{url: string, data: array<string, mixed>, headers: array<string, string>}>
+     *
+     * method 键区分 POST / GET —— 异步任务测试要分别断言「提交」与「轮询」
+     * 各发了几次、打到哪个地址
+     *
+     * @return array<int, array{method: string, url: string, data: array<string, mixed>, headers: array<string, string>}>
      */
     public function getRequests(): array
     {
@@ -58,7 +62,7 @@ class FakeTransport implements TransportInterface
 
     /**
      * 最后一次请求
-     * @return array{url: string, data: array<string, mixed>, headers: array<string, string>}|null
+     * @return array{method: string, url: string, data: array<string, mixed>, headers: array<string, string>}|null
      */
     public function lastRequest(): ?array
     {
@@ -80,7 +84,7 @@ class FakeTransport implements TransportInterface
      */
     public function post(string $url, array $data, array $headers = []): array
     {
-        $this->requests[] = ['url' => $url, 'data' => $data, 'headers' => $headers];
+        $this->requests[] = ['method' => 'POST', 'url' => $url, 'data' => $data, 'headers' => $headers];
         return $this->postQueue ? array_shift($this->postQueue) : [];
     }
 
@@ -91,7 +95,7 @@ class FakeTransport implements TransportInterface
      */
     public function get(string $url, array $params = [], array $headers = []): array
     {
-        $this->requests[] = ['url' => $url, 'data' => $params, 'headers' => $headers];
+        $this->requests[] = ['method' => 'GET', 'url' => $url, 'data' => $params, 'headers' => $headers];
         return $this->getQueue ? array_shift($this->getQueue) : [];
     }
 

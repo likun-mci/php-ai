@@ -91,7 +91,18 @@ abstract class BaseFacade
         }
 
         $chatEndpoint = $this->ai->resolveEndpoint();
-        $derived      = Endpoint::deriveFromChat($chatEndpoint, $path);
+
+        // 优先用协议自己声明的对话路径来剥离——它知道自家路径长什么样。
+        // deriveFromChat() 靠猜一组常见后缀，遇到 MiniMax 的
+        // /v1/text/chatcompletion_v2 会剥不掉，拼出叠加路径且不报错，
+        // 只表现为请求 404，很难反推到端点推导这一层
+        $derived = '';
+        if (method_exists($protocol, 'chatPath')) {
+            $derived = Endpoint::deriveByChatPath($chatEndpoint, $protocol->chatPath(), $path);
+        }
+        if ($derived === '') {
+            $derived = Endpoint::deriveFromChat($chatEndpoint, $path);
+        }
         if ($derived === '') {
             throw new ConfigException(sprintf(
                 '无法由对话端点「%s」推导出「%s」能力的地址，请在配置中显式指定 %s',

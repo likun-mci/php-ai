@@ -1719,7 +1719,7 @@ php-ai/
 > |------|------|
 > | 文本向量化 `embeddings()` | ✅ v1.15.0，35 个平台 |
 > | 图像生成 `images()` | ✅ v1.16.0，6 个平台字段已归一 |
-> | 语音 `audio()` | ⏳ 计划 v1.17.0 |
+> | 语音合成 / 识别 `audio()` | ✅ v1.17.0，二进制与 JSON-hex 两种形态已归一 |
 > | WebSocket `realtime()` | ⏳ 计划 v1.18.0 |
 > | 视频生成 `video()` | ⏳ 计划 v1.19.0 |
 >
@@ -1883,6 +1883,82 @@ $ai->images();  // 子门面
 其余 OpenAI 兼容协议会继承基线声明。是否真的开通以对方文档为准——
 未开通时你会收到该平台自己的 404，而不是库的猜测。
 
+### 语音合成与识别（已可用）
+
+```php
+// 文本 → 音频
+$ai = new AI(['api_key' => '...', 'model' => 'gpt-4o-mini-tts']);
+$ai->audio()->speech('你好世界')->saveTo('/tmp/hello.mp3');
+
+// 带参数
+$audio = $ai->audio()->speech('你好世界', [
+    'voice'  => 'sage',    // 音色
+    'format' => 'wav',     // 库内统一写 format，各平台字段名不同
+    'speed'  => 1.2,
+]);
+$audio->getBytes();    // 原始音频字节
+$audio->getFormat();   // 'wav'
+$audio->getSize();     // 字节数
+
+// 音频 → 文本
+$text = $ai->audio()->transcribe('/tmp/record.wav', ['language' => 'zh'])->getText();
+```
+
+#### 两种完全不同的响应形态，库内已归一
+
+| 平台 | 实际返回 |
+|------|---------|
+| OpenAI / 硅基流动 / 阶跃星辰 / 智谱 | **二进制音频字节**（`Content-Type: audio/*`） |
+| MiniMax | **JSON**，音频在 `data.audio`，**hex 编码**（不是 base64） |
+
+调用方两边都写 `speech()->saveTo()`，拿到的都是可以直接播放的文件。
+
+**这里有两个不会报错的坑，库内都堵上了：**
+
+1. **平台出错时回的是 JSON，不是音频。** 不判别就会写出一堆扩展名 `.mp3`、
+   内容是错误信息的文件,全程无报错。库内按响应的实际 `Content-Type` 判别，
+   拿到 JSON 一律当错误处理，`saveTo()` 会直接抛异常而不是写出坏文件。
+2. **MiniMax 的 hex 不是 base64。** 两者都是可打印字符，用 `base64_decode` 去解
+   不报错，只表现为「文件存下来了但放不出声」。另外它的错误不体现在 HTTP 状态码上——
+   `base_resp.status_code` 非 0 才是失败，此时 HTTP 仍是 200，库内会检查这个字段。
+
+#### 音色缺省
+
+OpenAI 的 `voice` 是**必填**参数，不传直接 400。库内会补一个默认音色，
+让 `speech('你好')` 开箱可用；你显式传了就以你的为准。
+
+```php
+(new \Ai\Protocol\OpenAI())->knownVoices();
+// ['alloy','ash','ballad','coral','echo','sage','shimmer','verse','marin','cedar']
+```
+
+> 这份音色清单据 OpenAI 官方 OpenAPI 规范（2026-08），**与早年文档已经不同**：
+> `fable` / `nova` / `onyx` 已不在枚举里，新增了 `marin` / `cedar`。
+> 照着旧印象写音色名会直接 400。
+
+#### 语音识别走 multipart 上传
+
+`transcribe()` 只接受**本地文件**（路径字符串或 `AIFile` 实例）。
+远端音频请先用 `Ai\Helpers\Media::download()` 取回落盘——库不会顺手替你下载，
+因为那需要 SSRF 防护，不该由上传逻辑代劳。
+
+#### 支持的平台与模型
+
+模型清单据各平台官方文档登记：
+
+| 平台 | TTS 模型 | ASR |
+|------|---------|-----|
+| OpenAI | `gpt-4o-mini-tts`、`tts-1-hd`、`tts-1` | `gpt-4o-transcribe`、`whisper-1` 等 |
+| 硅基流动 | `FunAudioLLM/CosyVoice2-0.5B`、`fnlp/MOSS-TTSD-v0.5` | ✅ |
+| 阶跃星辰 | `step-tts-mini`、`step-tts-2`、`step-tts-vivid` | ✅ |
+| 智谱 | `glm-tts` | ✅ |
+| MiniMax | `speech-2.8-hd`、`speech-2.8-turbo` 等 8 个 | ✖（形态不同，未接入） |
+
+**通义（qwen）暂不支持**：其 OpenAI 兼容模式没有语音接口（实测 404），
+原生 DashScope 语音接口形态差异很大，暂未接入。
+
+**讯飞只提供 WebSocket**，走 `$ai->realtime()`，计划 v1.18.0。
+
 ### 异步任务：视频生成不要阻塞等待
 
 视频接口全都是「提交 → 轮询 → 取结果」三段式，一次生成动辄几分钟。
@@ -1981,7 +2057,8 @@ class MyProtocol implements ProtocolInterface
 - `chatBatch()` 并发批量不支持流式，也不走 `setAttachments()`（附件请写在各自 payload 里）；
 - `cost()` 需自行传入价格表，库不内置各平台价格（价格变动频繁，内置必然过期）；
 - `Ai\Cli\ClaudeCode` 依赖本机已安装 claude 程序；`proc_open` / `shell_exec` 被禁用的受限 PHP 环境需改用自定义执行器（如 SSH/SFTP）。
-- 语音 / 视频能力目前**只有骨架**：入口、响应对象、异步任务与传输层支持已就位，但尚无平台声明支持，调用会抛 `UnsupportedCapabilityException`。按 v1.17.0（语音）→ v1.18.0（WebSocket）→ v1.19.0（视频）逐版交付；
+- 视频生成能力目前**只有骨架**：入口、响应对象、异步任务与传输层支持已就位，但尚无平台声明支持，调用会抛 `UnsupportedCapabilityException`。按 v1.18.0（WebSocket）→ v1.19.0（视频）逐版交付；
+- 语音只覆盖 HTTP 通道；讯飞等只提供 WebSocket 的平台要等 v1.18.0；MiniMax 的语音识别形态与 OpenAI 差异较大，暂未接入；
 - 图像生成只支持**同步返回**的平台；通义万相等异步任务式的文生图要等 v1.19.0 的异步任务能力落地；
 - 向量化默认不分批，超出平台单次上限时需自行传 `batch_size`——各平台上限差异大且文档未必写明，库不预设一个「保险的小值」，那会让本可一次发完的平台白白多发几十个请求；
 - WebSocket 通道（讯飞语音）计划在 v1.18.0 交付，当前调用 `realtime()->useWebSocket()` 后会明确提示尚未实现；

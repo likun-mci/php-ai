@@ -84,4 +84,26 @@ class SiliconFlow extends OpenAI
 
         return $payload;
     }
+
+    /**
+     * 硅基流动语音合成模型（据官方文档，2026-08）
+     * @return array<int, string>
+     */
+    public function knownTtsModels(): array
+    {
+        return ['FunAudioLLM/CosyVoice2-0.5B', 'fnlp/MOSS-TTSD-v0.5'];
+    }
+
+    /**
+     * 硅基流动音色（据官方文档，2026-08）
+     *
+     * 实际调用时通常要写成「模型:音色」的完整形式，如
+     * FunAudioLLM/CosyVoice2-0.5B:alex，这里只列音色名本身。
+     *
+     * @return array<int, string>
+     */
+    public function knownVoices(): array
+    {
+        return ['alex', 'anna', 'bella', 'benjamin', 'charles', 'claire', 'david', 'diana'];
+    }
 }

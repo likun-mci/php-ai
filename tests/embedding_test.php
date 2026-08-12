@@ -147,6 +147,22 @@ foreach ($invariantCases as [$proto, $extra]) {
           "chat={$chat} embed={$embed}");
 }
 
+// 对话路径非标准形态的协议要单独断言：MiniMax 的对话路径是
+// /v1/text/chatcompletion_v2，不是 .../chat/completions，靠猜后缀剥不掉。
+// v1.15.0 就是在这里出的错——推导出了
+// https://api.minimaxi.com/v1/text/chatcompletion_v2/v1/embeddings，
+// 而上面那组不变量断言只覆盖标准路径的协议，没能拦住
+$nonStandard = [
+    ['minimax', 'https://api.minimaxi.com/v1/embeddings'],
+];
+foreach ($nonStandard as [$proto, $expected]) {
+    list($ai) = makeAI($proto, 'embo-01');
+    $m = new ReflectionMethod($ai->embeddings(), 'endpoint');
+    $m->setAccessible(true);
+    $got = $m->invoke($ai->embeddings());
+    check($got === $expected, "  {$proto}（对话路径非标准形态）", $got);
+}
+
 // 自定义网关时**绝不能**回落官方地址：那等于把数据发到用户没指定的服务器
 list($ai) = makeAI('openai', 'm', ['base_url' => 'https://private-gw.internal/v1']);
 $m = new ReflectionMethod($ai->embeddings(), 'endpoint');

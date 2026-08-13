@@ -51,7 +51,7 @@
         "source": "https://github.com/likun-mci/php-ai"
     },
     "require": {
-        "php": ">=7.2",
+        "php": ">=7.1",
         "ext-curl": "*",
         "ext-json": "*",
         "ext-mbstring": "*"
@@ -72,7 +72,10 @@
     },
     "config": {
         "sort-packages": true,
-        "optimize-autoloader": true
+        "optimize-autoloader": true,
+        "allow-plugins": {
+            "dealerdirect/phpcodesniffer-composer-installer": true
+        }
     },
     "minimum-stability": "stable",
     "scripts": {
@@ -85,13 +88,18 @@
             "php tests/ssrf_test.php"
         ],
         "analyse": "phpstan analyse --memory-limit=512M",
+        "compat": "phpcs -p --standard=PHPCompatibility --runtime-set testVersion 7.1- --extensions=php --ignore='*/vendor/*' .",
         "check": [
             "@test",
-            "@analyse"
+            "@analyse",
+            "@compat"
         ]
     },
     "require-dev": {
-        "phpstan/phpstan": "^1.10"
+        "dealerdirect/phpcodesniffer-composer-installer": "^1.0",
+        "phpcompatibility/php-compatibility": "^9.3",
+        "phpstan/phpstan": "^1.10",
+        "squizlabs/php_codesniffer": "^3.7"
     },
     "suggest": {
         "ext-openssl": "使用 WebSocket 语音接口（wss://，如讯飞 TTS/ASR）时必需；对话、图像、HTTP 语音等其余能力不需要"

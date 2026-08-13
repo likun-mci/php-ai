@@ -2,7 +2,7 @@
 #
 # level 逐级往上爬，每级修干净再进下一级——能长期维持绿灯的等级才有意义。
 #
-# 5 → 6 这一步补齐了全部 phpdoc 类型（543 处）。本库为兼容 PHP 7.2 不能用
+# 5 → 6 这一步补齐了全部 phpdoc 类型（543 处）。本库为兼容 PHP 7.1 不能用
 # 类型化属性，类型信息只能写在 phpdoc 里，因此这一级的收益是实打实的：
 # 使用方 IDE 能正确补全，改动时的类型错误也能被静态分析拦住。
 # 过程中确实抓到了几处我原本猜错的类型（如 EditExecutor::applyStrReplace()
@@ -20,19 +20,23 @@
 # **就停在 8。** level 9 是「禁止对 mixed 做任何操作」，而本库处理的正是各家
 # 平台返回的任意 JSON 载荷——数据本身就是 mixed，那 269 条几乎全要靠
 # assert 或强制转型去哄静态分析，既不增加正确性也让代码更难读。
+# 这里**不设** phpVersion。本库要同时支持 7.1 和 8.x，而 PHPStan 1.x 的
+# phpVersion 只接受单个版本号：设成 70100 会把 CurlHandle（8.0 才有的类）
+# 判成不存在，反倒制造出一堆假报错。版本下限由 `composer compat`
+# （PHPCompatibility，testVersion 7.1-）把关，那才是专门干这件事的工具。
 parameters:
     level: 8
     paths:
         - src
 
     # 不把 phpdoc 里的类型当成铁定事实。
-    # 本库大量属性只在 @var 里标了类型（PHP 7.2 不支持类型化属性），
+    # 本库大量属性只在 @var 里标了类型（PHP 7.1 不支持类型化属性），
     # 而运行时它们在被赋值前确实是 null，`if (!$this->model)` 这类保护是必要的。
     # 打开这个开关后 PHPStan 才不会把这些防御性判断报成「永远为假」。
     treatPhpDocTypesAsCertain: false
 
     ignoreErrors:
-        # curl 句柄在 PHP 7.2 是 resource、8.0+ 是 CurlHandle。本库两者都要支持，
+        # curl 句柄在 PHP 7.1 是 resource、8.0+ 是 CurlHandle。本库两者都要支持，
         # 因此 buildHandle() 的返回类型如实标成联合类型；PHPStan 按 PHP 8 语义分析，
         # 会认为 resource 分支不合法。这是跨版本兼容的必然结果，不是缺陷。
         -

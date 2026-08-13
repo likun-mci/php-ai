@@ -34,7 +34,7 @@ Every example in this document is taken from a real production system (a CodeIgn
 
 | Item | Requirement |
 |------|-------------|
-| PHP | >= 7.2 |
+| PHP | >= 7.1 |
 | Extensions | `ext-curl`, `ext-json`, `ext-mbstring`, `ext-dom` (HTML conversion only) |
 | Network | Access to the platform APIs. From mainland China a proxy is usually required — see [HTTP proxy](#http-proxy) |
 
@@ -1012,11 +1012,13 @@ php tests/ssrf_test.php     # every known SSRF bypass vector
 
 composer test               # run all of the above in order
 composer analyse            # PHPStan level 8 static analysis (clean)
+composer compat             # PHP 7.1 compatibility scan (PHPCompatibility)
+composer check              # run all three of the above
 ```
 
-CI runs the same checks on **PHP 7.2 / 7.4 / 8.0 / 8.2 / 8.4**, plus static analysis on 8.2.
+CI runs the same checks on **PHP 7.1 / 7.2 / 7.4 / 8.0 / 8.2 / 8.4**, plus static analysis and the PHP 7.1 compatibility scan on 8.2. The minimum version, 7.1, runs the whole test suite for real — not just a syntax check.
 
-> Every public method carries full phpdoc types (PHP 7.2 has no typed properties, so types live in comments). IDEs autocomplete the return shapes of methods like `getToolCalls()` correctly.
+> Every public method carries full phpdoc types (PHP 7.1 has no typed properties, so types live in comments). IDEs autocomplete the return shapes of methods like `getToolCalls()` correctly.
 
 Wire-format differences that are handled in the transport layer (each one was a real bug at some point):
 

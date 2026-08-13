@@ -140,8 +140,15 @@ trait OpenAiEmbeddings
         if (is_string($embedding) && $embedding !== '') {
             $bytes = base64_decode($embedding, true);
             if ($bytes !== false && strlen($bytes) % 4 === 0) {
-                // g = 32 位小端浮点，OpenAI base64 格式即为此
-                $floats = unpack('g*', $bytes);
+                // g = 32 位小端浮点，OpenAI base64 格式即为此。
+                // 该格式符是 PHP 7.0.15 / 7.1.1 才加入的，恰好卡在本库支持的
+                // 7.1 下限上：7.1.0 会告警并返回 false，整条向量静默变成空数组。
+                // 退回 f（机器字节序浮点，各版本都有）——本库支持的平台
+                // （x86 / ARM）全是小端，两者逐字节等价。
+                $floats = @unpack('g*', $bytes);
+                if ($floats === false) {
+                    $floats = unpack('f*', $bytes);
+                }
                 if (is_array($floats)) {
                     return array_map('floatval', array_values($floats));
                 }

@@ -13,9 +13,11 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # composer.json 声明 php >= 7.2，最低版本必须真的跑一遍，
-        # 否则很容易不小心用上 7.4+/8.0+ 的语法
-        php: ['7.2', '7.4', '8.0', '8.2', '8.4']
+        # composer.json 声明 php >= 7.1，最低版本必须真的跑一遍，
+        # 否则很容易不小心用上 7.2+/8.0+ 的语法。
+        # 光有静态扫描不够：PHPCompatibility 查不出「运行时才炸」的那类问题
+        # （子类签名不兼容、扩展函数行为差异），所以 7.1 上要真的把测试跑完。
+        php: ['7.1', '7.2', '7.4', '8.0', '8.2', '8.4']
 
     steps:
       - uses: actions/checkout@v4
@@ -38,8 +40,16 @@ jobs:
       - name: 自动加载可用
         run: php -r "require 'autoload.php'; class_exists('\Ai\AI') or exit(1); echo \"autoload OK\n\";"
 
+      # 库本身零运行时依赖，测试是纯 PHP 脚本，不装 dev 依赖也能跑。
+      # 而 phpstan ^1.10 要求 php >= 7.2，在 7.1 的作业里装 dev 依赖会直接
+      # 解不出依赖——所以最低版本只装非 dev 的部分。
       - name: 安装依赖
-        run: composer install --no-interaction --no-progress
+        run: |
+          if [ "${{ matrix.php }}" = "7.1" ]; then
+            composer install --no-interaction --no-progress --no-dev
+          else
+            composer install --no-interaction --no-progress
+          fi
 
       # 拆成独立步骤：哪个挂了直接看步骤名就知道。
       # 失败时把输出同时写成 annotation —— Actions 日志需要鉴权才能拉，
@@ -64,10 +74,21 @@ jobs:
           done
           exit $fail
 
-      # 静态分析只在较新的 PHP 上跑一次即可，避免 5 个版本重复跑
+      # 静态分析只在较新的 PHP 上跑一次即可，避免 6 个版本重复跑
       - name: 静态分析（PHPStan level 8）
         if: matrix.php == '8.2'
         run: vendor/bin/phpstan analyse --memory-limit=512M --no-progress
+
+      # 版本兼容扫描同样只跑一次：它是纯静态分析，在哪个 PHP 上跑结果都一样，
+      # testVersion 才是被检查的目标版本。
+      #
+      # 这一步是「>= 7.1」这个承诺的看门人。矩阵里虽然有 7.1 作业，但那只能
+      # 发现被测试覆盖到的代码路径；这里是逐行扫全部源码，新语法（类型化属性、
+      # 箭头函数、match、构造器属性提升……）和新函数（str_contains、
+      # array_key_first……）一旦混进来就会当场红灯，附带行号。
+      - name: PHP 7.1 兼容性扫描
+        if: matrix.php == '8.2'
+        run: composer compat
 
       - name: 协议注册表自检
         run: |

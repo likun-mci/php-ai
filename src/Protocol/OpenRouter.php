@@ -82,6 +82,55 @@ class OpenRouter extends OpenAI
     }
 
     /**
+     * OpenRouter 支持由请求参数开启联网搜索
+     */
+    public function supportsWebSearch(): bool
+    {
+        return true;
+    }
+
+    /**
+     * 翻译成 OpenRouter 的 web 插件
+     *
+     * OpenRouter 另有个 `模型名:online` 的简写，官方明确说它「完全等价于」
+     * plugins:[{id:'web'}]。这里用 plugins 形态，因为它能带参数，
+     * 也不必去改用户填的模型名（改模型名会连带影响计费与日志里的模型标识）。
+     *
+     * 这套插件对所有模型都生效——搜索由 OpenRouter 自己做完再把结果喂给模型，
+     * 与底层模型本身有没有联网能力无关。
+     *
+     * @see https://openrouter.ai/docs/features/web-search
+     * @param array<string, mixed> $request
+     * @param array<string, mixed> $search
+     * @return array<string, mixed>
+     */
+    public function applyWebSearch(array $request, array $search): array
+    {
+        $plugin = ['id' => 'web'];
+
+        $count = \Ai\Helpers\WebSearch::opt($search, 'count');
+        if ($count !== null) {
+            $plugin['max_results'] = (int) $count;
+        }
+        $allowed = \Ai\Helpers\WebSearch::opt($search, 'allowed_domains');
+        if ($allowed) {
+            $plugin['include_domains'] = $allowed;
+        }
+        $blocked = \Ai\Helpers\WebSearch::opt($search, 'blocked_domains');
+        if ($blocked) {
+            $plugin['exclude_domains'] = $blocked;
+        }
+
+        // 已有 plugins 时追加，不覆盖用户自己配的其它插件
+        $plugins = isset($request['plugins']) && is_array($request['plugins']) ? $request['plugins'] : [];
+        $plugins[] = $plugin;
+        $request['plugins'] = $plugins;
+
+        // max_uses / recency / forced / citation / sources / query 没有对应参数
+        return $request;
+    }
+
+    /**
      * 常用模型（供后台离线渲染下拉框；拉取失败时作为兜底）
      * OpenRouter 自身的 /v1/models 接口很完整，正常情况下不会用到这里
      * @return array<string, string> 模型 id => 显示名

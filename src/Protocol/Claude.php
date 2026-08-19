@@ -11,6 +11,7 @@ use Ai\Response\AIResponse;
 class Claude implements ProtocolInterface
 {
     use \Ai\Protocol\Concerns\CapabilityDefaults;
+    use \Ai\Protocol\Concerns\WebSearchSupport;
 
     use ModelCatalog;
 
@@ -87,9 +88,21 @@ class Claude implements ProtocolInterface
             }
         }
 
-        // 工具定义：允许调用方直接写 OpenAI 原生格式
+        // 工具定义：允许调用方直接写 OpenAI 原生格式。
+        // 转换后为空时去掉 tools 键，理由同 OpenAI::buildRequest()
         if (!empty($payload['tools']) && is_array($payload['tools'])) {
-            $request['tools'] = \Ai\Helpers\Tools::toClaudeDefs($payload['tools']);
+            $defs = \Ai\Helpers\Tools::toClaudeDefs($payload['tools']);
+            if ($defs) {
+                $request['tools'] = $defs;
+            } else {
+                unset($request['tools']);
+            }
+        }
+
+        // 联网搜索：翻译成 Anthropic 的服务端工具写法
+        $search = \Ai\Helpers\WebSearch::normalize($payload['search'] ?? null);
+        if ($search !== null) {
+            $request = $this->applyWebSearch($request, $search);
         }
 
         // 流式开关必须写入请求体，否则服务端按非流式返回
@@ -100,6 +113,64 @@ class Claude implements ProtocolInterface
         return $request;
     }
     
+    /**
+     * Anthropic 支持由请求参数开启联网搜索
+     */
+    public function supportsWebSearch(): bool
+    {
+        return true;
+    }
+
+    /**
+     * 联网搜索工具的版本标识
+     *
+     * 官方同时在售三个版本：web_search_20250305（基础）、web_search_20260209
+     * 与 web_search_20260318（后两者带动态过滤）。这里固定用基础版，因为
+     * 20260209 起 allowed_callers 默认变成 code_execution，不支持程序化工具调用的
+     * 模型会直接 400；基础版则是所有支持搜索的模型都能用。
+     * 要用新版本的，走 `extra_body` 自己写整个 tools 数组。
+     *
+     * @see https://platform.claude.com/docs/en/agents-and-tools/tool-use/web-search-tool
+     */
+    protected function webSearchToolType(): string
+    {
+        return 'web_search_20250305';
+    }
+
+    /**
+     * 翻译成 Anthropic 的服务端工具写法
+     *
+     * @param array<string, mixed> $request
+     * @param array<string, mixed> $search
+     * @return array<string, mixed>
+     */
+    public function applyWebSearch(array $request, array $search): array
+    {
+        $tool = [
+            'type' => $this->webSearchToolType(),
+            'name' => 'web_search',
+        ];
+
+        $maxUses = \Ai\Helpers\WebSearch::opt($search, 'max_uses');
+        if ($maxUses !== null) {
+            $tool['max_uses'] = (int) $maxUses;
+        }
+        // 官方规定 allowed_domains 与 blocked_domains 不能同时给，
+        // 归一化阶段已经挡掉了同时传的情况
+        $allowed = \Ai\Helpers\WebSearch::opt($search, 'allowed_domains');
+        if ($allowed) {
+            $tool['allowed_domains'] = $allowed;
+        }
+        $blocked = \Ai\Helpers\WebSearch::opt($search, 'blocked_domains');
+        if ($blocked) {
+            $tool['blocked_domains'] = $blocked;
+        }
+
+        // count / recency / forced / citation / query 在 Anthropic 没有对应参数：
+        // 搜几条、搜多新、要不要角标都由服务端决定，引用则一律带上。
+        return $this->appendServerTool($request, $tool);
+    }
+
     /**
      * 转换消息格式
      * @param array<int, array<string, mixed>> $messages

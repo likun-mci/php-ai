@@ -11,6 +11,7 @@ use Ai\Response\AIResponse;
 class Gemini implements ProtocolInterface
 {
     use \Ai\Protocol\Concerns\CapabilityDefaults;
+    use \Ai\Protocol\Concerns\WebSearchSupport;
     use \Ai\Protocol\Concerns\OpenAiEmbeddings;
     use \Ai\Protocol\Concerns\OpenAiImages;
     use \Ai\Protocol\Concerns\AsyncVideoTask;
@@ -86,11 +87,22 @@ class Gemini implements ProtocolInterface
             }
         }
 
+        // 转换后为空时去掉 tools 键，理由同 OpenAI::buildRequest()
         if (!empty($payload['tools']) && is_array($payload['tools'])) {
-            $request['tools'] = \Ai\Helpers\Tools::toOpenAiDefs($payload['tools']);
+            $defs = \Ai\Helpers\Tools::toOpenAiDefs($payload['tools']);
+            if ($defs) {
+                $request['tools'] = $defs;
+            } else {
+                unset($request['tools']);
+            }
         }
         if (isset($payload['tool_choice'])) {
             $request['tool_choice'] = \Ai\Helpers\Tools::toOpenAiToolChoice($payload['tool_choice']);
+        }
+
+        $search = \Ai\Helpers\WebSearch::normalize($payload['search'] ?? null);
+        if ($search !== null) {
+            $request = $this->applyWebSearch($request, $search);
         }
         if (!empty($payload['system']) && is_string($payload['system'])) {
             array_unshift($request['messages'], ['role' => 'system', 'content' => $payload['system']]);

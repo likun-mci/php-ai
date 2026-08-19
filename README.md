@@ -349,6 +349,7 @@ $ai->setConfig([
     'platform'     => '',            // 平台名，仅供业务层标识，默认由模型名/协议决定
     'headers'      => [],            // 追加/覆盖请求头，值为 null 表示删除协议默认头
     'extra_body'   => [],            // 追加到请求体的私有参数
+    'search'       => false,         // 联网搜索，true 或细化数组，见「联网搜索」
     'max_tokens'             => 1024 * 64,  // 最大输出 tokens
     'max_completion_tokens'  => 16384,      // 仅 OpenAI o1/o3 系列，覆盖 max_tokens
     'temperature'            => 0.7,        // 温度
@@ -1468,6 +1469,141 @@ foreach ($plan->toArray()['actions'] as $a) {
 ```
 
 配合 Agent 可实现三种工作模式：`plan`（只读规划）、`approval`（产出待人工审核的建议）、`auto`（自动写入并备份）。
+
+---
+
+## 联网搜索
+
+不少平台的模型能自己上网查资料再回答。各家的开关五花八门——有的是请求体顶层的一个布尔值，
+有的要往 `tools` 里塞一个内置工具，还有的走插件系统。本库把它们归一成一个 `search` 配置：
+
+```php
+$ai = AI::create([
+    'model'   => 'qwen-plus',
+    'api_key' => 'sk-xxx',
+    'search'  => true,          // 开启联网搜索
+]);
+
+echo $ai->chat('今天有哪些重要新闻？')->getContent();
+```
+
+换个平台只改 `model`，`search` 这行不动：
+
+```php
+$ai->setConfig(['model' => 'claude-sonnet-4-20250514', 'api_key' => 'sk-ant-xxx']);
+$ai->setConfig(['model' => 'glm-4-plus',               'api_key' => 'xxx']);
+```
+
+### 细化配置
+
+`search` 传数组可以调细节。省略 `enable` 即视为开启：
+
+```php
+$ai->setConfig([
+    'search' => [
+        'enable'          => true,
+        'max_uses'        => 5,               // 单次请求最多搜几次
+        'count'           => 10,              // 返回结果条数
+        'query'           => 'PHP 8.5 新特性', // 强制指定搜索词，不指定则由模型自己拟
+        'recency'         => 'week',          // 时效：hour / day / week / month / year
+        'forced'          => true,            // 强制搜索，不让模型自行判断要不要搜
+        'citation'        => true,            // 正文里带引用角标
+        'sources'         => true,            // 返回搜索来源列表
+        'allowed_domains' => ['wikipedia.org'], // 只搜这些域名
+        'blocked_domains' => ['spam.com'],      // 不搜这些域名（与上一项互斥）
+    ],
+]);
+```
+
+**平台不支持的细项会被静默忽略**，不影响搜索本身开启。这是刻意的：统一层承诺的是
+「搜索会开」，不是「每个细节都能在每个平台生效」。下表是各项的实际落点：
+
+| 统一配置 | Claude | 通义千问 | 智谱 GLM | Kimi | 文心一言 | OpenRouter | Perplexity |
+|---------|--------|---------|---------|------|---------|-----------|-----------|
+| `max_uses` | `max_uses` | — | — | — | — | — | — |
+| `count` | — | — | `count` | — | `search_number` | `max_results` | — |
+| `query` | — | — | `search_query` | — | — | — | — |
+| `recency` | — | — | `search_recency_filter` | — | — | — | `search_recency_filter` |
+| `forced` | — | `forced_search` | `require_search` | — | — | — | — |
+| `citation` | 总是开 | `enable_citation` | — | — | `enable_citation` | — | — |
+| `sources` | — | `enable_source` | `search_result` | — | `enable_trace` | — | `return_related_questions` |
+| `allowed_domains` | ✅ | — | 仅首个 | — | — | `include_domains` | ✅ |
+| `blocked_domains` | ✅ | — | — | — | — | `exclude_domains` | 加 `-` 前缀 |
+
+几处需要留意的差异：
+
+- **Claude** 的引用是常开的，没有开关；`allowed_domains` 与 `blocked_domains`
+  同时传会被平台判为 400，本库在发请求前就会拦下并报错。
+- **智谱** 的 `search_domain_filter` 官方类型是字符串而非数组，多个域名只会取第一个。
+- **智谱** 没有「一小时内」这一档，`recency => 'hour'` 会并到 `oneDay`。
+- **Perplexity** 的 Sonar 系模型**本来就是联网的**，不存在开不开；`search` 在这里
+  只用来传过滤条件。
+- **Kimi** 的内置搜索走的是 tool_calls 流程——模型只生成搜索参数，需要客户端回填结果
+  对话才会继续。所以它必须配合 Agent 循环使用，单发一次 `chat()` 只会拿到一个工具调用：
+
+  ```php
+  $ai->setConfig(['model' => 'kimi-k2-0905-preview', 'search' => true]);
+
+  $agent = new \Ai\Agent\Agent($ai);                                  // ✅ 用 Agent
+  $agent->run([['role' => 'user', 'content' => '今天有哪些重要新闻？']]);
+  echo $agent->lastText();
+  ```
+
+### 哪些平台支持
+
+```php
+print_r(\Ai\Helpers\Protocols::withWebSearch());
+// ['claude', 'qwen', 'ernie', 'zhipu', 'moonshot', 'perplexity', 'openrouter']
+
+\Ai\Helpers\Protocols::supportsWebSearch('deepseek');   // false
+```
+
+**没列进来的平台，配了 `search` 会直接抛 `ConfigException`**，而不是静默忽略。
+静默忽略在这里是最糟的选择：用户拿到的是一个「答得挺像样、但其实没上网」的回复，
+内容陈旧却毫无征兆，往往要等到发现模型说的是去年的事才察觉。
+
+需要特别说明的两个：
+
+- **OpenAI** 的 Chat Completions 端点没有联网开关，联网搜索只在 Responses API
+  或 `gpt-5-search-api` 这类专用搜索模型上提供。本库走的是 Chat Completions，
+  所以 `openai` 协议不声明支持。
+- **通义千问 / 智谱 / Kimi 的 Anthropic 兼容端点**（`qwen-anthropic` 等）同样不支持。
+  那些网关只翻译 Anthropic 的**请求格式**，Anthropic 的 web_search 是 Anthropic 自己的
+  服务端能力，不会随协议格式一起过来。要在这些平台上联网，请改用它们的 OpenAI 兼容协议。
+
+### 平台私有参数：用 `extra_body`
+
+统一配置只收各家都有的语义，平台独有的参数（通义的 `search_strategy`、
+智谱的 `search_engine`、OpenRouter 的 `engine` 等）不进 `search`，用 `extra_body` 直接写：
+
+```php
+$ai->setConfig([
+    'search'     => ['forced' => true],
+    'extra_body' => ['search_options' => ['search_strategy' => 'max']],
+]);
+```
+
+`extra_body` 在请求体顶层做合并，**同名字段会整体覆盖** `search` 生成的结果——
+上例中最终发出的 `search_options` 只有 `search_strategy`，`forced_search` 会被顶掉。
+要同时用两者，把所有子字段都写进 `extra_body`。
+
+库对某平台的判断有误或过时时，`extra_body` 也是逃生口：它绕过全部声明检查，
+可以直接发平台原生的搜索参数。
+
+### 与 `Ai\Tools\HttpFetch` 的区别
+
+两者都能让模型用上网页内容，但不是一回事：
+
+| | `search` 配置 | `Ai\Tools\HttpFetch`（见下一节） |
+|---|---|---|
+| 谁在联网 | 平台的服务器 | 你的 PHP 进程 |
+| 计费 | 平台按次收搜索费 | 只有 token 费用，流量走你的服务器 |
+| 能力 | 搜索引擎检索 | 抓取你指定的 URL |
+| 可控性 | 只能给过滤条件 | 完全可控，含 SSRF 防护 |
+| 支持范围 | 仅上表 7 个平台 | 所有平台 |
+
+需要「模型自己决定搜什么」用 `search`；需要「读这几个我指定的页面」用 `HttpFetch`。
+两者可以同时开。
 
 ---
 

@@ -43,6 +43,46 @@ class Ernie extends OpenAI
     }
 
     /**
+     * 千帆支持由请求参数开启联网搜索
+     */
+    public function supportsWebSearch(): bool
+    {
+        return true;
+    }
+
+    /**
+     * 翻译成千帆的顶层 web_search 对象
+     *
+     * @see https://cloud.baidu.com/doc/qianfan-docs/s/Wm8r4sw29
+     * @param array<string, mixed> $request
+     * @param array<string, mixed> $search
+     * @return array<string, mixed>
+     */
+    public function applyWebSearch(array $request, array $search): array
+    {
+        $ws = ['enable' => true];
+
+        $citation = \Ai\Helpers\WebSearch::opt($search, 'citation');
+        if ($citation !== null) {
+            $ws['enable_citation'] = (bool) $citation;
+        }
+        $sources = \Ai\Helpers\WebSearch::opt($search, 'sources');
+        if ($sources !== null) {
+            // enable_trace 返回的是搜索过程与来源列表
+            $ws['enable_trace'] = (bool) $sources;
+        }
+        $count = \Ai\Helpers\WebSearch::opt($search, 'count');
+        if ($count !== null) {
+            // 官方上限 10
+            $ws['search_number'] = min(10, (int) $count);
+        }
+
+        // max_uses / recency / forced / query / 域名过滤在千帆没有对应参数
+        $request['web_search'] = $ws;
+        return $request;
+    }
+
+    /**
      * 常用模型（供后台离线渲染下拉框；平台无模型列表接口或拉取失败时作为兜底）
      * @return array<string, string> 模型 id => 显示名
      */

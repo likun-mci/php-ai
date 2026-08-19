@@ -123,7 +123,7 @@ class AI
     protected static $payloadKeys = [
         'max_tokens', 'max_completion_tokens', 'temperature', 'top_p', 'top_k', 'stop',
         'presence_penalty', 'frequency_penalty', 'seed', 'response_format',
-        'system', 'tools', 'tool_choice', 'reasoning_effort', 'thinking',
+        'system', 'tools', 'tool_choice', 'reasoning_effort', 'thinking', 'search',
     ];
 
     /**
@@ -490,6 +490,39 @@ class AI
     }
 
     /**
+     * 配了联网搜索、但当前协议翻译不了时抛错
+     *
+     * 静默忽略是这里最糟的选择：用户看到的是一个「答得挺像样、但其实没上网」的回复，
+     * 内容陈旧却毫无征兆，往往要等到发现模型说的是去年的事才反应过来。
+     * 直接报错至少能立刻知道这条路不通，并顺着提示改用 extra_body。
+     *
+     * @param array<string, mixed> $payload
+     * @throws ConfigException
+     */
+    protected function assertSearchSupported(array $payload): void
+    {
+        if (!isset($payload['search']) || $this->protocol === null) {
+            return;
+        }
+        if (\Ai\Helpers\WebSearch::normalize($payload['search']) === null) {
+            return;   // 显式关掉的，不必检查
+        }
+        // 用户自定义协议可能没 use 这个 trait，没有就当作不支持
+        $supported = method_exists($this->protocol, 'supportsWebSearch')
+            && $this->protocol->supportsWebSearch();
+        if ($supported) {
+            return;
+        }
+
+        $protocol = \Ai\Helpers\Protocols::keyOfClass(get_class($this->protocol)) ?: get_class($this->protocol);
+        throw new ConfigException(
+            "Protocol '{$protocol}' does not support the unified 'search' option. "
+            . "Platforms with built-in web search: " . implode(', ', \Ai\Helpers\Protocols::withWebSearch()) . ". "
+            . "If this platform does have web search, pass its native parameters via 'extra_body' instead."
+        );
+    }
+
+    /**
      * 解析实际请求端点
      *
      * 在模型默认端点基础上，按运行时配置 endpoint / base_url 覆盖，
@@ -614,7 +647,10 @@ class AI
 
         // 对合并后的 payload 做数值参数净化（类型转换 + 范围截断）
         $payload = self::sanitizePayloadParams($payload);
-        
+
+        // 配了联网搜索但当前协议不支持时，当场说清楚
+        $this->assertSearchSupported($payload);
+
         // 处理附件：交由模型层处理模型特定的附件格式
         if (!empty($this->attachments)) {
             $payload = $this->model->processAttachments($payload, $this->attachments);

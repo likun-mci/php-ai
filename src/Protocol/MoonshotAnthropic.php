@@ -28,6 +28,22 @@ class MoonshotAnthropic extends Claude
     }
 
     /**
+     * 该端点不支持联网搜索
+     *
+     * 这是Kimi自建的 Anthropic 兼容网关，只是把 Anthropic 的**请求格式**翻译成
+     * 自家模型的调用，Anthropic 那个 web_search 服务端工具是 Anthropic 自己的
+     * 服务端能力，不会随协议格式一起过来。若不在这里显式收回，会从 Claude 基类
+     * 继承到一个「支持」的错误声明，发出去的 tools 里带着平台不认识的
+     * web_search_20250305，换来一次没必要的失败。
+     *
+     * 要在Kimi上用联网搜索，改用 `moonshot` 协议（OpenAI 兼容端点）。
+     */
+    public function supportsWebSearch(): bool
+    {
+        return false;
+    }
+
+    /**
      * 常用模型（供后台离线渲染下拉框；平台无模型列表接口或拉取失败时作为兜底）
      * @return array<string, string> 模型 id => 显示名
      */

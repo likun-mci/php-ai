@@ -28,6 +28,54 @@ class Qwen extends OpenAI
     }
 
     /**
+     * 百炼支持由请求参数开启联网搜索
+     */
+    public function supportsWebSearch(): bool
+    {
+        return true;
+    }
+
+    /**
+     * 翻译成百炼的 enable_search + search_options
+     *
+     * OpenAI 兼容模式下这两个字段就放在请求体顶层（官方 Python 示例里的
+     * `extra_body={...}` 只是 SDK 的写法，落到 HTTP 上仍是顶层字段）。
+     *
+     * 平台独有的 search_strategy（turbo / max / agent / agent_max）与
+     * citation_format 不进统一配置，要用就走 `extra_body`——
+     * 顶层 array_merge 会整个替换掉这里生成的 search_options。
+     *
+     * @see https://help.aliyun.com/zh/model-studio/web-search
+     * @param array<string, mixed> $request
+     * @param array<string, mixed> $search
+     * @return array<string, mixed>
+     */
+    public function applyWebSearch(array $request, array $search): array
+    {
+        $request['enable_search'] = true;
+
+        $options = [];
+        $forced = \Ai\Helpers\WebSearch::opt($search, 'forced');
+        if ($forced !== null) {
+            $options['forced_search'] = (bool) $forced;
+        }
+        $sources = \Ai\Helpers\WebSearch::opt($search, 'sources');
+        if ($sources !== null) {
+            $options['enable_source'] = (bool) $sources;
+        }
+        $citation = \Ai\Helpers\WebSearch::opt($search, 'citation');
+        if ($citation !== null) {
+            $options['enable_citation'] = (bool) $citation;
+        }
+        if ($options) {
+            $request['search_options'] = $options;
+        }
+
+        // max_uses / count / recency / query / 域名过滤在百炼没有对应参数
+        return $request;
+    }
+
+    /**
      * 常用模型（供后台离线渲染下拉框；平台无模型列表接口或拉取失败时作为兜底）
      * @return array<string, string> 模型 id => 显示名
      */

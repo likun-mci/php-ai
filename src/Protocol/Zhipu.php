@@ -43,6 +43,64 @@ class Zhipu extends OpenAI
     }
 
     /**
+     * 智谱支持由请求参数开启联网搜索
+     */
+    public function supportsWebSearch(): bool
+    {
+        return true;
+    }
+
+    /**
+     * 翻译成智谱的 tools[web_search] 写法
+     *
+     * 智谱把搜索做成 tools 里的一个内置工具，与用户自定义的函数工具并存，
+     * 所以这里是**追加**而不是覆盖。
+     *
+     * 注意 search_domain_filter 官方声明的类型是 string 而非数组，
+     * 多个域名只能取第一个——这是平台的限制，不是这里少写了循环。
+     *
+     * @see https://docs.bigmodel.cn/api-reference/模型-api/对话补全
+     * @param array<string, mixed> $request
+     * @param array<string, mixed> $search
+     * @return array<string, mixed>
+     */
+    public function applyWebSearch(array $request, array $search): array
+    {
+        $ws = ['enable' => true];
+
+        $count = \Ai\Helpers\WebSearch::opt($search, 'count');
+        if ($count !== null) {
+            $ws['count'] = (int) $count;
+        }
+        $query = \Ai\Helpers\WebSearch::opt($search, 'query');
+        if ($query !== null) {
+            $ws['search_query'] = (string) $query;
+        }
+        $recency = \Ai\Helpers\WebSearch::opt($search, 'recency');
+        if ($recency !== null) {
+            $ws['search_recency_filter'] = \Ai\Helpers\WebSearch::recencyToZhipu($recency);
+        }
+        $sources = \Ai\Helpers\WebSearch::opt($search, 'sources');
+        if ($sources !== null) {
+            $ws['search_result'] = (bool) $sources;
+        }
+        $forced = \Ai\Helpers\WebSearch::opt($search, 'forced');
+        if ($forced !== null) {
+            $ws['require_search'] = (bool) $forced;
+        }
+        $allowed = \Ai\Helpers\WebSearch::opt($search, 'allowed_domains');
+        if ($allowed) {
+            $ws['search_domain_filter'] = (string) $allowed[0];
+        }
+
+        // max_uses / citation / blocked_domains 在智谱没有对应参数
+        return $this->appendServerTool($request, [
+            'type'       => 'web_search',
+            'web_search' => $ws,
+        ]);
+    }
+
+    /**
      * 常用模型（供后台离线渲染下拉框；平台无模型列表接口或拉取失败时作为兜底）
      * @return array<string, string> 模型 id => 显示名
      */

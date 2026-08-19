@@ -658,6 +658,43 @@ class Protocols
     }
 
     /**
+     * 该协议是否支持用统一的 `search` 配置开启联网搜索
+     *
+     * @param string $protocol 协议标识或类名
+     */
+    public static function supportsWebSearch(string $protocol): bool
+    {
+        try {
+            $class = self::resolveClass($protocol);
+        } catch (ConfigException $e) {
+            return false;
+        }
+        if (!method_exists($class, 'supportsWebSearch')) {
+            return false;
+        }
+        return (bool) (new $class())->supportsWebSearch();
+    }
+
+    /**
+     * 全部支持联网搜索的协议标识
+     *
+     * 供后台渲染「联网搜索」开关时判断要不要显示，也用在报错提示里
+     * 告诉用户可以换哪些平台。
+     *
+     * @return array<int, string> 协议标识列表
+     */
+    public static function withWebSearch(): array
+    {
+        $out = [];
+        foreach (array_keys(self::$map) as $key) {
+            if (self::supportsWebSearch($key)) {
+                $out[] = $key;
+            }
+        }
+        return $out;
+    }
+
+    /**
      * 组装协议的默认对话端点
      *
      * @param string $protocol 协议标识或类名

@@ -34,6 +34,31 @@ class Tools
     }
 
     /**
+     * 是否为平台的**服务端工具**（由平台自己执行，不回调业务代码）
+     *
+     * 联网搜索、代码执行这类工具，各家都是往 tools 里塞一个自带 type 的条目，
+     * 且形态各不相同：
+     *
+     *   {type:'web_search_20250305', name:'web_search', max_uses:5}   Claude
+     *   {type:'web_search', web_search:{enable:true}}                 智谱 GLM
+     *   {type:'builtin_function', function:{name:'$web_search'}}      Kimi
+     *   {type:'web_search', filters:{allowed_domains:[...]}}          xAI
+     *
+     * 它们的共同点是**带 type 且 type 不是 'function'**。识别出来后必须原样放行：
+     * 这些结构不是「函数工具的另一种写法」，任何字段改写都会让平台认不出来。
+     *
+     * 注意判断顺序——Claude 的写法同时带 name，若先按 name 当统一格式处理，
+     * 会被改写成 {type:'function', function:{name:'web_search_20250305'}}，
+     * 平台收到的就是一个不存在的函数工具。
+     *
+     * @param array<string, mixed> $tool
+     */
+    public static function isServerToolDef(array $tool): bool
+    {
+        return isset($tool['type']) && is_string($tool['type']) && $tool['type'] !== 'function';
+    }
+
+    /**
      * 工具定义 → OpenAI 格式
      *
      * @param array<int, array<string, mixed>> $tools 统一格式或 OpenAI 原生格式的工具定义数组
@@ -48,6 +73,10 @@ class Tools
             }
             if (self::isOpenAiToolDef($tool)) {
                 $out[] = $tool;                       // 已经是目标格式
+                continue;
+            }
+            if (self::isServerToolDef($tool)) {
+                $out[] = $tool;                       // 平台服务端工具，原样放行
                 continue;
             }
             if (!isset($tool['name'])) {
@@ -88,6 +117,10 @@ class Tools
                     'description'  => (string) ($fn['description'] ?? ''),
                     'input_schema' => $fn['parameters'] ?? ['type' => 'object', 'properties' => new \stdClass()],
                 ];
+                continue;
+            }
+            if (self::isServerToolDef($tool)) {
+                $out[] = $tool;                       // 平台服务端工具，原样放行
                 continue;
             }
             if (isset($tool['name'])) {

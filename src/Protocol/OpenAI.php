@@ -11,6 +11,7 @@ use Ai\Response\AIResponse;
 class OpenAI implements ProtocolInterface
 {
     use \Ai\Protocol\Concerns\CapabilityDefaults;
+    use \Ai\Protocol\Concerns\WebSearchSupport;
     use \Ai\Protocol\Concerns\OpenAiEmbeddings;
     use \Ai\Protocol\Concerns\OpenAiImages;
     use \Ai\Protocol\Concerns\OpenAiAudio;
@@ -88,12 +89,26 @@ class OpenAI implements ProtocolInterface
             }
         }
 
-        // 工具定义与 tool_choice 同样按目标平台格式改写
+        // 工具定义与 tool_choice 同样按目标平台格式改写。
+        // 转换后为空时要把 tools 键去掉：传入的定义全部无法识别（例如整个数组都是
+        // 无 type 也无 name 的碎片）时，留下一个空数组会被部分平台判为非法参数报 400，
+        // 比「工具没生效」更难查——干脆当作没配工具。
         if (!empty($payload['tools']) && is_array($payload['tools'])) {
-            $request['tools'] = \Ai\Helpers\Tools::toOpenAiDefs($payload['tools']);
+            $defs = \Ai\Helpers\Tools::toOpenAiDefs($payload['tools']);
+            if ($defs) {
+                $request['tools'] = $defs;
+            } else {
+                unset($request['tools']);
+            }
         }
         if (isset($payload['tool_choice'])) {
             $request['tool_choice'] = \Ai\Helpers\Tools::toOpenAiToolChoice($payload['tool_choice']);
+        }
+
+        // 联网搜索：翻译成本平台的写法（默认不支持，见 WebSearchSupport）
+        $search = \Ai\Helpers\WebSearch::normalize($payload['search'] ?? null);
+        if ($search !== null) {
+            $request = $this->applyWebSearch($request, $search);
         }
 
         // OpenAI 系没有顶层 system 字段，统一格式里的 system 要落到 messages 首位

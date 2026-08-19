@@ -44,6 +44,59 @@ class Perplexity extends OpenAI
     }
 
     /**
+     * Perplexity 支持搜索参数
+     *
+     * 注意语义与其它平台不同：Sonar 系模型**本来就是联网的**，不存在「开不开」。
+     * 这里声明支持，是为了让统一配置里的过滤项（时效、域名）能落到实处，
+     * 而不是让用户在唯一一个天生联网的平台上反而收到「不支持搜索」的报错。
+     */
+    public function supportsWebSearch(): bool
+    {
+        return true;
+    }
+
+    /**
+     * 翻译成 Perplexity 的顶层搜索过滤参数
+     *
+     * 域名过滤用同一个 search_domain_filter 表达黑白名单：
+     * 前面加减号是排除，不加是限定。
+     *
+     * @see https://docs.perplexity.ai/api-reference/chat-completions-post
+     * @param array<string, mixed> $request
+     * @param array<string, mixed> $search
+     * @return array<string, mixed>
+     */
+    public function applyWebSearch(array $request, array $search): array
+    {
+        $recency = \Ai\Helpers\WebSearch::opt($search, 'recency');
+        if ($recency !== null) {
+            // 取值 hour / day / week / month / year，与统一配置完全一致
+            $request['search_recency_filter'] = $recency;
+        }
+
+        $allowed = \Ai\Helpers\WebSearch::opt($search, 'allowed_domains');
+        if ($allowed) {
+            $request['search_domain_filter'] = $allowed;
+        }
+        $blocked = \Ai\Helpers\WebSearch::opt($search, 'blocked_domains');
+        if ($blocked) {
+            $request['search_domain_filter'] = array_map(function ($domain) {
+                return '-' . ltrim($domain, '-');
+            }, $blocked);
+        }
+
+        $sources = \Ai\Helpers\WebSearch::opt($search, 'sources');
+        if ($sources !== null) {
+            // 相关追问同样基于搜索结果生成，是这里最接近「返回来源信息」的开关
+            $request['return_related_questions'] = (bool) $sources;
+        }
+
+        // max_uses / count / forced / citation / query 没有对应参数；
+        // enable 本身也无需落字段——Sonar 天生联网
+        return $request;
+    }
+
+    /**
      * 常用模型（供后台离线渲染下拉框；平台无模型列表接口或拉取失败时作为兜底）
      * @return array<string, string> 模型 id => 显示名
      */

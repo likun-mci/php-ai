@@ -350,6 +350,7 @@ $ai->setConfig([
     'platform'     => '',            // platform label for your own bookkeeping; defaults to the model/protocol
     'headers'      => [],            // add or override request headers; a null value deletes a protocol default
     'extra_body'   => [],            // vendor-specific parameters merged into the request body
+    'search'       => false,         // web search: true, or an array of options — see "Web search"
     'max_tokens'             => 1024 * 64,  // maximum output tokens
     'max_completion_tokens'  => 16384,      // OpenAI o1/o3 series only; overrides max_tokens
     'temperature'            => 0.7,
@@ -1456,6 +1457,153 @@ foreach ($plan->toArray()['actions'] as $a) {
 ```
 
 Combined with an Agent this supports three modes: `plan` (read-only planning), `approval` (produce suggestions for human review) and `auto` (write automatically with backups).
+
+---
+
+## Web search
+
+Many platforms let the model search the web before answering. Every vendor spells the switch
+differently — some take a boolean at the top of the request body, some want a built-in tool
+pushed into `tools`, others go through a plugin system. This library normalises them into a
+single `search` option:
+
+```php
+$ai = AI::create([
+    'model'   => 'qwen-plus',
+    'api_key' => 'sk-xxx',
+    'search'  => true,          // turn on web search
+]);
+
+echo $ai->chat('What are today\'s top news stories?')->getContent();
+```
+
+Switching platforms only changes `model`; the `search` line stays as it is:
+
+```php
+$ai->setConfig(['model' => 'claude-sonnet-4-20250514', 'api_key' => 'sk-ant-xxx']);
+$ai->setConfig(['model' => 'glm-4-plus',               'api_key' => 'xxx']);
+```
+
+### Fine-grained options
+
+Pass an array to `search` to tune the details. Omitting `enable` means enabled:
+
+```php
+$ai->setConfig([
+    'search' => [
+        'enable'          => true,
+        'max_uses'        => 5,                 // max searches per request
+        'count'           => 10,                // number of results returned
+        'query'           => 'PHP 8.5 features', // force the search term; otherwise the model writes it
+        'recency'         => 'week',            // freshness: hour / day / week / month / year
+        'forced'          => true,              // always search, don't let the model decide
+        'citation'        => true,              // inline citation markers in the answer
+        'sources'         => true,              // return the list of sources
+        'allowed_domains' => ['wikipedia.org'], // search only these domains
+        'blocked_domains' => ['spam.com'],      // never search these (mutually exclusive with the above)
+    ],
+]);
+```
+
+**Options a platform doesn't have are silently ignored** and do not stop search itself from
+being enabled. This is deliberate: the unified layer promises "search will be on", not "every
+detail takes effect everywhere". Here is where each option actually lands:
+
+| Unified option | Claude | Qwen | Zhipu GLM | Kimi | ERNIE | OpenRouter | Perplexity |
+|---------|--------|---------|---------|------|---------|-----------|-----------|
+| `max_uses` | `max_uses` | — | — | — | — | — | — |
+| `count` | — | — | `count` | — | `search_number` | `max_results` | — |
+| `query` | — | — | `search_query` | — | — | — | — |
+| `recency` | — | — | `search_recency_filter` | — | — | — | `search_recency_filter` |
+| `forced` | — | `forced_search` | `require_search` | — | — | — | — |
+| `citation` | always on | `enable_citation` | — | — | `enable_citation` | — | — |
+| `sources` | — | `enable_source` | `search_result` | — | `enable_trace` | — | `return_related_questions` |
+| `allowed_domains` | ✅ | — | first one only | — | — | `include_domains` | ✅ |
+| `blocked_domains` | ✅ | — | — | — | — | `exclude_domains` | prefixed with `-` |
+
+A few differences worth knowing:
+
+- **Claude** always cites its sources; there is no switch. Passing `allowed_domains` and
+  `blocked_domains` together is a 400 on the platform, so this library rejects it before
+  the request goes out.
+- **Zhipu**'s `search_domain_filter` is officially a string rather than an array, so only the
+  first domain is used.
+- **Zhipu** has no "past hour" bucket, so `recency => 'hour'` is widened to `oneDay`.
+- **Perplexity**'s Sonar models **are always online**; there is nothing to turn on. Here
+  `search` only carries the filters.
+- **Kimi**'s built-in search runs through the tool_calls flow — the model only produces the
+  search arguments, and the conversation continues only after the client feeds the result
+  back. It therefore has to be used with the Agent loop; a single `chat()` call just returns
+  a tool call:
+
+  ```php
+  $ai->setConfig(['model' => 'kimi-k2-0905-preview', 'search' => true]);
+
+  $agent = new \Ai\Agent\Agent($ai);                                     // ✅ use an Agent
+  $agent->run([['role' => 'user', 'content' => 'What are today\'s top news stories?']]);
+  echo $agent->lastText();
+  ```
+
+### Which platforms support it
+
+```php
+print_r(\Ai\Helpers\Protocols::withWebSearch());
+// ['claude', 'qwen', 'ernie', 'zhipu', 'moonshot', 'perplexity', 'openrouter']
+
+\Ai\Helpers\Protocols::supportsWebSearch('deepseek');   // false
+```
+
+**On any platform not listed, setting `search` throws a `ConfigException`** instead of being
+silently ignored. Silence would be the worst outcome here: you would get an answer that reads
+perfectly well but never went online, stale with no indication at all — usually noticed only
+once the model refers to last year's events as current.
+
+Two cases deserve a note:
+
+- **OpenAI**'s Chat Completions endpoint has no web-search switch. Web search is offered on the
+  Responses API or through dedicated search models such as `gpt-5-search-api`. This library
+  talks to Chat Completions, so the `openai` protocol does not declare support.
+- **The Anthropic-compatible endpoints of Qwen / Zhipu / Kimi** (`qwen-anthropic` and friends)
+  do not support it either. Those gateways only translate Anthropic's **request format**;
+  Anthropic's web_search is Anthropic's own server-side capability and does not travel with the
+  format. To search on those platforms, use their OpenAI-compatible protocols instead.
+
+### Vendor-specific parameters: use `extra_body`
+
+The unified option only covers semantics every vendor shares. Vendor-specific parameters
+(Qwen's `search_strategy`, Zhipu's `search_engine`, OpenRouter's `engine`, …) do not go into
+`search` — write them with `extra_body`:
+
+```php
+$ai->setConfig([
+    'search'     => ['forced' => true],
+    'extra_body' => ['search_options' => ['search_strategy' => 'max']],
+]);
+```
+
+`extra_body` merges at the top level of the request body, so **a key present in both replaces
+the whole value** produced by `search` — in the example above the `search_options` actually sent
+contains only `search_strategy`, and `forced_search` is gone. To use both, write every sub-field
+into `extra_body`.
+
+`extra_body` is also the escape hatch when the library's view of a platform is wrong or out of
+date: it bypasses every capability check and sends the platform's native search parameters
+directly.
+
+### How this differs from `Ai\Tools\HttpFetch`
+
+Both give the model access to web content, but they are not the same thing:
+
+| | `search` option | `Ai\Tools\HttpFetch` (next section) |
+|---|---|---|
+| Who goes online | the platform's servers | your PHP process |
+| Billing | the platform charges per search | tokens only; traffic goes through your server |
+| Capability | search-engine retrieval | fetches URLs you name |
+| Control | filters only | fully under your control, with SSRF protection |
+| Coverage | only the 7 platforms above | every platform |
+
+Use `search` when the model should decide what to look up; use `HttpFetch` when you want it to
+read specific pages you name. Both can be on at once.
 
 ---
 

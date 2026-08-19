@@ -27,6 +27,39 @@ class Moonshot extends OpenAI
     }
 
     /**
+     * Kimi 支持由请求参数开启联网搜索
+     */
+    public function supportsWebSearch(): bool
+    {
+        return true;
+    }
+
+    /**
+     * 翻译成 Kimi 的 builtin_function 写法
+     *
+     * ⚠️ 与其它几家不同，Kimi 的 $web_search **不是纯服务端工具**：
+     * 模型只负责生成搜索参数，会以一次正常的 tool_calls 返回给客户端，
+     * 客户端要把这次调用的 arguments 原样回填成 tool 消息，对话才会继续。
+     * 也就是说单发一次 chat() 只会拿到一个 tool_call、拿不到最终答案，
+     * 必须配合 Agent 循环（$ai->agent()）使用。
+     *
+     * 声明里只需要 type 与 function.name，不需要 description / parameters。
+     *
+     * @see https://platform.moonshot.cn/docs/guide/use-web-search
+     * @param array<string, mixed> $request
+     * @param array<string, mixed> $search
+     * @return array<string, mixed>
+     */
+    public function applyWebSearch(array $request, array $search): array
+    {
+        // Kimi 的内置搜索没有任何可调参数，统一配置里的细项一概无处可放
+        return $this->appendServerTool($request, [
+            'type'     => 'builtin_function',
+            'function' => ['name' => '$web_search'],
+        ]);
+    }
+
+    /**
      * 常用模型（供后台离线渲染下拉框；平台无模型列表接口或拉取失败时作为兜底）
      * @return array<string, string> 模型 id => 显示名
      */

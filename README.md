@@ -22,7 +22,7 @@
 - 🧰 **Agent 循环**：挂载工具（函数）后自动完成「模型决策 → 执行工具 → 回填结果」多轮循环
 - 🤖 **Claude Code CLI**：直接调用本机 claude 程序（`Ai\Cli\ClaudeCode`），文件读写 / 工具执行 / 会话续接 / 结构化输出，路径自动检测并缓存
 - 📊 **CLI 信息查询**：不发起对话即可读取版本、登录态、模型列表、额度用量与限流、生效设置、MCP 状态
-- 🔌 **常驻双工会话**：`Ai\Cli\ClaudeCodeSession` 复刻官方 IDE 插件的进程模式，长驻进程多轮对话 + 工具权限实时回调 PHP 决策 + 优雅中断
+- 🔌 **常驻双工会话**：`Ai\Cli\ClaudeCodeSession` 复刻官方 IDE 插件的进程模式，长驻进程多轮对话 + 工具权限实时回调 PHP 决策 + 优雅中断 + 处理过程中继续提需求
 - 📝 **代码编辑协议**：结构化编辑上下文 + 可校验的编辑动作，支持规划/审核/自动执行三种模式
 - 🛡️ **安全抓取**：`HttpFetch` 内置 SSRF、DNS rebinding、内网地址、协议逃逸防护
 - 📄 **多模态附件**：图片等附件按各平台格式自动适配
@@ -732,6 +732,34 @@ $cli->setRunner(function ($cmd, $onChunk) {
 - `setPromptDir('/data/ai_prompt_tmp')`：提示词临时文件目录，容器与宿主机 1:1 挂载时指向双方可见路径（命令里的 `stdin` 重定向会在宿主机侧读取该文件）
 - 本地执行时默认自动把 nvm 下 claude 所在目录加入 PATH（`setAutoNvmPath(false)` 关闭）
 
+### 进程行为：环境变量 / 信号 / 协程
+
+以下三项对 `ClaudeCode` 与 `ClaudeCodeSession` 同时生效。
+
+**子进程默认继承当前进程的环境变量**（`setInheritEnv(false)` 关闭）
+
+`proc_open` 收到非 null 的 env 数组时会**整体替换**子进程环境，不是叠加。因此不继承时子进程连 `HOME` 都没有，claude 只能靠 `/etc/passwd` 兜底才找得到 `~/.claude` 下的登录凭据 —— 容器里 `/etc/passwd` 常常没有对应条目，表现就是"登录态莫名丢失"；`PATH` 也只剩 shell 的内置默认值，nvm 装的 node 不在其中。
+
+继承是全量的：父进程若设了 `ANTHROPIC_API_KEY`、`CLAUDE_CODE_*` 之类变量，子进程一样读得到（可能改变 claude 的计费与行为）。需要干净环境时关掉继承，再用 `setEnv()` 精确给定。
+
+**claude 直接取代 shell 进程**（`setExecReplace(false)` 关闭）
+
+命令里给 claude 加了 `exec` 前缀。`proc_open` 传字符串走的是 `sh -c "<cmd>"`，实测 dash 不做 exec 优化，进程树是 `sh → claude` 两层，`proc_terminate()` 的信号只打到中间那层 sh —— 超时抛完异常、`kill()` 返回之后，claude 其实还在后台跑到把整轮写完，额度照烧。加上 `exec` 后信号直达 claude 本人。
+
+只有一种情况需要关掉：自定义执行器拿到命令串后还要往**后面**接东西（如 `$cmd . '; echo done'`，exec 之后 shell 已被替换，后面的命令不会执行），或者调用方自己已经插过 `exec`（`exec exec cmd` 在 dash 下直接报 127）。
+
+配套的 `setKillGrace(2)`：结束进程时先发 SIGTERM 并留出这段宽限期，让 claude 自己收尾、把 session 落盘（之后还能 `--resume`），期限内没退出才 SIGKILL。设 0 表示直接强杀。
+
+**协程环境把内部等待换掉**（`setSleeper()`）
+
+Swoole / Workerman 这类常驻协程环境里，库内部的 `usleep` 与 `stream_select` 会把整个 worker 钉死，同 worker 上的其它请求全部排队：
+
+```php
+$cli->setSleeper(function ($sec) { \Swoole\Coroutine::sleep($sec); });
+```
+
+设置后，本地执行的轮询间隔、双工会话的事件泵与关闭流程都改走它，会话类的 `stream_select` 一并改成"轮询 + 让出"，不再阻塞整个线程。
+
 ### 信息查询（版本 / 登录态 / 模型列表 / 额度用量）
 
 不需要发起对话就能读取 CLI 侧的各类信息，**不消耗模型额度**：
@@ -855,9 +883,56 @@ $s->close();
 | 工具权限 | 靠 flag 静态配置 | 逐次回调 PHP 决策 |
 | 中断 | 只能 kill 进程 | `interrupt()` 优雅中断 |
 | 运行时改配置 | 不支持 | 热切权限模式 / 模型 / 思考预算 |
+| 处理中继续提需求 | 不支持 | `post()` 轮内插入 |
+| 事件循环 | 库内阻塞 | `tick()` 可由宿主驱动 |
 | 受限 PHP 环境 | 支持自定义执行器（SSH） | 仅本地 `proc_open` |
 
+**处理过程中继续提需求（非阻塞事件泵）**
+
+`send()` 一直阻塞到本轮结束，所以"claude 正在跑的时候用户又提了个新需求"在它身上做不到 —— 调用方唯一的执行流正卡在等待里。`post()` 把"投递"与"等待"拆开，事件循环交给宿主自己驱动，对齐官方 IDE 插件里的交互：
+
+```php
+$s = ClaudeCodeSession::create(['workdir' => '/var/www'])
+        ->setSleeper(function ($sec) { \Swoole\Coroutine::sleep($sec); });   // 协程环境必设
+
+$s->post('把 src 下的注释补全');           // 立即返回，不等本轮结束
+
+while ($clientAlive()) {
+    while ($msg = $queue->pop()) {
+        $s->post($msg);                     // 轮内轮外一样调：轮内 = 插入当前轮
+    }
+
+    $active = $s->tick($onEvent);           // 泵一批事件后立即返回
+
+    if (!$active && ($res = $s->takeResult())) {
+        $saveAnswer($res);                  // 本轮收口，进程留着等下一轮
+    }
+    $s->isTurnActive() ? $pause(0.02) : $pause(0.1);
+}
+$s->close();
+```
+
+| 方法 | 作用 |
+|---|---|
+| `post($text)` / `postMessage($blocks)` | 非阻塞投递一条用户消息，返回本地消息 ID |
+| `tick($onEvent)` | 处理当前已可读的输出并派发事件，随即返回；返回值 = 本轮是否仍在进行 |
+| `isTurnActive()` | 当前是否处在一轮之中（UI 据此决定输入框与停止按钮的状态） |
+| `takeResult()` | 取走最近一轮的结果，取走即清空；结构与 `send()` 的返回完全一致 |
+
+轮内插入的语义（claude CLI 2.1.207 实测）：
+
+- 生效时机是**当前这次工具调用执行完之后**，不是立即打断正在跑的工具；
+- 整轮仍然只产生**一个** `result` 事件，`num_turns` 累计 —— 按 result 落库的话，这一条记录对应的是"多条用户消息 + 一个回复"；
+- 每轮 CLI 都会重发一个 `system/init` 事件（第二轮起几乎无耗时），`getInit()` 被覆盖是预期行为；
+- 常驻双工比"每轮起一个进程 + `--resume`"每轮省掉 3~6 秒冷启动。
+
+比 `send()` 多出两个事件：`posted`（本地已投递，`['id','content','injected']`，`injected` 标记是否为轮内插入）与 `delivered`（CLI 已收下并回显，`['id','event']`）。UI 上建议 `post()` 返回后先标"已排队"，收到 `delivered` 再改"已送达"。其余事件与 `send()` 完全一致。
+
+`send()` 内部就是 `post()` + 循环 `tick()`，两套 API 可以混用，落库代码也可以共用。
+
 **中断与运行时控制**
+
+`interrupt()` 就是 UI 上的"停止"按钮 —— 非阻塞化之后它才真正好用（此前唯一的调用时机是 `send()` 的事件回调里）。它让 claude 自己收尾、落 session 记录，进程保活可继续下一轮；`kill()` 则是直接收掉进程（默认先 SIGTERM、宽限 2 秒再 SIGKILL，见 `setKillGrace()`），claude 没有收尾机会。
 
 ```php
 $fired = false;
@@ -887,13 +962,13 @@ $s->control(['subtype' => 'set_cwd', 'cwd' => '/srv/app']);   // 发送任意 co
 
 未注册 `onPermission()` 时，默认只自动放行 `Read / Edit / Write / Grep / Glob`，其余一律拒绝；`setAutoApproveTools([...])` 改名单，`allowAllTools()` 全部交回 CLI 自己判断。
 
-其余会话方法：`start()` / `isRunning()` / `close()` / `kill()` / `sendMessage($contentBlocks)` / `getInit()` / `getAvailableTools()` / `getCommand()`。`ClaudeCode` 的全部参数方法在会话类上同样可用（需在首次 `send()` 前设置）。
+其余会话方法：`start()` / `isRunning()` / `close()` / `kill()` / `sendMessage($contentBlocks)` / `getInit()` / `getAvailableTools()` / `getCommand()`。`ClaudeCode` 的全部参数方法在会话类上同样可用（需在首次 `send()` 前设置），包括 `setSleeper()` / `setInheritEnv()` / `setExecReplace()` / `setKillGrace()`（见「进程行为」一节）。
 
 ### 环境要求
 
 - 已安装 Claude Code CLI（`npm install -g @anthropic-ai/claude-code` 或原生安装）
 - 本地执行需要 `proc_open`；`shell_exec` 仅用于路径兜底探测，缺失时自动跳过
-- `ClaudeCodeSession` 需要 `proc_open` 的双向管道，不支持自定义执行器
+- `ClaudeCodeSession` 需要 `proc_open` 的双向管道，不支持自定义执行器（协程环境用 `setSleeper()` 让出即可，不必接管进程）
 
 ---
 

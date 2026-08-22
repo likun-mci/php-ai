@@ -279,3 +279,44 @@ try {
 } catch (\Exception $e) {
     echo "错误: " . $e->getMessage() . "\n\n";
 }
+
+// ===========================================
+// 示例 10: 处理过程中继续提需求（非阻塞事件泵）
+// ===========================================
+echo "\n=== 示例 10: 轮内插入新需求 ===\n";
+
+try {
+    $session = ClaudeCodeSession::create(['workdir' => __DIR__, 'turn_timeout' => 300]);
+
+    // 协程环境（Swoole / Workerman）务必设置，否则内部等待会钉住整个 worker：
+    // $session->setSleeper(function ($sec) { \Swoole\Coroutine::sleep($sec); });
+
+    $onEvent = function ($event, $data) {
+        if ($event === 'posted')    { echo "  [已排队] {$data['id']}\n"; }
+        if ($event === 'delivered') { echo "  [已送达] {$data['id']}\n"; }
+        if ($event === 'tool_use')  { echo "  [工具] {$data['name']}\n"; }
+    };
+
+    $session->post('逐个读取当前目录的 php 文件，总结每个文件的职责');   // 立即返回
+
+    $injected = false;
+    while ($active = $session->tick($onEvent)) {
+        // 这里可以做任何事：收 WebSocket 帧、查客户端是否还连着、把增量落库……
+        if (!$injected && $session->getAvailableTools()) {
+            $injected = true;
+            // 轮内插入：CLI 会在当前这次工具调用执行完后并入本轮，不打断正在跑的工具
+            $session->post('改主意了，只看 src 目录，其余跳过');
+        }
+        usleep(20000);
+    }
+
+    $res = $session->takeResult();   // 取走即清空；结构与 send() 的返回完全一致
+    if ($res) {
+        echo "本轮消息数: " . $res->getNumTurns() . "（多条用户消息仍只有一个 result）\n";
+        echo "回复: " . mb_substr($res->getContent(), 0, 100) . "...\n";
+    }
+
+    $session->close();
+} catch (\Exception $e) {
+    echo "错误: " . $e->getMessage() . "\n\n";
+}

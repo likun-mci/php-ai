@@ -48,9 +48,4 @@ parameters:
             message: '#Unsafe usage of new static\(\)#'
             path: src/Cli/ClaudeCode.php
 
-        # drainPipes() 内部会把 turnDone 置为 true（见 handleLine），
-        # PHPStan 不跟踪被调方法对属性的写入，这里是误报
-        -
-            message: '#If condition is always false#'
-            path: src/Cli/ClaudeCodeSession.php
 

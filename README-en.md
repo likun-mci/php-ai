@@ -22,7 +22,7 @@ Every example in this document is taken from a real production system (a CodeIgn
 - 🧰 **Agent loop** — attach tools (functions) and the library drives the "model decides → run tool → feed result back" loop for you
 - 🤖 **Claude Code CLI** — drive the local `claude` binary directly (`Ai\Cli\ClaudeCode`): file I/O, tool execution, session resumption, structured output, with automatic path detection and caching
 - 📊 **CLI introspection** — read version, login state, model list, quota usage and rate limits, effective settings and MCP status without starting a conversation
-- 🔌 **Persistent duplex session** — `Ai\Cli\ClaudeCodeSession` mirrors the official IDE plugin's process model: multi-turn conversation in a long-lived process, tool-permission callbacks decided in PHP, graceful interruption
+- 🔌 **Persistent duplex session** — `Ai\Cli\ClaudeCodeSession` mirrors the official IDE plugin's process model: multi-turn conversation in a long-lived process, tool-permission callbacks decided in PHP, graceful interruption, and new requests accepted mid-turn
 - 📝 **Code-editing protocol** — structured editing context plus verifiable edit actions, with plan / review / auto-apply modes
 - 🛡️ **Safe fetching** — `HttpFetch` guards against SSRF, DNS rebinding, private addresses and protocol escapes
 - 📄 **Multimodal attachments** — images and other attachments are adapted to each platform's format automatically
@@ -733,6 +733,34 @@ Companion settings:
 - `setPromptDir('/data/ai_prompt_tmp')` — directory for the prompt temp file. With a 1:1 container/host mount, point it at a path both sides can see (the `stdin` redirection in the command is resolved on the host side)
 - For local execution the nvm directory containing claude is added to PATH automatically (`setAutoNvmPath(false)` disables this)
 
+### Process behaviour: environment / signals / coroutines
+
+All three apply to `ClaudeCode` and `ClaudeCodeSession` alike.
+
+**The child process inherits the current environment by default** (`setInheritEnv(false)` turns it off)
+
+When `proc_open` receives a non-null env array it **replaces** the child's environment wholesale rather than adding to it. Without inheritance the child has no `HOME` at all, so claude can only fall back to `/etc/passwd` to find the credentials under `~/.claude` — containers frequently have no matching entry there, and the symptom is a login state that "mysteriously disappears". `PATH` is likewise reduced to the shell's built-in default, which does not include a node installed via nvm.
+
+Inheritance is complete: if the parent process sets `ANTHROPIC_API_KEY`, `CLAUDE_CODE_*` or similar, the child sees them too (which can change claude's billing and behaviour). Turn inheritance off when you need a clean environment, then supply exactly what you want with `setEnv()`.
+
+**claude replaces the shell process** (`setExecReplace(false)` turns it off)
+
+The command gives claude an `exec` prefix. Passing a string to `proc_open` runs it as `sh -c "<cmd>"`, and dash was measured not to apply the exec optimisation, leaving a two-level `sh → claude` process tree: the signal from `proc_terminate()` only reaches the intermediate sh, so after a timeout exception is thrown or `kill()` returns, claude is still running in the background all the way to the end of the turn, burning quota. With `exec`, the signal hits claude itself.
+
+There is only one reason to turn it off: a custom runner appends something **after** the command string (e.g. `$cmd . '; echo done'` — once exec replaces the shell, nothing after it runs), or the caller already inserts its own `exec` (`exec exec cmd` fails outright with 127 under dash).
+
+Its companion `setKillGrace(2)`: when terminating, SIGTERM is sent first and this grace period is allowed so claude can wind down and flush its session to disk (still `--resume`-able afterwards); SIGKILL follows only if it has not exited by then. Set 0 to kill outright.
+
+**Replace the internal waiting in coroutine environments** (`setSleeper()`)
+
+In long-running coroutine environments such as Swoole / Workerman, the library's internal `usleep` and `stream_select` pin the whole worker and every other request on it queues up behind you:
+
+```php
+$cli->setSleeper(function ($sec) { \Swoole\Coroutine::sleep($sec); });
+```
+
+Once set, the local execution polling interval, the duplex session's event pump and its shutdown path all go through it, and the session class's `stream_select` becomes "poll and yield" instead of blocking the whole thread.
+
 ### Introspection (version / login / models / quota)
 
 All of this reads CLI-side information without starting a conversation and **consumes no model quota**:
@@ -856,9 +884,56 @@ $s->close();
 | Tool permissions | static flags | callback into PHP per call |
 | Interruption | only by killing the process | graceful `interrupt()` |
 | Runtime reconfiguration | not supported | hot-switch permission mode / model / thinking budget |
+| New request mid-turn | not supported | `post()` injects into the running turn |
+| Event loop | blocks inside the library | `tick()` is driven by your own loop |
 | Restricted PHP environments | supports a custom runner (SSH) | local `proc_open` only |
 
+**Sending a new request while a turn is still running (non-blocking event pump)**
+
+`send()` blocks until the turn ends, so "the user has another request while claude is still working" is impossible with it — the caller's only execution flow is stuck waiting. `post()` separates *delivering* from *waiting* and hands the event loop to you, matching the interaction in the official IDE plugins:
+
+```php
+$s = ClaudeCodeSession::create(['workdir' => '/var/www'])
+        ->setSleeper(function ($sec) { \Swoole\Coroutine::sleep($sec); });   // required in coroutine environments
+
+$s->post('Add doc comments across src');   // returns immediately, does not wait for the turn
+
+while ($clientAlive()) {
+    while ($msg = $queue->pop()) {
+        $s->post($msg);                     // same call in or out of a turn: in a turn = injected into it
+    }
+
+    $active = $s->tick($onEvent);           // pump a batch of events, return immediately
+
+    if (!$active && ($res = $s->takeResult())) {
+        $saveAnswer($res);                  // the turn is done; the process stays for the next one
+    }
+    $s->isTurnActive() ? $pause(0.02) : $pause(0.1);
+}
+$s->close();
+```
+
+| Method | Purpose |
+|---|---|
+| `post($text)` / `postMessage($blocks)` | deliver a user message without blocking; returns a local message ID |
+| `tick($onEvent)` | process whatever output is readable now, dispatch events, return immediately; the return value tells you whether the turn is still running |
+| `isTurnActive()` | whether a turn is in flight (drives the input box and stop button in your UI) |
+| `takeResult()` | take the latest turn's result, clearing it; identical in shape to what `send()` returns |
+
+Semantics of a mid-turn injection (measured on claude CLI 2.1.207):
+
+- It takes effect **after the current tool call finishes**; it does not interrupt a running tool;
+- The turn still produces exactly **one** `result` event, with `num_turns` accumulating — if you persist on `result`, that single record corresponds to "several user messages and one reply";
+- The CLI re-emits a `system/init` event for every turn (near-instant from the second turn on), so `getInit()` being overwritten is expected;
+- A persistent duplex process saves the 3–6 second cold start that "one process per turn plus `--resume`" pays every time.
+
+Two events exist beyond those of `send()`: `posted` (delivered locally, `['id','content','injected']`, where `injected` marks a mid-turn injection) and `delivered` (the CLI received and replayed it, `['id','event']`). In the UI, mark a message "queued" when `post()` returns and switch to "delivered" when the `delivered` event arrives. Every other event is identical to `send()`.
+
+`send()` is itself `post()` plus a `tick()` loop, so the two APIs mix freely and can share the same persistence code.
+
 **Interruption and runtime control**
+
+`interrupt()` is the "stop" button — and it only became genuinely usable once the API went non-blocking (previously the only place you could call it was inside `send()`'s event callback). It lets claude wind down and record its session, keeping the process alive for the next turn; `kill()` takes the process down instead (SIGTERM first, then SIGKILL after a 2 second grace period, see `setKillGrace()`), giving claude no chance to wind down.
 
 ```php
 $fired = false;
@@ -888,13 +963,13 @@ To **hard-block** a tool, use `setDisallowedTools(['Bash'])` (the tool is remove
 
 With no `onPermission()` registered, only `Read / Edit / Write / Grep / Glob` are auto-approved and everything else is denied. `setAutoApproveTools([...])` changes that list; `allowAllTools()` hands the decision back to the CLI entirely.
 
-Other session methods: `start()`, `isRunning()`, `close()`, `kill()`, `sendMessage($contentBlocks)`, `getInit()`, `getAvailableTools()`, `getCommand()`. Every argument method from `ClaudeCode` is available on the session class too (set them before the first `send()`).
+Other session methods: `start()`, `isRunning()`, `close()`, `kill()`, `sendMessage($contentBlocks)`, `getInit()`, `getAvailableTools()`, `getCommand()`. Every argument method from `ClaudeCode` is available on the session class too (set them before the first `send()`), including `setSleeper()`, `setInheritEnv()`, `setExecReplace()` and `setKillGrace()` (see "Process behaviour").
 
 ### Requirements
 
 - Claude Code CLI installed (`npm install -g @anthropic-ai/claude-code` or a native install)
 - Local execution requires `proc_open`; `shell_exec` is only used as a fallback for path detection and is skipped when unavailable
-- `ClaudeCodeSession` needs `proc_open`'s bidirectional pipes and does not support a custom runner
+- `ClaudeCodeSession` needs `proc_open`'s bidirectional pipes and does not support a custom runner (in coroutine environments `setSleeper()` is enough to yield — you do not need to take over the process)
 
 ---
 

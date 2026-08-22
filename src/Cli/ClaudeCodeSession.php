@@ -26,6 +26,7 @@ use Ai\Exceptions\ProcessException;
  *  - 多轮对话共用一个进程，上下文常驻，无需每轮 --resume 重放历史
  *  - 工具权限逐次回调宿主决策（onPermission），可放行 / 拒绝 / 改写工具入参
  *  - 运行中可中断（interrupt）、可热切换权限模式 / 模型 / 思考预算
+ *  - 一轮进行中可以继续投新消息（post），CLI 会并入当前轮
  *
  * 权限回调不是完整拦截层：预授权规则、acceptEdits 自动放行的编辑、CLI 判定
  * 安全的沙箱只读命令都不会询问宿主。硬性禁用工具请用 setDisallowedTools()，
@@ -46,8 +47,36 @@ use Ai\Exceptions\ProcessException;
  * $s->close();
  * ```
  *
+ * 非阻塞用法（常驻服务：跑着的时候还能继续提需求、随时停止、不钉住 worker）：
+ * ```php
+ * $s = ClaudeCodeSession::create(['workdir' => '/var/www'])
+ *         ->setSleeper(function ($sec) { \Swoole\Coroutine::sleep($sec); });
+ *
+ * $s->post('把 src 下的注释补全');            // 立即返回，不等本轮结束
+ *
+ * while ($clientAlive()) {
+ *     while ($msg = $queue->pop()) {
+ *         $s->post($msg);                      // 轮内轮外一样调：轮内 = 插入当前轮
+ *     }
+ *     $active = $s->tick($onEvent);            // 泵一批事件，立即返回
+ *     if (!$active && ($res = $s->takeResult())) {
+ *         $saveAnswer($res);                   // 本轮收口，进程留着等下一轮
+ *     }
+ *     $s->isTurnActive() ? $pause(0.02) : $pause(0.1);
+ * }
+ * $s->close();
+ * ```
+ *
+ * 轮内插入的语义（已在 claude CLI 2.1.207 上实测）：
+ *  - 生效时机是"当前这次工具调用执行完之后"，不是立即打断正在跑的工具；
+ *  - 不产生额外的 result 事件，整轮仍然只有一个 result，num_turns 累计——
+ *    宿主若按 result 落库，要意识到这条记录对应"多条用户消息 + 一个回复"；
+ *  - 每投递一轮 CLI 都会重发一个 system/init 事件（第二轮起几乎无耗时），
+ *    getInit() 的内容会被覆盖，这是预期行为。
+ *
  * 注意：本类依赖本地 proc_open 的双向管道，不支持 ClaudeCode 的自定义执行器
- * （setRunner）。受限 PHP 环境请改用 ClaudeCode 的一次性模式。
+ * （setRunner）。受限 PHP 环境请改用 ClaudeCode 的一次性模式；协程环境用
+ * setSleeper() 把内部等待换成协程让出即可，无需接管进程。
  *
  * @see ClaudeCode 一次性调用模式
  */
@@ -102,6 +131,45 @@ class ClaudeCodeSession extends ClaudeCode
 
     /** @var bool 当前这一轮是否已收到 result 事件 */
     protected $turnDone = false;
+
+    /** @var bool 当前是否处在一轮之中（post 开轮，result 收轮） */
+    protected $turnActive = false;
+
+    /** @var array<mixed> 本轮采集容器（tick 跨多次调用累积，故存在实例上） */
+    protected $turnCollect = [];
+
+    /** @var float 本轮开始时间戳 */
+    protected $turnStartedAt = 0.0;
+
+    /** @var float 本轮超时时刻（0 表示不限制） */
+    protected $turnDeadline = 0.0;
+
+    /** @var array<string, mixed>|null 最近一轮的结果，takeResult() 取走即清空 */
+    protected $lastResult = null;
+
+    /** @var array<int, array{0:string, 1:mixed}> 待派发的本地事件（start / posted） */
+    protected $pendingEvents = [];
+
+    /** @var string[] 已投递、等待 CLI 回显确认的消息 ID（FIFO 与 replay 事件对账） */
+    protected $postedQueue = [];
+
+    /** @var int 消息 ID 自增序号 */
+    protected $postSeq = 0;
+
+    /** @var string 待写入 stdin 的缓冲（整行入队，保证单条 JSON 不被并发写穿插） */
+    protected $writeBuf = '';
+
+    /** @var bool 是否有执行流正在 flushWrites（协程下防止两条 JSON 交错写入） */
+    protected $flushing = false;
+
+    /** @var bool 是否有执行流正在 drainPipes（协程下防止行缓冲被两处同时切分） */
+    protected $draining = false;
+
+    /** @var bool 最近一次 tick() 是否读到了数据（阻塞式循环据此决定要不要等） */
+    protected $tickHadData = false;
+
+    /** @var callable|null 最近一次 tick() 使用的事件回调（控制指令等待期间复用） */
+    protected $turnEmit = null;
 
     /** @var int 每轮等待上限秒数（0 表示不限制），未单独设置时取 timeout */
     protected $turnTimeout = 0;
@@ -234,6 +302,12 @@ class ClaudeCodeSession extends ClaudeCode
         $this->pipes = $pipes;
         $this->lineBuf = '';
         $this->stderrBuf = '';
+        $this->writeBuf = '';
+        $this->postedQueue = [];
+        $this->pendingEvents = [];
+        // stdin 也设成非阻塞：管道缓冲区满时 fwrite 不再把整个执行流钉住，
+        // 写不完的部分留在 $writeBuf 里，由事件泵继续冲刷（见 flushWrites）
+        stream_set_blocking($this->pipes[0], false);
         stream_set_blocking($this->pipes[1], false);
         stream_set_blocking($this->pipes[2], false);
 
@@ -260,6 +334,18 @@ class ClaudeCodeSession extends ClaudeCode
         if (!is_resource($this->proc)) {
             return 0;
         }
+        // 句柄先存到局部：下面几步会调用别的方法，静态分析无法确定 $this->proc 还在
+        $proc = $this->proc;
+        // 合上 stdin 前先把队列里没写完的消息送出去，否则最后一条会被丢掉
+        $flushDeadline = microtime(true) + 5;
+        while ($this->writeBuf !== '' && microtime(true) < $flushDeadline && $this->isRunning()) {
+            if (!$this->flushWrites()) {
+                $this->drainPipes(function () {
+                });
+                $this->pause(0.02);
+            }
+        }
+        $this->writeBuf = '';
         if (isset($this->pipes[0]) && is_resource($this->pipes[0])) {
             @fclose($this->pipes[0]);
         }
@@ -268,7 +354,7 @@ class ClaudeCodeSession extends ClaudeCode
         while (microtime(true) < $deadline && $this->isRunning()) {
             $this->drainPipes(function () {
             });
-            usleep(20000);
+            $this->pause(0.02);
         }
         $this->drainPipes(function () {
         });
@@ -278,25 +364,33 @@ class ClaudeCodeSession extends ClaudeCode
                 @fclose($this->pipes[$i]);
             }
         }
-        $exit = @proc_close($this->proc);
+        $exit = @proc_close($proc);
         $this->proc = null;
         $this->pipes = [];
+        $this->turnActive = false;
         return (int) $exit;
     }
 
     /**
-     * 强制结束进程（用于超时或异常场景）
+     * 结束进程（用于超时或异常场景）
+     *
+     * 先发 SIGTERM 并留出 setKillGrace() 的宽限期（默认 2 秒），让 claude 自己
+     * 收尾、把本轮 session 落盘（之后还能 --resume）；宽限期内没退出才 SIGKILL。
+     * 想让 claude 正常结束请优先用 interrupt()（中断当轮、进程保活）或 close()。
      */
     public function kill(): self
     {
         if (is_resource($this->proc)) {
-            @proc_terminate($this->proc);
+            $proc = $this->proc;
+            $this->terminateProc($proc);
+            $this->writeBuf = '';
+            $this->turnActive = false;
             foreach ($this->pipes as $pipe) {
                 if (is_resource($pipe)) {
                     @fclose($pipe);
                 }
             }
-            @proc_close($this->proc);
+            @proc_close($proc);
             $this->proc = null;
             $this->pipes = [];
         }
@@ -343,27 +437,183 @@ class ClaudeCodeSession extends ClaudeCode
      */
     public function sendMessage(array $content, $onEvent = null): ClaudeCodeResponse
     {
-        $this->start();
-
         $emit = $onEvent ?: $this->onEvent;
         $emit = is_callable($emit) ? $emit : function () {
         };
 
-        $collect = $this->newCollect();
-        $this->turnDone = false;
+        $this->postMessage($content);
 
+        $collect = [];
+        $this->pump($emit, $collect);
+
+        $result = $this->takeResult();
+        if ($result === null) {
+            // 只有在事件回调里自己把结果取走时才会走到这里
+            throw new ProcessException('本轮结果已被 takeResult() 取走，无法作为 send() 的返回值');
+        }
+        return $result;
+    }
+
+    // ---------------------------------------------------------------------
+    // 非阻塞用法：宿主自己驱动事件泵（常驻服务 / 处理中继续提需求）
+    // ---------------------------------------------------------------------
+
+    /**
+     * 非阻塞投递一条用户消息，立即返回，不等待本轮结束
+     *
+     * 轮内调用 = 插入当前轮：CLI 会在**当前这次工具调用执行完之后**把新消息并入
+     * 下一次模型调用，不打断正在跑的工具，整轮仍然只产生一个 result 事件
+     * （num_turns 累计）。轮外调用 = 开启新一轮。两种情况调用方式完全一样。
+     *
+     * 与 send() 的区别只在"等不等"：本方法写完就返回，事件要靠 tick() 去泵。
+     *
+     * @return string 本地消息 ID，可与 'posted' / 'delivered' 事件对账
+     */
+    public function post(string $text): string
+    {
+        return $this->postMessage([['type' => 'text', 'text' => $text]]);
+    }
+
+    /**
+     * 同 post()，投递任意内容块数组（可混 text / image 块）
+     *
+     * @param array<mixed> $content 内容块数组，如 [['type'=>'text','text'=>'...']]
+     * @return string 本地消息 ID
+     */
+    public function postMessage(array $content): string
+    {
+        $this->start();
+
+        $injected = $this->turnActive;
+        if (!$injected) {
+            $this->beginTurn();
+        } elseif ($this->turnDeadline > 0) {
+            // 轮内又来了新需求，本轮的活变多了，超时从此刻重新计
+            $timeout = $this->turnTimeout > 0 ? $this->turnTimeout : $this->timeout;
+            $this->turnDeadline = microtime(true) + $timeout;
+        }
+
+        $id = $this->nextMessageId();
         $this->writeLine([
             'type'    => 'user',
             'message' => ['role' => 'user', 'content' => $content],
         ]);
+        $this->postedQueue[] = $id;
+        $this->pendingEvents[] = ['posted', [
+            'id'       => $id,
+            'content'  => $content,
+            'injected' => $injected,
+        ]];
 
-        $emit('start', ['resume' => ($this->sessionId !== '')]);
+        return $id;
+    }
 
-        $startedAt = microtime(true);
-        $this->pump($emit, $collect);
+    /**
+     * 非阻塞事件泵：处理当前已经可读的输出并派发事件，随即返回
+     *
+     * 由宿主自己的循环驱动，因此两次调用之间可以做任何事——投递新消息、
+     * 检查客户端是否还连着、把增量落库。本方法自身不等待、不 sleep，
+     * 空转时请由调用方决定歇多久（见类注释里的示例）。
+     *
+     * @param  callable|null $onEvent 事件回调，语义同 send()；为空时用构造时配置的 on_event
+     * @return bool 本轮是否仍在进行中（true = 还没收到 result）
+     * @throws ProcessException 进程意外退出或本轮超时
+     */
+    public function tick($onEvent = null): bool
+    {
+        $emit = $onEvent ?: $this->onEvent;
+        $emit = is_callable($emit) ? $emit : function () {
+        };
+
+        $this->turnEmit = $emit;
+        $this->tickHadData = false;
+        $this->flushPendingEvents($emit);
+
+        if (!is_resource($this->proc)) {
+            return false;
+        }
+
+        $this->flushWrites();
+        $this->tickHadData = $this->drainPipes($emit, $this->turnCollect);
+
+        if ($this->turnActive && $this->turnDone) {
+            $this->finalizeTurn($emit);
+            return $this->turnActive;
+        }
+
+        if (!$this->isRunning()) {
+            // 进程退出前可能还有缓冲输出没读完
+            $this->tickHadData = $this->drainPipes($emit, $this->turnCollect) || $this->tickHadData;
+            if ($this->turnActive && $this->turnDone) {
+                $this->finalizeTurn($emit);
+                return $this->turnActive;
+            }
+            if (!$this->turnActive) {
+                return false;
+            }
+            $this->turnActive = false;
+            throw new ProcessException(
+                'claude 会话进程意外退出' . ($this->stderrBuf !== ''
+                    ? '：' . substr(trim($this->stderrBuf), -500) : '')
+            );
+        }
+
+        if ($this->turnActive && $this->turnDeadline > 0 && microtime(true) > $this->turnDeadline) {
+            $timeout = $this->turnTimeout > 0 ? $this->turnTimeout : $this->timeout;
+            $this->turnActive = false;
+            throw new ProcessException('claude 会话本轮超时（' . $timeout . 's）');
+        }
+
+        return $this->turnActive;
+    }
+
+    /**
+     * 当前是否处在一轮之中（供 UI 决定输入框 / 停止按钮的状态）
+     */
+    public function isTurnActive(): bool
+    {
+        return $this->turnActive;
+    }
+
+    /**
+     * 取走最近一轮的完整结果，取走即清空；没有未取走的结果时返回 null
+     *
+     * 结构与 send() 的返回完全一致，两套 API 可以复用同一份落库代码。
+     * 未取走的结果会被下一轮覆盖。
+     */
+    public function takeResult(): ?ClaudeCodeResponse
+    {
+        if ($this->lastResult === null) {
+            return null;
+        }
+        $result = $this->lastResult;
+        $this->lastResult = null;
+        return new ClaudeCodeResponse($result);
+    }
+
+    /**
+     * 开启新一轮：重置采集容器与超时，并排队一个 start 事件
+     */
+    protected function beginTurn(): void
+    {
+        $this->turnCollect   = $this->newCollect();
+        $this->turnDone      = false;
+        $this->turnActive    = true;
+        $this->turnStartedAt = microtime(true);
+        $timeout = $this->turnTimeout > 0 ? $this->turnTimeout : $this->timeout;
+        $this->turnDeadline = $timeout > 0 ? microtime(true) + $timeout : 0.0;
+        $this->pendingEvents[] = ['start', ['resume' => ($this->sessionId !== '')]];
+    }
+
+    /**
+     * 收轮：把采集结果汇总成 result 数组存起来，并派发 result / done 事件
+     */
+    protected function finalizeTurn(callable $emit): void
+    {
+        $collect = $this->turnCollect;
         $collect['duration'] = $collect['duration'] > 0
             ? $collect['duration']
-            : (int) ((microtime(true) - $startedAt) * 1000);
+            : (int) ((microtime(true) - $this->turnStartedAt) * 1000);
 
         if ($collect['session_id'] !== '') {
             $this->sessionId = $collect['session_id'];
@@ -398,10 +648,33 @@ class ClaudeCodeSession extends ClaudeCode
             'raw'          => [],
         ];
 
+        $this->lastResult = $result;
+        // 先落状态再派发：回调里紧接着 post() 下一轮时状态才是对的
+        $this->turnActive = false;
         $emit('result', $result);
         $emit('done', null);
+        // done 之后本轮的回调就该收摊了，别让轮外的控制指令再往它上面派事件
+        $this->turnEmit = null;
+    }
 
-        return new ClaudeCodeResponse($result);
+    /**
+     * 派发排队中的本地事件（start / posted）
+     */
+    protected function flushPendingEvents(callable $emit): void
+    {
+        while ($this->pendingEvents) {
+            $event = array_shift($this->pendingEvents);
+            $emit($event[0], $event[1]);
+        }
+    }
+
+    /**
+     * 生成本地消息 ID
+     */
+    protected function nextMessageId(): string
+    {
+        $this->postSeq++;
+        return 'msg-' . getmypid() . '-' . $this->postSeq . '-' . dechex(mt_rand(0x100000, 0xffffff));
     }
 
     // ---------------------------------------------------------------------
@@ -585,7 +858,13 @@ class ClaudeCodeSession extends ClaudeCode
     }
 
     /**
-     * 写一行 JSON 到子进程 stdin
+     * 把一行 JSON 排进 stdin 写队列，并立即尝试冲刷
+     *
+     * 整行一次性入队是这里的关键：投递消息与泵事件必然来自不同的执行流
+     * （不同协程 / 不同 WS 帧），若直接 fwrite 且中途让出，另一处再写就会把两条
+     * JSON 交错进同一行，CLI 当场解析失败。入队后由 flushWrites() 单点写出，
+     * 顺序与完整性都有保证。
+     *
      * @param array<mixed> $message
      */
     protected function writeLine(array $message): void
@@ -597,52 +876,62 @@ class ClaudeCodeSession extends ClaudeCode
         if ($json === false) {
             throw new ConfigException('消息序列化失败: ' . json_last_error_msg());
         }
-        $payload = $json . "\n";
-        $len = strlen($payload);
-        $written = 0;
-        while ($written < $len) {
-            $n = @fwrite($this->pipes[0], substr($payload, $written));
-            if ($n === false || $n === 0) {
-                throw new ProcessException('写入 claude 会话 stdin 失败（进程可能已退出）');
-            }
-            $written += $n;
-        }
-        @fflush($this->pipes[0]);
+        $this->writeBuf .= $json . "\n";
+        $this->flushWrites();
     }
 
     /**
-     * 事件循环：读取输出并派发，直到本轮 result 事件到达
-     * @param array<mixed> $collect
+     * 把写队列冲进 stdin（非阻塞）
+     *
+     * @return bool 队列是否已全部写出；false = 管道缓冲区满，剩余部分留待下次
+     * @throws ProcessException 管道已关闭或写入失败
+     */
+    protected function flushWrites(): bool
+    {
+        if ($this->writeBuf === '') {
+            return true;
+        }
+        if (!isset($this->pipes[0]) || !is_resource($this->pipes[0])) {
+            throw new ProcessException('claude 会话 stdin 已关闭，仍有 '
+                . strlen($this->writeBuf) . ' 字节未写出');
+        }
+        if ($this->flushing) {
+            return false;   // 已有执行流在写，让它写完，避免两条 JSON 交错
+        }
+        $this->flushing = true;
+        try {
+            while ($this->writeBuf !== '') {
+                $n = @fwrite($this->pipes[0], $this->writeBuf);
+                if ($n === false) {
+                    throw new ProcessException('写入 claude 会话 stdin 失败（进程可能已退出）');
+                }
+                if ($n === 0) {
+                    return false;   // 缓冲区满，下一次 tick 再写
+                }
+                $this->writeBuf = $n >= strlen($this->writeBuf)
+                    ? ''
+                    : (string) substr($this->writeBuf, $n);
+            }
+            @fflush($this->pipes[0]);
+        } finally {
+            $this->flushing = false;
+        }
+        return true;
+    }
+
+    /**
+     * 阻塞式事件循环：反复驱动 tick() 直到本轮 result 事件到达
+     *
+     * @param array<mixed> $collect 出参，回填本轮采集容器（保持历史签名）
      */
     protected function pump(callable $emit, array &$collect): void
     {
-        $timeout = $this->turnTimeout > 0 ? $this->turnTimeout : $this->timeout;
-        $deadline = $timeout > 0 ? microtime(true) + $timeout : 0;
-
-        while (!$this->turnDone) {
-            $got = $this->drainPipes($emit, $collect);
-
-            if ($this->turnDone) {
-                break;
-            }
-            if (!$this->isRunning()) {
-                // 进程退出前可能还有缓冲输出未读完
-                $this->drainPipes($emit, $collect);
-                if ($this->turnDone) {
-                    break;
-                }
-                throw new ProcessException(
-                    'claude 会话进程意外退出' . ($this->stderrBuf !== ''
-                        ? '：' . substr(trim($this->stderrBuf), -500) : '')
-                );
-            }
-            if ($deadline > 0 && microtime(true) > $deadline) {
-                throw new ProcessException('claude 会话本轮超时（' . $timeout . 's）');
-            }
-            if (!$got) {
+        while ($this->tick($emit)) {
+            if (!$this->tickHadData) {
                 $this->waitReadable(200000);
             }
         }
+        $collect = $this->turnCollect;
     }
 
     /**
@@ -650,6 +939,24 @@ class ClaudeCodeSession extends ClaudeCode
      * @param array<mixed> $collect
      */
     protected function drainPipes(callable $emit, array &$collect = null): bool
+    {
+        if ($this->draining) {
+            // 另一个执行流正在读同一个行缓冲，让它读完，这里直接放行
+            return false;
+        }
+        $this->draining = true;
+        try {
+            return $this->readPipes($emit, $collect);
+        } finally {
+            $this->draining = false;
+        }
+    }
+
+    /**
+     * drainPipes 的实际读取逻辑
+     * @param array<mixed> $collect
+     */
+    protected function readPipes(callable $emit, array &$collect = null): bool
     {
         $got = false;
         if (isset($this->pipes[1]) && is_resource($this->pipes[1])) {
@@ -684,6 +991,11 @@ class ClaudeCodeSession extends ClaudeCode
      */
     protected function waitReadable(int $microseconds): void
     {
+        if ($this->sleeper !== null) {
+            // 协程环境：stream_select 会把整个 worker 钉死，改成"轮询 + 让出"
+            $this->pause($microseconds / 1000000);
+            return;
+        }
         $read = [];
         foreach ([1, 2] as $i) {
             if (isset($this->pipes[$i]) && is_resource($this->pipes[$i])) {
@@ -727,6 +1039,13 @@ class ClaudeCodeSession extends ClaudeCode
         }
 
         parent::handleLine($line, $collect, $emit);
+
+        if ($type === 'user' && !empty($ev['isReplay'])) {
+            // --replay-user-messages 的回显 = CLI 已收下这条消息。按投递顺序与
+            // post() 返回的 ID 对账，宿主的 UI 可以把"已排队"改成"已送达"。
+            $id = $this->postedQueue ? (string) array_shift($this->postedQueue) : '';
+            $emit('delivered', ['id' => $id, 'event' => $ev]);
+        }
 
         if ($type === 'result') {
             $this->turnDone = true;
@@ -839,11 +1158,15 @@ class ClaudeCodeSession extends ClaudeCode
             $timeout = $this->turnTimeout > 0 ? $this->turnTimeout : ($this->timeout > 0 ? $this->timeout : 30);
         }
         $deadline = microtime(true) + $timeout;
-        $noop = function () {
+        // 等待期间照样要把事件派发出去、写进本轮采集容器：控制指令随时可能在
+        // 一轮进行中发出（停止按钮、热切模型），这里若吞掉输出，本轮的正文与
+        // result 就丢了。回调复用最近一次 tick() 的那个。
+        $emit = $this->turnEmit;
+        $emit = is_callable($emit) ? $emit : function () {
         };
-        $collect = $this->newCollect();
         while (!isset($this->requestResults[$requestId])) {
-            if (!$this->drainPipes($noop, $collect)) {
+            $this->flushWrites();
+            if (!$this->drainPipes($emit, $this->turnCollect)) {
                 $this->waitReadable(100000);
             }
             if (!$this->isRunning()) {

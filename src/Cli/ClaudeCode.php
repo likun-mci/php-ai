@@ -117,6 +117,9 @@ class ClaudeCode
     /** @var array<string, string> 额外环境变量（本地执行时传给 proc_open） */
     protected $env = [];
 
+    /** @var bool 子进程是否继承当前进程的环境变量（setEnv 的内容叠加在其上） */
+    protected $inheritEnv = true;
+
     /** @var bool 本地执行时自动把 claude 所在目录（如 nvm node bin）加入 PATH */
     protected $autoNvmPath = true;
 
@@ -147,6 +150,15 @@ class ClaudeCode
     /** @var callable|null 事件回调（构造时配置的默认 onEvent） */
     protected $onEvent = null;
 
+    /** @var callable|null 自定义等待实现 function(float $seconds): void（协程环境用） */
+    protected $sleeper = null;
+
+    /** @var bool 命令中是否给 claude 加 exec 前缀（让它取代中间的 sh 进程） */
+    protected $execReplace = true;
+
+    /** @var int SIGTERM 之后等待进程自行退出的秒数，超时改发 SIGKILL */
+    protected $killGrace = 2;
+
     /** @var bool 是否已执行过进程内二进制探测（避免 getBinary 重复抛异常） */
     protected $binaryResolved = false;
 
@@ -159,8 +171,9 @@ class ClaudeCode
     /**
      * @param array<mixed> $config 支持键：
      *                      binary、binary_cache、binary_cache_path、binary_cache_ttl、
-     *                      workdir、env、auto_nvm_path、shell、timeout、session_id、
-     *                      model、prompt_dir、flags、runner、on_event
+     *                      workdir、env、inherit_env、auto_nvm_path、shell、timeout、
+     *                      session_id、model、prompt_dir、flags、runner、on_event、
+     *                      sleeper、exec_replace、kill_grace
      */
     public function __construct(array $config = [])
     {
@@ -171,6 +184,7 @@ class ClaudeCode
             'binary_cache_ttl'   => 'binaryCacheTtl',
             'workdir'            => 'workdir',
             'env'                => 'env',
+            'inherit_env'        => 'inheritEnv',
             'auto_nvm_path'      => 'autoNvmPath',
             'shell'              => 'shellPrefix',
             'timeout'            => 'timeout',
@@ -180,6 +194,9 @@ class ClaudeCode
             'flags'              => 'flags',
             'runner'             => 'runner',
             'on_event'           => 'onEvent',
+            'sleeper'            => 'sleeper',
+            'exec_replace'       => 'execReplace',
+            'kill_grace'         => 'killGrace',
         ] as $key => $prop) {
             if (isset($config[$key])) {
                 $this->{$prop} = $config[$key];
@@ -977,11 +994,82 @@ class ClaudeCode
     }
 
     /**
+     * 子进程是否继承当前 PHP 进程的环境变量（默认 true）
+     *
+     * proc_open 收到非 null 的 env 数组时会**整体替换**子进程环境，而不是叠加。
+     * 关掉继承（false）时，子进程只有 setEnv() 显式给的那几个变量：没有 HOME，
+     * claude 只能靠 /etc/passwd 兜底才找得到 ~/.claude 下的登录凭据，容器里
+     * /etc/passwd 常常没有对应条目，表现就是"登录态莫名丢失"；PATH 也只剩
+     * shell 的内置默认值，nvm 装的 node 不在其中。
+     *
+     * 因此默认继承。注意继承是全量的：父进程若设了 ANTHROPIC_API_KEY、
+     * CLAUDE_CODE_* 之类变量，子进程同样能读到（可能改变 claude 的计费与行为），
+     * 需要干净环境时用 setInheritEnv(false) 关掉。
+     */
+    public function setInheritEnv(bool $enabled = true): self
+    {
+        $this->inheritEnv = $enabled;
+        return $this;
+    }
+
+    /**
      * 是否自动把 claude 所在目录（如 nvm node bin）加入 PATH（默认 true，仅本地执行生效）
      */
     public function setAutoNvmPath(bool $enabled): self
     {
         $this->autoNvmPath = $enabled;
+        return $this;
+    }
+
+    /**
+     * 命令中是否给 claude 加 exec 前缀（默认 true）
+     *
+     * proc_open 传字符串走的是 `sh -c "<cmd>"`，实测 dash 不会对 `cd x && cmd`
+     * 做 exec 优化（连裸命令也不会），进程树是 sh → claude 两层，于是
+     * proc_terminate() 的信号只到中间那层 sh，claude 被丢下继续跑：
+     * 超时分支抛完"执行超时"、会话 kill() 返回之后，claude 其实还在后台烧额度。
+     * 加上 exec 后 claude 直接取代 sh，proc_terminate() 打的就是它本人。
+     *
+     * 关掉的唯一理由：自定义执行器（setRunner）拿到命令串后还要往**后面**接东西，
+     * 如 `$cmd . '; echo done'` —— exec 之后 shell 已被替换，后面的命令不会执行；
+     * 或调用方自己已经插过 exec（`exec exec cmd` 在 dash 下会直接报 127）。
+     */
+    public function setExecReplace(bool $enabled = true): self
+    {
+        $this->execReplace = $enabled;
+        return $this;
+    }
+
+    /**
+     * SIGTERM 之后留给进程自行退出的秒数，超时改发 SIGKILL（默认 2 秒，0 表示直接强杀）
+     *
+     * claude 收到 SIGTERM 会把本轮 session 落盘再退出，留出这段时间可以保住
+     * 会话记录（后续还能 --resume）；强杀则没有这个机会。
+     */
+    public function setKillGrace(int $seconds): self
+    {
+        $this->killGrace = max(0, $seconds);
+        return $this;
+    }
+
+    /**
+     * 替换库内部的等待实现（默认 usleep）
+     *
+     * 常驻协程环境（Swoole / Workerman）里，usleep 与 stream_select 会把整个
+     * worker 钉死，同 worker 上的其它请求全部排队。传入协程版的等待即可让出：
+     *
+     * ```php
+     * $cli->setSleeper(function ($sec) { \Swoole\Coroutine::sleep($sec); });
+     * ```
+     *
+     * 设置后，本地执行的轮询间隔、ClaudeCodeSession 的事件泵与关闭流程都改走它，
+     * 且会话类的 stream_select 一并改为"轮询 + 让出"，不再阻塞整个线程。
+     *
+     * @param callable $fn function(float $seconds): void
+     */
+    public function setSleeper(callable $fn): self
+    {
+        $this->sleeper = $fn;
         return $this;
     }
 
@@ -1440,7 +1528,7 @@ class ClaudeCode
      */
     protected function buildBaseCommand(string $binary, string $workdir, array $options, string $suffix = ''): string
     {
-        $cmd = escapeshellarg($binary) . ' --print' . $this->renderFlags($options);
+        $cmd = $this->execPrefix() . escapeshellarg($binary) . ' --print' . $this->renderFlags($options);
 
         $sessionId = isset($options['session_id']) ? (string) $options['session_id'] : $this->sessionId;
         if (!empty($options['reset'])) {
@@ -1459,6 +1547,23 @@ class ClaudeCode
             $cmd = $this->shellPrefix . ' ' . $cmd;
         }
         return $cmd;
+    }
+
+    /**
+     * 命令里 claude 之前的 exec 前缀（见 setExecReplace）。Windows 的 cmd.exe
+     * 没有 exec 这个内置命令，那边一律不加。
+     */
+    protected function execPrefix(): string
+    {
+        return ($this->execReplace && !self::isWindows()) ? 'exec ' : '';
+    }
+
+    /**
+     * 当前是否运行在 Windows 上（PHP_OS_FAMILY 是 7.2 才有的，这里按 7.1 写法判断）
+     */
+    protected static function isWindows(): bool
+    {
+        return strtoupper(substr(PHP_OS, 0, 3)) === 'WIN';
     }
 
     // ---------------------------------------------------------------------
@@ -1643,7 +1748,7 @@ class ClaudeCode
      */
     public function runCommand(array $args, int $timeout = 60): array
     {
-        $cmd = escapeshellarg($this->getBinary());
+        $cmd = $this->execPrefix() . escapeshellarg($this->getBinary());
         foreach ($args as $arg) {
             $cmd .= ' ' . escapeshellarg((string) $arg);
         }
@@ -1704,6 +1809,9 @@ class ClaudeCode
             'binary'       => $this->getBinary(),
             'workdir'      => $this->workdir,
             'env'          => $this->env,
+            'inherit_env'  => $this->inheritEnv,
+            'exec_replace' => $this->execReplace,
+            'kill_grace'   => $this->killGrace,
             'shell'        => $this->shellPrefix,
             'timeout'      => $timeout,
             'turn_timeout' => $timeout,
@@ -1711,6 +1819,10 @@ class ClaudeCode
         // 仅查询信息，不产生可续接的会话记录
         // 分两句写：链式返回会因父类声明的返回类型是 self 而丢掉子类类型
         $session->setSessionPersistence(false);
+        // 等待实现要一并带过去，否则协程环境下这个临时进程会把 worker 钉死
+        if ($this->sleeper !== null) {
+            $session->setSleeper($this->sleeper);
+        }
         return $session;
     }
 
@@ -1777,14 +1889,18 @@ class ClaudeCode
         if (!function_exists('proc_open')) {
             throw new ProcessException('当前 PHP 环境未启用 proc_open，无法本地执行 claude');
         }
-        $env = $this->buildLocalEnv();
-
         $descriptors = [
             0 => ['pipe', 'r'],
             1 => ['pipe', 'w'],
             2 => ['pipe', 'w'],
         ];
-        $proc = @proc_open($cmd, $descriptors, $pipes, $this->workdir !== '' ? $this->workdir : null, $env);
+        $proc = @proc_open(
+            $cmd,
+            $descriptors,
+            $pipes,
+            $this->workdir !== '' ? $this->workdir : null,
+            $this->procEnv()
+        );
         if (!is_resource($proc)) {
             throw new ProcessException('无法启动 claude 进程: ' . $cmd);
         }
@@ -1812,10 +1928,17 @@ class ClaudeCode
                 break;
             }
             if ($this->timeout > 0 && (microtime(true) - $started) > $this->timeout) {
-                @proc_terminate($proc);
+                // 先礼后兵地收掉进程再抛异常，否则 claude 会脱离掌控继续跑到把整轮写完
+                $this->terminateProc($proc);
+                foreach ($pipes as $pipe) {
+                    if (is_resource($pipe)) {
+                        @fclose($pipe);
+                    }
+                }
+                @proc_close($proc);
                 throw new ProcessException('claude 执行超时（' . $this->timeout . 's）');
             }
-            usleep(20000);
+            $this->pause(0.02);
         }
 
         // 排空剩余输出
@@ -1851,5 +1974,61 @@ class ClaudeCode
             }
         }
         return $env;
+    }
+
+    /**
+     * proc_open 的 env 参数：null = 继承父进程环境，数组 = 整体替换（见 setInheritEnv）
+     * @return array<string, string>|null
+     */
+    protected function procEnv()
+    {
+        $env = $this->buildLocalEnv();
+        if (!$this->inheritEnv) {
+            return $env;
+        }
+        if (!$env) {
+            return null;
+        }
+        $base = getenv();
+        return array_merge(is_array($base) ? $base : [], $env);
+    }
+
+    /**
+     * 等待若干秒：默认 usleep，设过 setSleeper() 时改走它（协程环境让出）
+     */
+    protected function pause(float $seconds): void
+    {
+        if ($seconds <= 0) {
+            return;
+        }
+        if ($this->sleeper !== null) {
+            call_user_func($this->sleeper, $seconds);
+            return;
+        }
+        usleep((int) round($seconds * 1000000));
+    }
+
+    /**
+     * 收掉子进程：先 SIGTERM 给它落盘收尾的机会，宽限期内没退出再 SIGKILL
+     * @param resource $proc
+     */
+    protected function terminateProc($proc): void
+    {
+        if (!is_resource($proc)) {
+            return;
+        }
+        @proc_terminate($proc);
+        $deadline = microtime(true) + $this->killGrace;
+        while ($this->killGrace > 0 && microtime(true) < $deadline) {
+            $status = @proc_get_status($proc);
+            if (!is_array($status) || !$status['running']) {
+                return;
+            }
+            $this->pause(0.05);
+        }
+        $status = @proc_get_status($proc);
+        if (is_array($status) && $status['running']) {
+            @proc_terminate($proc, 9);
+        }
     }
 }

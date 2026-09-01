@@ -15,6 +15,7 @@ use Ai\Agent\Task\TaskManager;
 use Ai\Agent\Task\TaskStatus;
 use Ai\Agent\Tool\ToolRegistry;
 use Ai\Agent\Verification\VerificationManager;
+use Ai\Agent\Workspace\WorkspaceManager;
 
 /**
  * Agent Runtime——执行引擎
@@ -94,6 +95,9 @@ class AgentRuntime
 
     /** @var VerificationManager|null */
     protected $verification = null;
+
+    /** @var WorkspaceManager|null */
+    protected $workspace = null;
 
     /**
      * @param AI $ai
@@ -203,6 +207,10 @@ class AgentRuntime
     public function setWorkdir($workdir)
     {
         $this->workdir = (string) $workdir;
+        // 自动创建 WorkspaceManager（如果尚未设置，且 workdir 非空）
+        if ($this->workdir !== '' && $this->workspace === null) {
+            $this->workspace = new WorkspaceManager($this->workdir);
+        }
         return $this;
     }
 
@@ -485,6 +493,26 @@ class AgentRuntime
     }
 
     /**
+     * 设置工作区管理器
+     *
+     * @param WorkspaceManager|null $wm
+     * @return $this
+     */
+    public function setWorkspaceManager($wm)
+    {
+        $this->workspace = $wm;
+        return $this;
+    }
+
+    /**
+     * @return WorkspaceManager|null
+     */
+    public function getWorkspaceManager()
+    {
+        return $this->workspace;
+    }
+
+    /**
      * 回答用户问题并恢复 Agent 执行
      *
      * @param string $questionId
@@ -677,6 +705,7 @@ class AgentRuntime
         $context->setContextManager($cm);
         $context->setHooks($this->hooks);
         $context->setVerificationManager($this->verification);
+        $context->setWorkspaceManager($this->workspace);
         return $context;
     }
 

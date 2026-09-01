@@ -348,8 +348,18 @@ class LoopController
                     $ai->setModel($fbModel);
                 }
                 try {
+                    // 工作区状态注入（每次迭代刷新）
+                    $systemPrompt = $context->getSystem();
+                    $wm = $context->getWorkspaceManager();
+                    if ($wm) {
+                        $wm->refresh();
+                        $wsContext = $wm->toContextString();
+                        if ($wsContext !== '') {
+                            $systemPrompt .= "\n\n<workspace>\n{$wsContext}\n</workspace>";
+                        }
+                    }
                     $modelParams = [
-                        'system'   => $context->getSystem(),
+                        'system'   => $systemPrompt,
                         'messages' => $context->getMessages(),
                         'tools'    => $toolDefs,
                     ];

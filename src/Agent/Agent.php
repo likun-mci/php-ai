@@ -134,6 +134,21 @@ class Agent
     }
 
     /**
+     * 设置工作区目录（自动创建 WorkspaceManager 跟踪 git 状态）
+     *
+     * 等价于 setWorkdir()，但语义更明确：工作区状态会在每轮迭代中
+     * 注入系统提示词，让模型知道当前分支、修改文件等。
+     *
+     * @param string $workdir
+     * @return $this
+     */
+    public function setWorkspaceDir($workdir)
+    {
+        $this->runtime->setWorkdir((string) $workdir);
+        return $this;
+    }
+
+    /**
      * 启用并行工具执行
      *
      * @param bool $parallel

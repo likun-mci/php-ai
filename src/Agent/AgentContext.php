@@ -8,6 +8,7 @@ use Ai\Agent\Hooks\AgentHooks;
 use Ai\Agent\Permission\PermissionManager;
 use Ai\Agent\Tool\ToolRegistry;
 use Ai\Agent\Verification\VerificationManager;
+use Ai\Agent\Workspace\WorkspaceManager;
 
 /**
  * Agent 运行时上下文
@@ -76,6 +77,9 @@ class AgentContext
 
     /** @var VerificationManager|null */
     protected $verification = null;
+
+    /** @var WorkspaceManager|null */
+    protected $workspace = null;
 
     /**
      * @param AI $ai
@@ -147,6 +151,26 @@ class AgentContext
     public function getVerificationManager()
     {
         return $this->verification;
+    }
+
+    /* ---------- 工作区管理 ---------- */
+
+    /**
+     * @param WorkspaceManager|null $wm
+     * @return $this
+     */
+    public function setWorkspaceManager($wm)
+    {
+        $this->workspace = $wm;
+        return $this;
+    }
+
+    /**
+     * @return WorkspaceManager|null
+     */
+    public function getWorkspaceManager()
+    {
+        return $this->workspace;
     }
 
     /* ---------- 上下文管理 ---------- */

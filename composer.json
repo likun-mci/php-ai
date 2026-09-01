@@ -91,7 +91,8 @@
             "php tests/agent_runtime_test.php",
             "php tests/agent_advanced_test.php",
             "php tests/agent_task_test.php",
-            "php tests/agent_verification_test.php"
+            "php tests/agent_verification_test.php",
+            "php tests/agent_workspace_test.php"
         ],
         "analyse": "phpstan analyse --memory-limit=512M",
         "compat": "phpcs -p --standard=PHPCompatibility --runtime-set testVersion 7.1- --extensions=php --ignore='*/vendor/*' .",

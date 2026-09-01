@@ -45,6 +45,9 @@ class LoopController
     /** @var callable|null 并行运行器 */
     protected $parallelRunner = null;
 
+    /** @var int 工具执行超时秒数（0 不限制），透传给 ToolExecutor 与 ToolContext */
+    protected $toolTimeout = 0;
+
     /** @var array<string, mixed>|null 待恢复的权限调用 */
     protected $pendingPermissionCall = null;
 
@@ -132,6 +135,24 @@ class LoopController
     }
 
     /**
+     * 设置工具执行超时秒数（0 不限制）
+     *
+     * @param int $seconds
+     * @return $this
+     */
+    public function setToolTimeout($seconds)
+    {
+        $this->toolTimeout = max(0, (int) $seconds);
+        return $this;
+    }
+
+    /** @return int */
+    public function getToolTimeout()
+    {
+        return $this->toolTimeout;
+    }
+
+    /**
      * 创建一个摘要器闭包，用 AI 自身压缩历史消息
      *
      * @param \Ai\AI $ai
@@ -196,13 +217,11 @@ class LoopController
         $emit     = $context->getEmitter();
         $registry = $context->getToolRegistry();
 
-        // 构造工具执行器与上下文
-        $executor     = new ToolExecutor($registry);
-        $toolContext  = new ToolContext([
-            'workdir'   => $context->getWorkdir(),
-            'sessionId' => $context->getSessionId(),
-            'emit'      => $emit ? function ($event) use ($emit) { $emit($event); } : null,
-        ]);
+        // 构造工具执行器，应用超时配置
+        $executor = new ToolExecutor($registry);
+        if ($this->toolTimeout > 0) {
+            $executor->setExecutionTimeout($this->toolTimeout);
+        }
 
         // 重置守卫
         if ($this->guard) {
@@ -212,6 +231,16 @@ class LoopController
         for ($iter = 0; $iter < $this->maxIter; $iter++) {
             $context->setIteration($iter + 1);
             $context->emit('thinking', ['iter' => $iter + 1]);
+
+            // 每轮迭代构造 ToolContext，携带最新 agentId / iteration / sessionId
+            $toolContext = new ToolContext([
+                'workdir'   => $context->getWorkdir(),
+                'sessionId' => $context->getSessionId(),
+                'agentId'   => $context->getAgentId(),
+                'iteration' => $iter + 1,
+                'timeout'   => $this->toolTimeout,
+                'emit'      => $emit ? function ($event) use ($emit) { $emit($event); } : null,
+            ]);
 
             // 上下文压缩检查（Phase 4）
             $cm = $context->getContextManager();
@@ -291,6 +320,10 @@ class LoopController
                 $input = isset($call['input']) && is_array($call['input']) ? $call['input'] : [];
 
                 $context->emit('tool_call', ['name' => $name, 'input' => $input]);
+
+                // 设置当前 tool_use_id 到 ToolContext
+                $toolCallId = isset($call['id']) ? (string) $call['id'] : '';
+                $toolContext->setToolCallId($toolCallId);
 
                 // 循环守卫检测
                 if ($this->guard) {

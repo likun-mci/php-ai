@@ -1347,7 +1347,7 @@ Log::setLogger(null);                      // back to the default error_log
 
 ## Agent: the tool-calling loop
 
-`Ai\Agent\Agent` implements the full agentic loop: the model decides which tool to call → the library runs it → the result is fed back → repeat, until the model produces a final answer or the iteration cap is reached. Since v2.0 it runs on an `AgentRuntime` architecture with an object-oriented tool interface and a loop guard against infinite loops.
+`Ai\Agent\Agent` implements the full agentic loop: the model decides which tool to call → the library runs it → the result is fed back → repeat, until the model produces a final answer or the iteration cap is reached. Since v2.0 it runs on an `AgentRuntime` architecture with an object-oriented tool interface, loop guard, permission system, context compaction, session persistence, sub-agents, and budget control.
 
 **All 40 protocols work.** The vendors express the same idea in two different shapes; the library absorbs the difference in the protocol layer:
 
@@ -1481,10 +1481,58 @@ The `onEvent()` callback receives, in order:
 | `thinking` | `iter` | iteration N is starting |
 | `agent_text` | `text` | natural language emitted by the model |
 | `tool_call` | `name`, `input` | the model decided to call a tool |
+| `tool_error` | `name`, `message` | a tool threw an error (already fed back to the model) |
+| `tool_permission` | `name`, `input`, `request_id` | waiting for user approval |
+| `context_compact` | `tokens`, `messages` | context compaction is starting |
+| `context_compact_done` | `messages` | compaction completed |
 | `done` | — | finished normally |
 | `error` | `message` | failed, or hit the iteration cap |
 
+Every event carries these extra fields, useful for SSE / WebSocket reconnection:
+
+| Field | Type | Meaning |
+|-------|------|---------|
+| `id` | `string` | auto-incrementing event ID (`evt_1_xxx`) |
+| `session_id` | `string` | session ID |
+| `agent_id` | `string` | agent identifier |
+| `turn_id` | `string` | current iteration turn |
+| `timestamp` | `float` | Unix timestamp (microsecond precision) |
+
 Fine-grained events inside a tool (diffs, progress …) are emitted by each `handler` through its own closure; the library makes no assumptions.
+
+### Execution result (AgentResult)
+
+`Agent::run()` returns `void` for backward compatibility — use `$agent->getRuntime()->run()` to get the structured `AgentResult`:
+
+```php
+// Legacy: use run() then lastText()
+$agent->run([['role' => 'user', 'content' => "What's the weather in Beijing?"]]);
+echo $agent->lastText();
+
+// Modern: get the full AgentResult
+$result = $agent->getRuntime()->run($messages);
+
+echo $result->getText();           // the model's final reply
+echo $result->getStopReason();     // end_turn / max_iter / no_progress / ...
+echo $result->getIterations();     // number of iterations
+print_r($result->getUsage());      // token usage
+
+if ($result->isDone()) {
+    echo 'Normal termination';
+} elseif ($result->isError()) {
+    echo 'Abnormal stop: ' . $result->getStopReason();
+}
+```
+
+| Method | Returns | Description |
+|--------|---------|-------------|
+| `getText()` | `string` | The model's final natural-language reply |
+| `getStopReason()` | `string` | Stop reason (see StopReason) |
+| `getToolCalls()` | `array` | Sequence of tool calls this turn |
+| `getUsage()` | `array` | Cumulative token usage |
+| `getIterations()` | `int` | Actual iteration count |
+| `isDone()` | `bool` | Whether termination was normal |
+| `isError()` | `bool` | Whether termination was abnormal |
 
 ### AgentToolInterface: object-oriented tool definitions
 
@@ -1522,9 +1570,239 @@ $agent->setTools([
 ]);
 ```
 
-### Loop guard
+#### Parallel safety marker
 
-The Agent automatically detects repeated tool calls (the same tool with the same arguments 3 times in a row), stops with `no_progress`, and prevents the model from spinning in a loop.
+Implement `ParallelSafeToolInterface` to mark a tool as safe for parallel execution — read-only tools (read_file / grep / glob) can run concurrently:
+
+```php
+use Ai\Agent\Tool\ParallelSafeToolInterface;
+
+class ReadFileTool implements AgentToolInterface, ParallelSafeToolInterface
+{
+    public function isParallelSafe() { return true; }
+}
+```
+
+Tools without this interface default to "not parallel-safe" (safety first).
+
+### ClaudeCodeTools: built-in tool factory
+
+`Ai\Agent\Tools\ClaudeCodeTools` provides a one-call way to create the full set of built-in tools, aligned with the Claude Code CLI default toolset:
+
+```php
+use Ai\Agent\Tools\ClaudeCodeTools;
+
+// All tools: Read / Write / Edit / Glob / Grep / Bash
+$agent->setTools(ClaudeCodeTools::all([
+    'workdir' => '/var/www/project',
+]));
+
+// Read-only toolset (for plan mode): Read / Glob / Grep
+$agent->setTools(ClaudeCodeTools::readOnly([
+    'workdir' => '/var/www/project',
+]));
+```
+
+The six built-in tools:
+
+| Tool | Description | Parallel-safe |
+|------|-------------|---------------|
+| `read_file` | Read a file, with offset/limit pagination | ✅ |
+| `write_file` | Create or overwrite a file, auto-creates directories | ❌ |
+| `edit_file` | Precise local replacement using str_replace semantics | ❌ |
+| `glob` | Match file paths by glob pattern | ✅ |
+| `grep` | Search file contents by pattern | ✅ |
+| `bash` | Execute a shell command, auto-terminates on timeout | ❌ |
+
+All file tools are protected by the `PathSafety` sandbox — they cannot escape the workdir.
+
+### Permission system
+
+The Agent has 6 built-in permission modes that control how tool calls are gated:
+
+| Mode | Description |
+|------|-------------|
+| `manual` | Read-only tools allowed automatically; dangerous tools (bash) ask the user |
+| `auto` | Everything allowed automatically |
+| `plan` | Only read-only tools allowed; the rest are denied |
+| `accept_edits` | File edits allowed; high-risk operations like bash ask |
+| `dont_ask` | Auto-allow (no prompting) |
+| `bypass` | Allow everything (⚠️ unsafe — do not use with untrusted input) |
+
+```php
+$agent->setPermissionMode('plan');      // read-only mode
+$agent->setPermissionMode('manual');    // dangerous tools ask (default)
+$agent->setPermissionMode('bypass');    // allow everything
+```
+
+#### Custom rules
+
+On top of the mode, you can add fine-grained rules with `allowTool` / `denyTool`. Priority: deny > allow > mode default:
+
+```php
+use Ai\Agent\Permission\PermissionManager;
+
+$pm = new PermissionManager('manual');
+$pm->allowTool('read_file');                           // allow all read_file calls
+$pm->allowTool('write_file', ['path' => '/var/www/*']); // only write to the specified directory
+$pm->denyTool('bash', ['command' => 'rm -rf *']);       // deny dangerous commands
+
+$agent->getRuntime()->setPermission($pm);
+```
+
+Or use the shortcut:
+
+```php
+$agent->setPermissionMode('manual');
+```
+
+#### User approval flow
+
+When the permission manager returns `ask`, the Agent pauses with a `PERMISSION_DENIED` stop signal, waiting for the business layer to respond via `approve()` / `deny()`:
+
+```php
+$messages = [['role' => 'user', 'content' => 'List files']];  // keep a copy of messages
+
+$agent->onEvent(function ($event) {
+    if ($event['type'] === 'tool_permission') {
+        // Show an approval dialog in the frontend
+        echo "Authorisation requested: {$event['name']}(" . json_encode($event['input']) . ")";
+        $requestId = $event['request_id'];
+    }
+});
+
+// Use getRuntime()->run() to obtain an AgentResult
+$result = $agent->getRuntime()->run($messages);
+
+// Resume execution via approve() / deny()
+if ($result->getStopReason() === 'permission_denied') {
+    $requestId = $result->getExtra()['request_id'] ?? '';
+
+    // Approve: pass the saved message copy, Agent continues
+    $result = $agent->approve($requestId, $messages);
+    // or
+    $result = $agent->deny($requestId, 'Not needed', $messages);
+}
+```
+
+### Context compaction
+
+The Agent automatically detects when the context window is getting full and compresses old history into a summary using the AI model itself, preventing token overflows:
+
+```php
+use Ai\Agent\Context\ContextManager;
+
+$agent->getRuntime()->setContextManager(new ContextManager(
+    $messages,
+    [
+        'maxTokens'  => 100000,   // compaction threshold (default 100k)
+        'threshold'  => 0.8,      // trigger when >80% full
+        'keepRecent' => 10,       // keep the 10 most recent messages
+    ]
+));
+```
+
+The compaction process emits `context_compact` / `context_compact_done` events so the frontend can show progress.
+
+### Session persistence
+
+Agent sessions can be persisted to the filesystem for cross-request resume (ideal for PHP-FPM):
+
+```php
+use Ai\Agent\Session\FileSessionStore;
+use Ai\Agent\Session\SessionManager;
+
+$store = new FileSessionStore('/tmp/agent_sessions');
+
+$agent
+    ->setSessionId('user-abc-123')
+    ->setSessionManager(new SessionManager($store));
+
+$agent->run($messages);
+
+// On the next request, resume the session
+$session = $store->load('user-abc-123');
+if ($session) {
+    $agent->run($session->getMessages());
+}
+```
+
+Session state lifecycle: `running` → `paused` (waiting for approval) → `running` (resumed) → `completed` / `interrupted`.
+
+### Sub-agents
+
+Register sub-agents via `SubAgentManager`. The main Agent can spawn them at runtime using the `spawn_agent` tool — each sub-agent has its own isolated context, so the main Agent's context never grows from sub-agent work:
+
+```php
+use Ai\Agent\SubAgent\SubAgentManager;
+use Ai\Agent\Tools\ReadFileTool;
+use Ai\Agent\Tools\PathSafety;
+
+$sam = new SubAgentManager($ai);
+$sam->register('code-reviewer', [
+    'description' => 'Review code quality',
+    'prompt'      => 'You are a code review expert. Find security issues and performance problems.',
+    'tools'       => [new ReadFileTool(new PathSafety('/var/www'))],
+    'max_iter'    => 10,
+]);
+
+$agent->getRuntime()->setSubAgentManager($sam);
+```
+
+Sub-agents inherit the parent Agent's permissions and cannot exceed them.
+
+### Budget control
+
+`BudgetManager` tracks token usage and estimated cost, stopping the Agent when the budget is exceeded:
+
+```php
+// Shortcut
+$agent->setMaxBudget(5.0);                          // $5 budget
+$agent->getRuntime()->setMaxTokens(500000);          // or token limit
+
+// Fine-grained
+use Ai\Agent\Budget\BudgetManager;
+
+$bm = new BudgetManager([
+    'maxBudget'  => 5.0,                              // max budget (USD)
+    'maxTokens'  => 500000,                           // max tokens
+    'pricing'    => ['prompt' => 5.0, 'completion' => 25.0, 'cached' => 0.5],
+    'perMillion' => true,                             // prices per million tokens (official)
+]);
+
+$agent->getRuntime()->setBudget($bm);
+```
+
+When the budget is exceeded, the Agent stops with `budget_exceeded`.
+
+### Parallel tool execution
+
+When the model returns multiple tool calls in one turn, parallel-safe tools (read_file / grep / glob) can run together while the rest run sequentially. Off by default — enable explicitly:
+
+```php
+$agent->setParallelTools(true);     // enable parallel execution
+```
+
+The parallel executor runs sequentially by default (semantically correct). In a Swoole / Workerman coroutine environment, inject a parallel runner for true concurrency:
+
+```php
+$agent->getRuntime()->setParallelRunner(function (array $tasks) {
+    return \Swoole\Coroutine\parallel($tasks);
+});
+```
+
+### Tool execution timeout
+
+A tool call (including retry waits) that exceeds the specified number of seconds is marked as timed out and no further retries are attempted:
+
+```php
+$agent->setToolTimeout(60);                // global timeout of 60 seconds
+$agent->getRuntime()->setToolTimeout(30);  // or via the Runtime
+```
+
+The timeout check happens after each execution attempt and before each retry wait, so it cannot forcibly interrupt synchronous PHP code mid-execution. However, it prevents unnecessary retries past the deadline. The built-in `BashTool` has its own timeout-kill mechanism and works alongside the global timeout.
+
+A timed-out tool produces `StopReason::timeout`, and the `error` field contains the timeout details.
 
 ### Runtime architecture
 
@@ -1532,14 +1810,39 @@ Internal structure since v2.0:
 
 ```
 Agent (public API)
-  └── AgentRuntime (execution engine)
-        ├── LoopController (the self-loop)
-        ├── ToolRegistry (tool registry)
-        ├── ToolExecutor (tool executor)
-        └── LoopGuard (loop guard)
+  ├── setTools() / setSystem() / onEvent() / setMaxIter() / run()
+  ├── setPermissionMode() / setSessionId() / setMaxBudget()
+  ├── approve() / deny()                              ← user approval
+  └── getRuntime() ─────────────────────────────────→  AgentRuntime (execution engine)
+        ├── ToolRegistry (tool registry)               ← AgentToolInterface registration
+        ├── ToolExecutor (tool executor)               ← retry / timeout / output truncation
+        ├── LoopController (loop controller)           ← drives the main loop
+        ├── LoopGuard (loop guard)                     ← repeated-call detection
+        ├── ParallelToolExecutor (parallel executor)   ← parallel-safe tools
+        ├── PermissionManager (permission manager)     ← 6 modes + rule matching
+        ├── ContextManager (context manager)            ← automatic compaction
+        ├── SessionManager (session manager)            ← persistence / pause / resume
+        ├── BudgetManager (budget manager)              ← token / cost control
+        └── SubAgentManager (sub-agent manager)         ← spawn_agent tool
 ```
 
 Access the internals through `$agent->getRuntime()`.
+
+### Stop reasons (StopReason)
+
+Get the stop reason via `$result->getStopReason()`:
+
+| Constant | Value | Description |
+|----------|-------|-------------|
+| `END_TURN` | `end_turn` | The model gave its final answer — normal termination |
+| `MAX_ITER` | `max_iter` | Hit the maximum iteration cap |
+| `NO_PROGRESS` | `no_progress` | Repeated the same tool call without progress |
+| `TOOL_ERROR` | `tool_error` | A tool threw an error |
+| `USER_CANCEL` | `user_cancel` | User cancelled |
+| `BUDGET_EXCEEDED` | `budget_exceeded` | Budget exceeded |
+| `TIMEOUT` | `timeout` | Timed out |
+| `PERMISSION_DENIED` | `permission_denied` | Permission denied or waiting for user approval |
+| `MODEL_ERROR` | `model_error` | Model returned an error |
 
 ---
 

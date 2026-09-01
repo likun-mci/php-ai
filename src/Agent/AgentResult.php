@@ -56,10 +56,18 @@ class AgentResult
      */
     public static function done($text = '', array $extra = [])
     {
-        $data = array_merge($extra, [
+        $data = [
             'text'       => $text,
             'stop_reason' => 'end_turn',
-        ]);
+        ];
+        // 标准字段提到顶层，其余留在 extra 供 getExtra() 读取
+        foreach (['iterations', 'usage', 'tool_calls'] as $k) {
+            if (array_key_exists($k, $extra)) {
+                $data[$k] = $extra[$k];
+                unset($extra[$k]);
+            }
+        }
+        $data['extra'] = $extra;
         return new self($data);
     }
 
@@ -71,10 +79,17 @@ class AgentResult
      */
     public static function stopped($reason, $text = '', array $extra = [])
     {
-        $data = array_merge($extra, [
+        $data = [
             'text'       => $text,
             'stop_reason' => $reason,
-        ]);
+        ];
+        foreach (['iterations', 'usage', 'tool_calls'] as $k) {
+            if (array_key_exists($k, $extra)) {
+                $data[$k] = $extra[$k];
+                unset($extra[$k]);
+            }
+        }
+        $data['extra'] = $extra;
         return new self($data);
     }
 

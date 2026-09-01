@@ -334,6 +334,21 @@ class AgentRuntime
     }
 
     /**
+     * 设置工具执行超时秒数（0 不限制）
+     *
+     * 超过此期限（含重试等待）仍未返回的工具将被标记为超时。
+     * 超时工具的结果不再重试，直接返回给模型。
+     *
+     * @param int $seconds
+     * @return $this
+     */
+    public function setToolTimeout($seconds)
+    {
+        $this->loop->setToolTimeout($seconds);
+        return $this;
+    }
+
+    /**
      * 设置降级模型（主模型服务级错误时自动切换）
      *
      * @param string[] $models 降级模型名，按优先级排列

@@ -36,6 +36,9 @@ class ToolContext
     /** @var string */
     protected $toolCallId = '';
 
+    /** @var int 工具执行超时秒数（0 不限制），工具可据此自行中断 */
+    protected $timeout = 0;
+
     /**
      * @param array<string, mixed>|string $options 选项数组，或旧版「工作目录字符串」兼容写法
      * @param callable|null $oldEmit 旧版「事件发射器」参数（仅当 $options 为字符串时使用）
@@ -57,6 +60,7 @@ class ToolContext
         $this->cancelled    = !empty($options['cancelled']);
         $this->iteration    = isset($options['iteration']) ? (int) $options['iteration'] : 0;
         $this->toolCallId   = isset($options['toolCallId']) ? (string) $options['toolCallId'] : '';
+        $this->timeout      = isset($options['timeout']) ? (int) $options['timeout'] : 0;
     }
 
     /** @return string */
@@ -79,6 +83,19 @@ class ToolContext
 
     /** @return string */
     public function toolCallId() { return $this->toolCallId; }
+
+    /** @return int */
+    public function timeout() { return $this->timeout; }
+
+    /**
+     * @param string $toolCallId
+     * @return $this
+     */
+    public function setToolCallId($toolCallId)
+    {
+        $this->toolCallId = (string) $toolCallId;
+        return $this;
+    }
 
     /** @return $this */
     public function cancel()

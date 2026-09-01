@@ -1493,10 +1493,58 @@ $reply = $agent->lastText();   // 最终自然语言回复
 | `thinking` | `iter` | 第几轮迭代开始 |
 | `agent_text` | `text` | 模型输出的自然语言 |
 | `tool_call` | `name`、`input` | 模型决定调用某工具 |
+| `tool_error` | `name`、`message` | 工具执行出错（已回填给模型） |
+| `tool_permission` | `name`、`input`、`request_id` | 需要用户授权 |
+| `context_compact` | `tokens`、`messages` | 上下文压缩开始 |
+| `context_compact_done` | `messages` | 压缩完成 |
 | `done` | — | 正常结束 |
 | `error` | `message` | 出错或达到最大迭代步数 |
 
+每个事件统一携带以下字段，便于 SSE / WebSocket 断线重连：
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `id` | `string` | 自增事件 ID（`evt_1_xxx`） |
+| `session_id` | `string` | 会话 ID |
+| `agent_id` | `string` | Agent 标识 |
+| `turn_id` | `string` | 当前迭代轮次 |
+| `timestamp` | `float` | Unix 时间戳（微秒精度） |
+
 工具内部的细粒度事件（如 diff、进度）由各 `handler` 自行通过闭包发出，库不做假设。
+
+### 执行结果（AgentResult）
+
+`Agent::run()` 仍保持向后兼容返回 `void`，但通过 `$agent->getRuntime()->run()` 可获得完整的 `AgentResult` 对象：
+
+```php
+// 兼容旧版：直接取最终文本
+$agent->run([['role' => 'user', 'content' => '北京天气']]);
+echo $agent->lastText();
+
+// 新版：通过 getRuntime() 获取结构化结果
+$result = $agent->getRuntime()->run($messages);
+
+echo $result->getText();           // 模型最终回答
+echo $result->getStopReason();     // end_turn / max_iter / no_progress / ...
+echo $result->getIterations();     // 迭代次数
+print_r($result->getUsage());      // token 用量
+
+if ($result->isDone()) {
+    echo '正常结束';
+} elseif ($result->isError()) {
+    echo '异常停止：' . $result->getStopReason();
+}
+```
+
+| 方法 | 返回 | 说明 |
+|------|------|------|
+| `getText()` | `string` | 模型最终自然语言回复 |
+| `getStopReason()` | `string` | 停止原因（见 StopReason） |
+| `getToolCalls()` | `array` | 本轮工具调用序列 |
+| `getUsage()` | `array` | 累计 token 用量 |
+| `getIterations()` | `int` | 实际迭代次数 |
+| `isDone()` | `bool` | 是否正常结束 |
+| `isError()` | `bool` | 是否异常停止 |
 
 ### AgentToolInterface：面向对象的工具定义
 
@@ -1534,9 +1582,239 @@ $agent->setTools([
 ]);
 ```
 
-### 循环守卫（LoopGuard）
+#### 并行安全标记
 
-Agent 自动检测连续重复的工具调用（相同工具 + 相同参数连续 3 次），触发 `no_progress` 停止，防止模型陷入死循环。
+实现 `ParallelSafeToolInterface` 可标记工具为并行安全，只读工具（read_file / grep / glob）可并行执行：
+
+```php
+use Ai\Agent\Tool\ParallelSafeToolInterface;
+
+class ReadFileTool implements AgentToolInterface, ParallelSafeToolInterface
+{
+    public function isParallelSafe() { return true; }
+}
+```
+
+不实现此接口的工具默认按「不可并行」处理，安全优先。
+
+### ClaudeCodeTools：内置工具工厂
+
+`Ai\Agent\Tools\ClaudeCodeTools` 提供一键创建 Agent 完整内置工具集的能力，与 Claude Code CLI 默认工具集对齐：
+
+```php
+use Ai\Agent\Tools\ClaudeCodeTools;
+
+// 全部工具：Read / Write / Edit / Glob / Grep / Bash
+$agent->setTools(ClaudeCodeTools::all([
+    'workdir' => '/var/www/project',
+]));
+
+// 只读工具集（适合 plan 模式）：Read / Glob / Grep
+$agent->setTools(ClaudeCodeTools::readOnly([
+    'workdir' => '/var/www/project',
+]));
+```
+
+六个内置工具详情：
+
+| 工具 | 说明 | 并行安全 |
+|------|------|---------|
+| `read_file` | 读取文件，支持 offset/limit 分页 | ✅ |
+| `write_file` | 创建或覆盖文件，自动创建目录 | ❌ |
+| `edit_file` | 精确局部替换，str_replace 语义 | ❌ |
+| `glob` | 按 glob 模式匹配文件路径 | ✅ |
+| `grep` | 按模式搜索文件内容 | ✅ |
+| `bash` | 执行 shell 命令，超时自动终止 | ❌ |
+
+所有文件工具都受 `PathSafety` 沙箱保护，无法逃逸 workdir 范围。
+
+### 权限系统
+
+Agent 内置 6 种权限模式，控制工具调用的放行策略：
+
+| 模式 | 说明 |
+|------|------|
+| `manual` | 只读工具自动放行，危险工具（bash）询问用户 |
+| `auto` | 全部自动放行 |
+| `plan` | 仅允许只读工具，其余拒绝 |
+| `accept_edits` | 允许文件修改，bash 等高风险操作询问 |
+| `dont_ask` | 自动放行（不询问） |
+| `bypass` | 全部放行（⚠️ 不安全，不要用于不可信输入） |
+
+```php
+$agent->setPermissionMode('plan');      // 只读模式
+$agent->setPermissionMode('manual');    // 危险工具询问（默认）
+$agent->setPermissionMode('bypass');    // 全部放行
+```
+
+#### 规则匹配
+
+在模式基础上，可以用 `allowTool` / `denyTool` 添加细化规则，优先级：deny > allow > 模式默认：
+
+```php
+use Ai\Agent\Permission\PermissionManager;
+
+$pm = new PermissionManager('manual');
+$pm->allowTool('read_file');                           // 全部放行 read_file
+$pm->allowTool('write_file', ['path' => '/var/www/*']); // 只允许写指定目录
+$pm->denyTool('bash', ['command' => 'rm -rf *']);       // 拒绝危险命令
+
+$agent->getRuntime()->setPermission($pm);
+```
+
+也可通过快捷方式设置：
+
+```php
+$agent->setPermissionMode('manual');
+```
+
+#### 用户授权流程
+
+当权限管理器返回 `ask` 时，Agent 暂停并发出 `PERMISSION_DENIED` 停止信号，等待业务层通过 `approve()` / `deny()` 响应：
+
+```php
+$messages = [['role' => 'user', 'content' => '列出文件']];  // 业务层保存消息副本
+
+$agent->onEvent(function ($event) {
+    if ($event['type'] === 'tool_permission') {
+        // 前端展示授权对话框
+        echo "请求授权：{$event['name']}(" . json_encode($event['input']) . ")";
+        $requestId = $event['request_id'];
+    }
+});
+
+// 用 getRuntime()->run() 返回 AgentResult
+$result = $agent->getRuntime()->run($messages);
+
+// 在外部通过 approve() / deny() 恢复执行
+if ($result->getStopReason() === 'permission_denied') {
+    $requestId = $result->getExtra()['request_id'] ?? '';
+
+    // 批准：传入之前保存的消息副本，Agent 继续执行
+    $result = $agent->approve($requestId, $messages);
+    // 或
+    $result = $agent->deny($requestId, '不需要', $messages);
+}
+```
+
+### 上下文压缩
+
+Agent 自动检测上下文长度，超过阈值时用 AI 自身将历史消息压缩为摘要，避免 token 超限：
+
+```php
+use Ai\Agent\Context\ContextManager;
+
+$agent->getRuntime()->setContextManager(new ContextManager(
+    $messages,
+    [
+        'maxTokens'  => 100000,   // 压缩阈值（默认 100k）
+        'threshold'  => 0.8,      // 超过 80% 时触发
+        'keepRecent' => 10,       // 保留最近 10 条消息
+    ]
+));
+```
+
+压缩过程自动触发 `context_compact` / `context_compact_done` 事件，前端可展示进度。
+
+### 会话持久化
+
+Agent 会话可保存到文件系统，支持跨请求恢复（适用于 PHP-FPM 场景）：
+
+```php
+use Ai\Agent\Session\FileSessionStore;
+use Ai\Agent\Session\SessionManager;
+
+$store = new FileSessionStore('/tmp/agent_sessions');
+
+$agent
+    ->setSessionId('user-abc-123')
+    ->setSessionManager(new SessionManager($store));
+
+$agent->run($messages);
+
+// 下次请求恢复会话
+$session = $store->load('user-abc-123');
+if ($session) {
+    $agent->run($session->getMessages());
+}
+```
+
+会话状态流转：`running` → `paused`（等待授权）→ `running`（恢复）→ `completed` / `interrupted`。
+
+### 子 Agent
+
+通过 `SubAgentManager` 注册子 Agent，主 Agent 可通过 `spawn_agent` 工具派生子 Agent 执行独立任务，子 Agent 拥有隔离的上下文，不会导致主 Agent 上下文膨胀：
+
+```php
+use Ai\Agent\SubAgent\SubAgentManager;
+use Ai\Agent\Tools\ReadFileTool;
+use Ai\Agent\Tools\PathSafety;
+
+$sam = new SubAgentManager($ai);
+$sam->register('code-reviewer', [
+    'description' => '审查代码质量',
+    'prompt'      => '你是代码审查专家，找出安全漏洞和性能问题。',
+    'tools'       => [new ReadFileTool(new PathSafety('/var/www'))],
+    'max_iter'    => 10,
+]);
+
+$agent->getRuntime()->setSubAgentManager($sam);
+```
+
+子 Agent 权限继承自父 Agent，且不能超越父 Agent 的权限范围。
+
+### 预算控制
+
+`BudgetManager` 跟踪 token 用量与估算成本，超过预算自动停止：
+
+```php
+// 快捷方式
+$agent->setMaxBudget(5.0);                          // 预算 5 美元
+$agent->getRuntime()->setMaxTokens(500000);          // 或按 token 数限制
+
+// 精细配置
+use Ai\Agent\Budget\BudgetManager;
+
+$bm = new BudgetManager([
+    'maxBudget'  => 5.0,                              // 最大预算（美元）
+    'maxTokens'  => 500000,                           // 最大 token 数
+    'pricing'    => ['prompt' => 5.0, 'completion' => 25.0, 'cached' => 0.5],
+    'perMillion' => true,                             // 按每百万 token 计（官网价）
+]);
+
+$agent->getRuntime()->setBudget($bm);
+```
+
+超出预算时 Agent 停止，停止原因为 `budget_exceeded`。
+
+### 并行工具执行
+
+当模型一次返回多个工具调用时，并行安全的工具（read_file / grep / glob）可同时执行，其余工具按顺序执行。默认关闭，需显式开启：
+
+```php
+$agent->setParallelTools(true);     // 启用并行
+```
+
+并行执行器默认按顺序执行（语义正确），在 Swoole / Workerman 协程环境可注入并行运行器实现真正并发：
+
+```php
+$agent->getRuntime()->setParallelRunner(function (array $tasks) {
+    return \Swoole\Coroutine\parallel($tasks);
+});
+```
+
+### 工具执行超时
+
+一次工具调用（含重试等待）超过指定秒数后自动标记为超时，不再继续重试：
+
+```php
+$agent->setToolTimeout(60);               // 全局超时 60 秒
+$agent->getRuntime()->setToolTimeout(30);  // 或通过 Runtime 设置
+```
+
+超时判断时间点在每次执行完成和每次重试等待前，因此不会在工具执行中途强行中断（同步 PHP 无法打断用户态代码），但能阻止后续重试。框架内置的 BashTool 自带超时终止能力，可与全局超时配合使用。
+
+超时工具的 `StopReason` 为 `timeout`，结果中的 `error` 包含超时详情。
 
 ### 运行时架构
 
@@ -1544,14 +1822,39 @@ v2.0 内部结构：
 
 ```
 Agent（对外 API）
-  └── AgentRuntime（执行引擎）
-        ├── LoopController（自循环）
-        ├── ToolRegistry（工具注册表）
-        ├── ToolExecutor（工具执行器）
-        └── LoopGuard（防死循环）
+  ├── setTools() / setSystem() / onEvent() / setMaxIter() / run()
+  ├── setPermissionMode() / setSessionId() / setMaxBudget()
+  ├── approve() / deny()                              ← 用户授权
+  └── getRuntime() ─────────────────────────────────→  AgentRuntime（执行引擎）
+        ├── ToolRegistry（工具注册表）                  ← AgentToolInterface 注册
+        ├── ToolExecutor（工具执行器）                  ← 重试 / 超时 / 输出截断
+        ├── LoopController（自循环控制器）              ← 驱动主循环
+        ├── LoopGuard（防死循环守卫）                   ← 重复调用检测
+        ├── ParallelToolExecutor（并行执行器）           ← 并行安全工具
+        ├── PermissionManager（权限管理器）              ← 6 种模式 + 规则匹配
+        ├── ContextManager（上下文管理器）               ← 自动压缩历史
+        ├── SessionManager（会话管理器）                 ← 持久化 / 暂停 / 恢复
+        ├── BudgetManager（预算管理器）                  ← token / 成本控制
+        └── SubAgentManager（子 Agent 管理器）           ← spawn_agent 工具
 ```
 
-通过 `$agent->getRuntime()` 可访问内部组件。
+通过 `$agent->getRuntime()` 可访问全部内部组件，实现高级定制。
+
+### 停止原因（StopReason）
+
+Agent 停止时可通过 `$result->getStopReason()` 获取原因：
+
+| 常量 | 值 | 说明 |
+|------|------|------|
+| `END_TURN` | `end_turn` | 模型给出最终回答，正常结束 |
+| `MAX_ITER` | `max_iter` | 已达最大迭代次数上限 |
+| `NO_PROGRESS` | `no_progress` | 连续重复调用同一工具，无进展 |
+| `TOOL_ERROR` | `tool_error` | 工具执行出错 |
+| `USER_CANCEL` | `user_cancel` | 用户取消 |
+| `BUDGET_EXCEEDED` | `budget_exceeded` | 预算超限 |
+| `TIMEOUT` | `timeout` | 超时 |
+| `PERMISSION_DENIED` | `permission_denied` | 权限被拒绝或等待用户授权 |
+| `MODEL_ERROR` | `model_error` | 模型返回错误 |
 
 ---
 

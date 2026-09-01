@@ -56,7 +56,7 @@ $tools = [
 // ============================================================
 
 /**
- * 跑一轮 Agent 对话
+ * 跑一轮 Agent 对话（旧格式闭包工具）
  *
  * @param string $protocol 协议标识（qwen / zhipu / openai / claude / doubao ……）
  * @param string $model    模型名
@@ -172,3 +172,91 @@ TXT;
 // }
 //
 // echo $resp->getContent();
+
+// ============================================================
+// 5. 高级用法：对象工具 + 权限模式 + AgentResult + 内置工具工厂
+// ============================================================
+//
+// 下面的示例展示了 Agent 的新功能，需要实际 API Key 才能运行。
+//
+// use Ai\Agent\Agent;
+// use Ai\Agent\AgentResult;
+// use Ai\Agent\Tool\AgentToolInterface;
+// use Ai\Agent\Tool\ToolContext;
+// use Ai\Agent\Tool\ToolResult;
+// use Ai\Agent\Tools\ClaudeCodeTools;
+// use Ai\Agent\Tools\PathSafety;
+// use Ai\Agent\Tools\ReadFileTool;
+// use Ai\Agent\Session\FileSessionStore;
+// use Ai\Agent\Session\SessionManager;
+// use Ai\Agent\Budget\BudgetManager;
+//
+// // 5a. 对象工具（AgentToolInterface）
+// class SearchOrderTool implements AgentToolInterface
+// {
+//     public function name()        { return 'search_order'; }
+//     public function description() { return '查询订单状态'; }
+//     public function schema()
+//     {
+//         return [
+//             'type'       => 'object',
+//             'properties' => [
+//                 'order_no' => ['type' => 'string', 'description' => '订单号'],
+//             ],
+//             'required'   => ['order_no'],
+//         ];
+//     }
+//     public function execute(array $input, ToolContext $context)
+//     {
+//         $orderNo = $input['order_no'] ?? '';
+//         return ToolResult::success("订单 {$orderNo} 已发货，预计明天送达");
+//     }
+// }
+//
+// // 5b. 创建 Agent，使用内置工具工厂 + 权限模式 + 预算控制
+// $ai = AI::create([
+//     'protocol'   => 'qwen',
+//     'model'      => 'qwen-plus',
+//     'api_key'    => getenv('QWEN_API_KEY'),
+//     'max_tokens' => 4096,
+// ]);
+//
+// $agent = (new Agent($ai))
+//     ->setSystem('你是一个文件操作助手，使用内置工具完成任务。')
+//     ->setTools(ClaudeCodeTools::all(['workdir' => '/var/www/project']))
+//     ->setPermissionMode('plan')            // 只读模式，防止意外修改
+//     ->setMaxIter(15)
+//     ->setStream(true);                     // 开启流式输出
+//
+// // 5c. 使用 getRuntime()->run() 获得 AgentResult
+// $result = $agent->getRuntime()->run([
+//     ['role' => 'user', 'content' => '工作区里有哪些 PHP 文件？搜索包含 "function" 的文件。'],
+// ]);
+//
+// if ($result->isDone()) {
+//     echo "任务完成，共 {$result->getIterations()} 轮迭代\n";
+// } elseif ($result->getStopReason() === 'max_iter') {
+//     echo "任务未完成（已达最大迭代次数）\n";
+// }
+//
+// // 5d. 带预算控制和会话持久化的 Agent
+// $store = new FileSessionStore('/tmp/agent_sessions');
+//
+// $agent2 = (new Agent($ai))
+//     ->setSystem('助手')
+//     ->setTools([new SearchOrderTool()])
+//     ->setMaxBudget(5.0)                    // 预算上限 5 美元
+//     ->setSessionId('order-query-1')
+//     ->setSessionManager(new SessionManager($store));
+//
+// $result = $agent2->getRuntime()->run([
+//     ['role' => 'user', 'content' => '查一下订单 A20260811 的状态'],
+// ]);
+//
+// echo $result->getText();  // 最终回复
+//
+// // 会话已自动持久化，下次请求可恢复
+// $session = $store->load('order-query-1');
+// if ($session) {
+//     echo "会话已保存（{$session->getStatus()}）\n";
+// }

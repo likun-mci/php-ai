@@ -105,6 +105,9 @@ class ToolExecutor
     /**
      * 执行工具（带重试）
      *
+     * executionTimeout 是整个执行过程（含重试）的墙钟上限：一旦超过期限，
+     * 不再重试，并把结果标记为超时。
+     *
      * @param AgentToolInterface $tool
      * @param array<string, mixed> $input
      * @param ToolContext $context
@@ -115,10 +118,16 @@ class ToolExecutor
         $maxAttempts = max(1, $this->maxRetries + 1);
         $result = ToolResult::error('执行失败，无有效尝试');
 
+        // 整体执行期限（含重试等待）
+        $deadline = $this->executionTimeout > 0 ? microtime(true) + $this->executionTimeout : null;
+
         for ($attempt = 0; $attempt < $maxAttempts; $attempt++) {
             if ($attempt > 0) {
-                // 重试等待：指数退避 + 抖动
+                // 重试等待：指数退避 + 抖动；若等待后会超过整体期限则直接放弃
                 $delay = min(100000 * pow(2, $attempt - 1), 2000000); // 0.1s → 0.2s → 0.4s → 2s max
+                if ($deadline !== null && microtime(true) + $delay / 1000000 > $deadline) {
+                    return $this->asTimeoutResult($result, $attempt);
+                }
                 usleep($delay);
             }
 
@@ -139,6 +148,11 @@ class ToolExecutor
             $metadata = $result->getMetadata();
             $metadata['duration_ms'] = $duration;
             $metadata['attempt'] = $attempt + 1;
+
+            // 整体超时：即使刚执行完（成功）也视为超时，因为已超过期限
+            if ($deadline !== null && microtime(true) > $deadline) {
+                return $this->asTimeoutResult($result, $attempt);
+            }
 
             // 重建带元数据的结果（保留原 display）
             $result = new ToolResult([
@@ -164,6 +178,26 @@ class ToolExecutor
         }
 
         return $result;
+    }
+
+    /**
+     * 把结果标记为超时
+     *
+     * @param ToolResult $result
+     * @param int $attempt
+     * @return ToolResult
+     */
+    protected function asTimeoutResult(ToolResult $result, $attempt)
+    {
+        $error = '工具执行超时（超过 ' . $this->executionTimeout . 's，尝试 ' . ($attempt + 1) . ' 次）';
+        $content = $result->isSuccess() ? (string) $result->getContent() : $result->getError();
+        if ($content !== '') {
+            $error .= '，最后输出：' . mb_substr($content, 0, 500);
+        }
+        return ToolResult::error($error, [
+            'timeout' => true,
+            'timeout_seconds' => $this->executionTimeout,
+        ]);
     }
 
     /**

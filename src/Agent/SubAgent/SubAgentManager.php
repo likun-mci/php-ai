@@ -194,8 +194,8 @@ class SubAgentManager
             if ($parentPm) {
                 $subRuntime->setPermission($parentPm);
             } else {
-                // 父权限未设置时走 dont_ask（子 Agent 默认自动放行，因为父 Agent 已授权 spawn）
-                $subRuntime->setPermissionMode('dont_ask');
+                // 父权限未设置时走 manual 模式——子 Agent 同样受权限系统约束
+                $subRuntime->setPermissionMode('manual');
             }
 
             $tools = $def->getTools();

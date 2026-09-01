@@ -207,6 +207,82 @@ class Agent
     }
 
     /**
+     * 设置上下文管理器（自动压缩超长上下文）
+     *
+     * @param \Ai\Agent\Context\ContextManager $cm
+     * @return $this
+     */
+    public function setContextManager($cm)
+    {
+        $this->runtime->setContextManager($cm);
+        return $this;
+    }
+
+    /**
+     * 设置工具执行超时秒数（0 不限制）
+     *
+     * 超过此期限（含重试等待）仍未返回的工具将被标记为超时，
+     * 超时结果不再重试，直接返回给模型。
+     *
+     * @param int $seconds
+     * @return $this
+     */
+    public function setToolTimeout($seconds)
+    {
+        $this->runtime->setToolTimeout($seconds);
+        return $this;
+    }
+
+    /**
+     * 设置 Agent 标识（事件里带 agent_id 字段，便于前端区分）
+     *
+     * @param string $agentId
+     * @return $this
+     */
+    public function setAgentId($agentId)
+    {
+        $this->runtime->setAgentId($agentId);
+        return $this;
+    }
+
+    /**
+     * 设置子 Agent 管理器（启用 spawn_agent 工具）
+     *
+     * @param \Ai\Agent\SubAgent\SubAgentManager $sam
+     * @return $this
+     */
+    public function setSubAgentManager($sam)
+    {
+        $this->runtime->setSubAgentManager($sam);
+        return $this;
+    }
+
+    /**
+     * 批准权限请求并恢复 Agent 执行
+     *
+     * @param string $requestId
+     * @param array<int, array<string, mixed>> $messages 当前上下文消息（从事件 data 里取）
+     * @return AgentResult
+     */
+    public function approve($requestId, array $messages)
+    {
+        return $this->runtime->approve($requestId, $messages);
+    }
+
+    /**
+     * 拒绝权限请求并恢复 Agent 执行
+     *
+     * @param string $requestId
+     * @param string $reason
+     * @param array<int, array<string, mixed>> $messages 当前上下文消息
+     * @return AgentResult
+     */
+    public function deny($requestId, $reason, array $messages)
+    {
+        return $this->runtime->deny($requestId, $reason, $messages);
+    }
+
+    /**
      * @return string
      */
     public function lastText()

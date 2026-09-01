@@ -611,6 +611,33 @@ class Agent
     }
 
     /**
+     * 设置记忆管理器
+     *
+     * @param \Ai\Agent\Memory\MemoryManager $mm
+     * @return $this
+     */
+    public function setMemoryManager($mm)
+    {
+        $this->runtime->setMemoryManager($mm);
+        return $this;
+    }
+
+    /**
+     * 设置记忆存储目录（自动创建 MemoryManager）
+     *
+     * 各作用域文件存放于 {baseDir}/{scope}.md
+     *
+     * @param string $baseDir
+     * @return $this
+     */
+    public function setMemoryDir($baseDir)
+    {
+        $mm = new \Ai\Agent\Memory\MemoryManager((string) $baseDir);
+        $this->runtime->setMemoryManager($mm);
+        return $this;
+    }
+
+    /**
      * 回答用户问题并恢复 Agent 执行
      *
      * @param string $questionId

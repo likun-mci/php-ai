@@ -12,6 +12,7 @@ use Ai\Agent\Workspace\WorkspaceManager;
 use Ai\Agent\Skill\SkillManager;
 use Ai\Agent\Instruction\InstructionManager;
 use Ai\Agent\Mcp\McpManager;
+use Ai\Agent\Memory\MemoryManager;
 
 /**
  * Agent 运行时上下文
@@ -92,6 +93,9 @@ class AgentContext
 
     /** @var McpManager|null */
     protected $mcpManager = null;
+
+    /** @var MemoryManager|null */
+    protected $memoryManager = null;
 
     /**
      * @param AI $ai
@@ -243,6 +247,26 @@ class AgentContext
     public function getMcpManager()
     {
         return $this->mcpManager;
+    }
+
+    /* ---------- 记忆管理 ---------- */
+
+    /**
+     * @param MemoryManager|null $mm
+     * @return $this
+     */
+    public function setMemoryManager($mm)
+    {
+        $this->memoryManager = $mm;
+        return $this;
+    }
+
+    /**
+     * @return MemoryManager|null
+     */
+    public function getMemoryManager()
+    {
+        return $this->memoryManager;
     }
 
     /* ---------- 上下文管理 ---------- */

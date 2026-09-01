@@ -374,6 +374,14 @@ class LoopController
                             $systemPrompt .= "\n\n" . $instPrompt;
                         }
                     }
+                    // 长期记忆注入（分作用域）
+                    $mm = $context->getMemoryManager();
+                    if ($mm && $mm->isEnabled()) {
+                        $memPrompt = $mm->forPrompt();
+                        if ($memPrompt !== '') {
+                            $systemPrompt .= "\n\n" . $memPrompt;
+                        }
+                    }
                     $modelParams = [
                         'system'   => $systemPrompt,
                         'messages' => $context->getMessages(),

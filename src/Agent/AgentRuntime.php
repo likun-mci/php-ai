@@ -19,6 +19,7 @@ use Ai\Agent\Workspace\WorkspaceManager;
 use Ai\Agent\Skill\SkillManager;
 use Ai\Agent\Instruction\InstructionManager;
 use Ai\Agent\Mcp\McpManager;
+use Ai\Agent\Memory\MemoryManager;
 
 /**
  * Agent Runtime——执行引擎
@@ -110,6 +111,9 @@ class AgentRuntime
 
     /** @var McpManager|null */
     protected $mcpManager = null;
+
+    /** @var MemoryManager|null */
+    protected $memoryManager = null;
 
     /**
      * @param AI $ai
@@ -630,6 +634,26 @@ class AgentRuntime
     }
 
     /**
+     * 设置记忆管理器
+     *
+     * @param MemoryManager|null $mm
+     * @return $this
+     */
+    public function setMemoryManager($mm)
+    {
+        $this->memoryManager = $mm;
+        return $this;
+    }
+
+    /**
+     * @return MemoryManager|null
+     */
+    public function getMemoryManager()
+    {
+        return $this->memoryManager;
+    }
+
+    /**
      * 回答用户问题并恢复 Agent 执行
      *
      * @param string $questionId
@@ -826,6 +850,7 @@ class AgentRuntime
         $context->setSkillManager($this->skillManager);
         $context->setInstructionManager($this->instruction);
         $context->setMcpManager($this->mcpManager);
+        $context->setMemoryManager($this->memoryManager);
         return $context;
     }
 

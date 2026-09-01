@@ -36,6 +36,9 @@ class StopReason
     /** 等待用户授权（Agent 暂停，需 resume） */
     const WAITING_PERMISSION = 'waiting_permission';
 
+    /** 等待用户回答（Agent 向用户提问，需 answer 后继续） */
+    const WAITING_USER = 'waiting_user';
+
     /** 模型返回错误 */
     const MODEL_ERROR = 'model_error';
 
@@ -54,6 +57,7 @@ class StopReason
             self::BUDGET_EXCEEDED,
             self::TIMEOUT,
             self::PERMISSION_DENIED,
+            self::WAITING_USER,
             self::MODEL_ERROR,
         ];
     }

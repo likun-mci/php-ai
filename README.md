@@ -1826,6 +1826,37 @@ $agent->setFallbackModels(['claude-sonnet', 'claude-haiku']);
 
 降级发生后会发出 `model_fallback` 事件，包含当前使用的模型名与原始错误信息。所有降级模型均失败后，Agent 才以 `MODEL_ERROR` 停止。
 
+### 用户交互（AskUser）
+
+当任务描述不明确、存在多个合理执行方案或涉及关键选择时，Agent 可以向用户提问，而不是自行猜测。这与 Permission 有本质区别：
+
+- **Permission**：回答「能不能执行？」（权限检查）
+- **AskUser**：回答「应该怎么做？」（Agent 主动向用户提问）
+
+```php
+use Ai\Agent\Interaction\UserInteractionManager;
+
+$uim = new UserInteractionManager();
+
+$agent
+    ->setUserInteractionManager($uim)
+    ->setTools([...]);
+
+$result = $agent->getRuntime()->run($messages);
+
+// 暂停后等待用户回答
+if ($result->getStopReason() === 'waiting_user') {
+    $questionId = $result->getExtra()['question_id'] ?? '';
+    $answer = 'main';  // 用户的选择
+
+    // 回答后恢复执行
+    $result = $agent->answerUser($questionId, $answer, $messages);
+    echo $result->getText();
+}
+```
+
+Agent 会在需要时调用 `ask_user` 工具，暂停并等待用户回答。`answerUser()` 将答案回填给模型继续执行。
+
 ### 钩子系统（Hooks）
 
 在 Agent 执行链的关键节点注入自定义逻辑，无需修改核心工具：
@@ -1951,7 +1982,9 @@ Agent（对外 API）
   ├── setPermissionMode() / setSessionId() / setMaxBudget()
   ├── setFallbackModels() / setToolTimeout()
   ├── setTaskManager() / setTaskId()                   ← 任务系统
+  ├── setUserInteractionManager()                      ← 用户交互
   ├── approve() / deny()                              ← 用户授权
+  ├── answerUser()                                    ← 回答用户提问
   ├── onBeforeTool() / onAfterTool()                  ← 工具钩子
   ├── onBeforeModel() / onAfterModel()                ← 模型钩子
   └── getRuntime() ─────────────────────────────────→  AgentRuntime（执行引擎）
@@ -1966,6 +1999,7 @@ Agent（对外 API）
         ├── BudgetManager（预算管理器）                  ← token / 成本控制
         ├── SubAgentManager（子 Agent 管理器）           ← spawn_agent 工具
         ├── TaskManager（任务管理器）                   ← 任务生命周期（AgentTask / TaskState）
+        ├── UserInteractionManager（用户交互管理器）      ← ask_user 工具
         └── AgentHooks（钩子系统）                      ← before/after 工具与模型
 ```
 
@@ -1985,6 +2019,7 @@ Agent 停止时可通过 `$result->getStopReason()` 获取原因：
 | `BUDGET_EXCEEDED` | `budget_exceeded` | 预算超限 |
 | `TIMEOUT` | `timeout` | 超时 |
 | `PERMISSION_DENIED` | `permission_denied` | 权限被拒绝或等待用户授权 |
+| `WAITING_USER` | `waiting_user` | 等待用户回答问题（ask_user） |
 | `MODEL_ERROR` | `model_error` | 模型返回错误 |
 
 ---

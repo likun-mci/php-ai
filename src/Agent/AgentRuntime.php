@@ -5,6 +5,7 @@ use Ai\AI;
 use Ai\Agent\Budget\BudgetManager;
 use Ai\Agent\Context\ContextManager;
 use Ai\Agent\Hooks\AgentHooks;
+use Ai\Agent\Interaction\UserInteractionManager;
 use Ai\Agent\Loop\LoopController;
 use Ai\Agent\Loop\StopReason;
 use Ai\Agent\Permission\PermissionManager;
@@ -86,6 +87,9 @@ class AgentRuntime
 
     /** @var string|null */
     protected $taskId = null;
+
+    /** @var UserInteractionManager|null */
+    protected $interaction = null;
 
     /**
      * @param AI $ai
@@ -346,6 +350,29 @@ class AgentRuntime
     }
 
     /**
+     * 注册 ask_user 工具（如果用户交互管理器存在）
+     *
+     * @return void
+     */
+    protected function registerInteraction()
+    {
+        $uim = $this->interaction;
+        if ($uim === null) {
+            return;
+        }
+        // 只在 ask_user 尚未注册时追加
+        if ($this->toolRegistry->has('ask_user')) {
+            return;
+        }
+        $schema = $uim->getToolSchema();
+        $this->toolRegistry->register('ask_user', [
+            'description'  => $schema['description'],
+            'input_schema' => $schema['input_schema'],
+            'handler'      => $uim->getHandler(),
+        ]);
+    }
+
+    /**
      * 设置工具执行超时秒数（0 不限制）
      *
      * 超过此期限（含重试等待）仍未返回的工具将被标记为超时。
@@ -411,6 +438,55 @@ class AgentRuntime
     public function getTaskId()
     {
         return $this->taskId;
+    }
+
+    /**
+     * 设置用户交互管理器
+     *
+     * @param UserInteractionManager|null $uim
+     * @return $this
+     */
+    public function setUserInteractionManager($uim)
+    {
+        $this->interaction = $uim;
+        return $this;
+    }
+
+    /**
+     * @return UserInteractionManager|null
+     */
+    public function getUserInteractionManager()
+    {
+        return $this->interaction;
+    }
+
+    /**
+     * 回答用户问题并恢复 Agent 执行
+     *
+     * @param string $questionId
+     * @param string $answer
+     * @param array<int, array<string, mixed>> $messages 当前上下文消息
+     * @return AgentResult
+     */
+    public function answerUser($questionId, $answer, array $messages)
+    {
+        if (!$this->interaction) {
+            return AgentResult::stopped(StopReason::MODEL_ERROR, '', ['error' => '未配置用户交互管理器']);
+        }
+        $result = $this->interaction->answer($questionId, $answer);
+        if ($result === null || !$result->isAnswered()) {
+            return AgentResult::stopped(StopReason::MODEL_ERROR, '', ['error' => '问题不存在或已回答']);
+        }
+        // 构造工具结果并追加到消息，然后继续循环
+        // 使用通用的 tool_use_id，模型会将其与之前的 ask_user 调用关联
+        $toolResult = [
+            'type'        => 'tool_result',
+            'tool_use_id' => 'answer_' . $questionId,
+            'content'     => 'User answered: ' . $answer,
+            'is_error'    => false,
+        ];
+        $messages[] = ['role' => 'user', 'content' => [$toolResult]];
+        return $this->loop->run($this->buildContext($messages));
     }
 
     /**
@@ -581,6 +657,7 @@ class AgentRuntime
     {
         // 构造上下文
         $this->registerSpawnAgent();
+        $this->registerInteraction();
         $context = $this->buildContext($messages);
 
         // 任务事件：task_start

@@ -306,6 +306,31 @@ class Agent
     }
 
     /**
+     * 设置用户交互管理器（启用 ask_user 工具）
+     *
+     * @param \Ai\Agent\Interaction\UserInteractionManager $uim
+     * @return $this
+     */
+    public function setUserInteractionManager($uim)
+    {
+        $this->runtime->setUserInteractionManager($uim);
+        return $this;
+    }
+
+    /**
+     * 回答用户问题并恢复 Agent 执行
+     *
+     * @param string $questionId
+     * @param string $answer
+     * @param array<int, array<string, mixed>> $messages 当前上下文消息
+     * @return \Ai\Agent\AgentResult
+     */
+    public function answerUser($questionId, $answer, array $messages)
+    {
+        return $this->runtime->answerUser($questionId, $answer, $messages);
+    }
+
+    /**
      * 设置子 Agent 管理器（启用 spawn_agent 工具）
      *
      * @param \Ai\Agent\SubAgent\SubAgentManager $sam

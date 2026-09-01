@@ -1814,6 +1814,37 @@ $agent->setFallbackModels(['claude-sonnet', 'claude-haiku']);
 
 A `model_fallback` event is emitted whenever a fallback is triggered, including the model name and the original error message. If all fallback models also fail, the Agent stops with `MODEL_ERROR`.
 
+### User interaction (AskUser)
+
+When a task description is ambiguous, multiple approaches are reasonable, or a key decision is needed, the Agent can ask the user a question instead of guessing. This is fundamentally different from Permission:
+
+- **Permission**: answers "may I execute this?" (authorisation check)
+- **AskUser**: answers "what should I do?" (Agent proactively asks the user)
+
+```php
+use Ai\Agent\Interaction\UserInteractionManager;
+
+$uim = new UserInteractionManager();
+
+$agent
+    ->setUserInteractionManager($uim)
+    ->setTools([...]);
+
+$result = $agent->getRuntime()->run($messages);
+
+// Paused, waiting for user's answer
+if ($result->getStopReason() === 'waiting_user') {
+    $questionId = $result->getExtra()['question_id'] ?? '';
+    $answer = 'main';  // the user's choice
+
+    // Resume after answering
+    $result = $agent->answerUser($questionId, $answer, $messages);
+    echo $result->getText();
+}
+```
+
+The Agent calls the `ask_user` tool when it needs input, then pauses and waits. `answerUser()` feeds the answer back to the model and continues execution.
+
 ### Hooks
 
 Inject custom logic at key points in the Agent execution chain without modifying core tools:
@@ -1938,7 +1969,9 @@ Agent (public API)
   ├── setPermissionMode() / setSessionId() / setMaxBudget()
   ├── setFallbackModels() / setToolTimeout()
   ├── setTaskManager() / setTaskId()                    ← task system
+  ├── setUserInteractionManager()                      ← user interaction
   ├── approve() / deny()                              ← user approval
+  ├── answerUser()                                    ← answer user questions
   ├── onBeforeTool() / onAfterTool()                  ← tool hooks
   ├── onBeforeModel() / onAfterModel()                ← model hooks
   └── getRuntime() ─────────────────────────────────→  AgentRuntime (execution engine)
@@ -1953,6 +1986,7 @@ Agent (public API)
         ├── BudgetManager (budget manager)              ← token / cost control
         ├── SubAgentManager (sub-agent manager)         ← spawn_agent tool
         ├── TaskManager (task manager)                 ← task lifecycle (AgentTask / TaskState)
+        ├── UserInteractionManager (user interaction)  ← ask_user tool
         └── AgentHooks (hooks)                         ← before/after tool & model
 ```
 
@@ -1972,6 +2006,7 @@ Get the stop reason via `$result->getStopReason()`:
 | `BUDGET_EXCEEDED` | `budget_exceeded` | Budget exceeded |
 | `TIMEOUT` | `timeout` | Timed out |
 | `PERMISSION_DENIED` | `permission_denied` | Permission denied or waiting for user approval |
+| `WAITING_USER` | `waiting_user` | Waiting for user answer (ask_user) |
 | `MODEL_ERROR` | `model_error` | Model returned an error |
 
 ---

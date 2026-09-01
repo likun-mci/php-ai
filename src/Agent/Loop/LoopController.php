@@ -97,6 +97,47 @@ class LoopController
     }
 
     /**
+     * 检测本次工具调用中是否有 ask_user，返回待回答的问题 ID
+     *
+     * ask_user 工具的 handler 会返回 JSON：{'error': false, 'questions': [{'id': ..., 'question': ..., 'options': [...], ...}]}
+     * 检测到后 Agent 应暂停（WAITING_USER），由业务层 answerUser() 恢复。
+     *
+     * @param array<int, array<string, mixed>> $calls 被允许执行的工具调用
+     * @param array<int, array<string, mixed>> $results 执行结果
+     * @return string|null 待回答的问题 ID（首个），没有 ask_user 调用则返回 null
+     */
+    protected function detectAskUser(array $calls, array $results)
+    {
+        $askUserAssigned = false;
+        foreach ($calls as $call) {
+            if ((isset($call['name']) ? (string) $call['name'] : '') === 'ask_user') {
+                $askUserAssigned = true;
+                break;
+            }
+        }
+        if (!$askUserAssigned) {
+            return null;
+        }
+
+        // 尝试从结果中提取问题 ID（ask_user handler 返回的 JSON）
+        foreach ($results as $r) {
+            $content = isset($r['content']) ? (string) $r['content'] : '';
+            $decoded = json_decode($content, true);
+            if (is_array($decoded) && isset($decoded['questions']) && is_array($decoded['questions'])) {
+                foreach ($decoded['questions'] as $q) {
+                    if (is_array($q) && isset($q['question_id'])) {
+                        return (string) $q['question_id'];
+                    }
+                    if (is_array($q) && isset($q['id'])) {
+                        return (string) $q['id'];
+                    }
+                }
+            }
+        }
+        return 'ask_user';  // 兜底：没解析出 ID 也用 'ask_user' 占位
+    }
+
+    /**
      * 从工具结果列表生成签名（用于结果级进展检测）
      *
      * @param array<int, array{type: string, content: string, is_error: bool}> $results
@@ -524,6 +565,17 @@ class LoopController
                         'hint'       => $progressCheck['hint'],
                     ]);
                 }
+            }
+
+            // 检测 ask_user 工具调用 → 暂停等待用户回答（在回填前检测，避免结果进入上下文）
+            $askUserId = $this->detectAskUser($allowedCalls, $results);
+            if ($askUserId !== null) {
+                $context->emit('error', ['message' => '等待用户回答问题']);
+                return AgentResult::stopped(StopReason::WAITING_USER, $text, [
+                    'iterations'    => $iter + 1,
+                    'question_id'   => $askUserId,
+                    'tool_name'     => 'ask_user',
+                ]);
             }
 
             // 回填工具结果（只要有结果就回填）

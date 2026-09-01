@@ -1763,6 +1763,53 @@ $agent->getRuntime()->setSubAgentManager($sam);
 
 子 Agent 权限继承自父 Agent，且不能超越父 Agent 的权限范围。
 
+#### 后台模式（Background SubAgent）
+
+`spawn_agent` 工具支持 `background` 参数。设为 `true` 时，主 Agent 不阻塞等待子 Agent 完成，立即返回 `task_id` 继续执行自己的任务：
+
+```php
+$sam->setBackgroundRunner(function ($task) {
+    // 在 Swoole / Workerman 协程或队列 Worker 中异步执行
+    return [
+        'status'     => 'completed',
+        'summary'    => '子任务完成',
+        'iterations' => 5,
+    ];
+});
+```
+
+- 已注入 `backgroundRunner`（协程/队列环境）→ 非阻塞执行，工具立即返回 `task_id`
+- 未注入 runner → 降级为同步执行（仍记录完整 transcript）
+
+#### 子 Agent Transcript（P0-5）
+
+每次子 Agent 运行的完整消息历史、迭代次数、停止原因、最终结果都被记录，与主 Agent 的 transcript 分离保存：
+
+```php
+// 获取某次运行的完整 transcript
+$transcript = $sam->getTranscript('sub_1_...');
+// $transcript = [
+//     'task_id'    => 'sub_1_...',
+//     'agent'      => 'code-reviewer',
+//     'task'       => '审查 Auth.php',
+//     'status'     => 'completed',
+//     'reason'     => 'end_turn',
+//     'summary'    => '发现了 3 个问题...',
+//     'messages'   => [...],           // 完整消息历史
+//     'iterations' => 8,
+//     'duration_ms'=> 12500.3,
+//     'created_at' => 1700000000,
+// ];
+
+// 查询最近运行记录
+$recent = $sam->recentRuns(10);
+
+// 获取结果摘要（不含完整消息历史，适合反馈给主 Agent）
+$result = $sam->getResult('sub_1_...');
+```
+
+主 Agent 看到的只是 `spawn_agent` 工具返回的结构化摘要（含 `transcript_id`），完整 transcript 通过 `getTranscript()` 单独查询，不会导致主 Agent 上下文膨胀。
+
 ### 预算控制
 
 `BudgetManager` 跟踪 token 用量与估算成本，超过预算自动停止：
@@ -1859,7 +1906,7 @@ Agent 会在需要时调用 `ask_user` 工具，暂停并等待用户回答。`a
 
 ### 钩子系统（Hooks）
 
-在 Agent 执行链的关键节点注入自定义逻辑，无需修改核心工具：
+在 Agent 执行链的关键节点注入自定义逻辑，无需修改核心工具。钩子覆盖完整的生命周期：工具执行前后、模型调用前后、权限请求、任务、子 Agent、上下文压缩、会话启停。
 
 ```php
 $agent
@@ -1885,14 +1932,96 @@ $agent
     });
 ```
 
-四种钩子及签名：
+完整钩子及签名：
 
-| 钩子 | 签名 | 说明 |
-|------|------|------|
-| `onBeforeTool` | `(string $name, array $input, ToolContext $ctx): ?ToolResult` | 返回 `ToolResult` 则短路，不执行实际工具 |
-| `onAfterTool` | `(string $name, ToolResult $result): ToolResult` | 可修改/包装结果 |
-| `onBeforeModel` | `(array $messages, array $tools): array` | 返回 `['messages'=>..., 'tools'=>...]` 修改请求参数 |
-| `onAfterModel` | `($response): $response` | 可修改/记录响应 |
+| 钩子 | 注册方法 | 签名 | 触发时机 |
+|------|---------|------|---------|
+| `before_tool` | `onBeforeTool` | `(string $name, array $input, ToolContext $ctx): ?ToolResult` | 工具执行前；返回 `ToolResult` 则短路，不执行实际工具 |
+| `after_tool` | `onAfterTool` | `(string $name, ToolResult $result): ToolResult` | 工具执行后；可修改/包装结果 |
+| `tool_error` | `onToolError` | `(string $name, ToolResult $result): void` | 工具执行出错后（或权限拒绝时） |
+| `after_tool_batch` | `onAfterToolBatch` | `(array $results): array` | 一批工具全部执行完成后、下一次模型调用前；可统一审计/刷新状态 |
+| `before_model` | `onBeforeModel` | `(array $messages, array $tools): array` | 模型调用前；返回 `['messages'=>..., 'tools'=>...]` 修改请求参数 |
+| `after_model` | `onAfterModel` | `($response): $response` | 模型调用后；可修改/记录响应 |
+| `permission_request` | `onPermissionRequest` | `(string $toolName, array $input, string $requestId): HookResult` | 权限请求创建时；返回 `HookResult` 可表达处理意见 |
+| `task_start` | `onTaskStart` | `(string $taskId, string $goal): void` | 任务开始执行 |
+| `task_complete` | `onTaskComplete` | `(string $taskId, string $result): void` | 任务正常完成 |
+| `task_failed` | `onTaskFailed` | `(string $taskId, string $error): void` | 任务执行失败 |
+| `subagent_start` | `onSubagentStart` | `(string $agentName, string $task): void` | 子 Agent 启动 |
+| `subagent_stop` | `onSubagentStop` | `(string $agentName, string $result): void` | 子 Agent 结束 |
+| `before_compact` | `onBeforeCompact` | `(int $tokenCount, int $messageCount): void` | 上下文压缩前 |
+| `after_compact` | `onAfterCompact` | `(int $messageCount): void` | 上下文压缩后 |
+| `agent_start` | `onAgentStart` | `(): void` | Agent 循环开始 |
+| `agent_stop` | `onAgentStop` | `(string $stopReason): void` | Agent 循环结束（携带停止原因） |
+
+`onTaskFailed` / `onAgentStart` / `onAgentStop` 三个钩子不在 `Agent` 的快捷方法里，需要直接注入钩子容器：
+
+```php
+use Ai\Agent\Hooks\AgentHooks;
+
+$hooks = new AgentHooks();
+$hooks->onTaskFailed(function ($taskId, $error) {
+    log_message('error', "任务 {$taskId} 失败：{$error}");
+});
+$hooks->onAgentStart(function () {
+    echo 'Agent 开始执行';
+});
+$hooks->onAgentStop(function ($stopReason) {
+    echo "Agent 停止：{$stopReason}";
+});
+
+$agent->getRuntime()->setHooks($hooks);
+```
+
+#### HookResult：钩子统一返回值
+
+`Ai\Agent\Hooks\HookResult` 是钩子的统一返回类型，支持五种动作：
+
+| 动作 | 工厂方法 | 说明 |
+|------|---------|------|
+| `CONTINUE` | `HookResult::go()` | 继续执行（默认） |
+| `ALLOW` | `HookResult::allow()` | 放行 |
+| `DENY` | `HookResult::deny($reason)` | 拒绝，附理由 |
+| `MODIFY` | `HookResult::modify($data)` | 修改输入后继续 |
+| `STOP` | `HookResult::stop($reason)` | 停止 Agent |
+
+```php
+use Ai\Agent\Hooks\HookResult;
+
+$hooks->onPermissionRequest(function ($toolName, $input, $requestId) {
+    if ($toolName === 'bash' && strpos($input['command'], 'DROP TABLE') !== false) {
+        return HookResult::deny('禁止执行 DROP TABLE');  // 拒绝并说明理由
+    }
+    return HookResult::go();                              // 继续默认流程
+});
+```
+
+`HookResult` 提供 `getAction()` / `getReason()` / `getData()` 与 `isContinue()` / `isAllow()` / `isDeny()` / `isModify()` / `isStop()` 判断方法。
+
+#### 执行顺序
+
+钩子按固定顺序接入执行链：
+
+```text
+Model
+ ↓
+Tool Call
+ ↓
+before_tool（可短路）
+ ↓
+Permission
+ ↓
+Tool 执行
+ ↓
+tool_error（出错时）/ after_tool
+ ↓
+after_tool_batch（整批完成后）
+ ↓
+Tool Result 回填
+ ↓
+Model
+```
+
+注意：**钩子的放行不能绕过硬性权限拒绝**。权限优先级保持 `Deny 规则 → Permission Deny → Allow → Ask`，`before_tool` 只能短路「将要执行的工具」，不能解除权限系统已做出的拒绝。
 
 ### 任务系统（Task）
 
@@ -1970,7 +2099,7 @@ $agent->run($messages);
 |------|------|
 | `task_start` | 任务开始执行 |
 | `task_complete` | 任务正常完成 |
-| `task_failed` | 任务执行失败 |
+| `task_failed` | 任务执行失败（含异常/错误） |
 
 ### 运行时架构
 
@@ -1986,7 +2115,12 @@ Agent（对外 API）
   ├── approve() / deny()                              ← 用户授权
   ├── answerUser()                                    ← 回答用户提问
   ├── onBeforeTool() / onAfterTool()                  ← 工具钩子
+  ├── onToolError() / onAfterToolBatch()              ← 工具错误 & 批量后置钩子
   ├── onBeforeModel() / onAfterModel()                ← 模型钩子
+  ├── onPermissionRequest()                           ← 权限钩子
+  ├── onTaskStart() / onTaskComplete()                ← 任务钩子
+  ├── onSubagentStart() / onSubagentStop()            ← 子 Agent 钩子
+  ├── onBeforeCompact() / onAfterCompact()            ← 上下文压缩钩子
   └── getRuntime() ─────────────────────────────────→  AgentRuntime（执行引擎）
         ├── ToolRegistry（工具注册表）                  ← AgentToolInterface 注册
         ├── ToolExecutor（工具执行器）                  ← 重试 / 超时 / 输出截断
@@ -2000,7 +2134,11 @@ Agent（对外 API）
         ├── SubAgentManager（子 Agent 管理器）           ← spawn_agent 工具
         ├── TaskManager（任务管理器）                   ← 任务生命周期（AgentTask / TaskState）
         ├── UserInteractionManager（用户交互管理器）      ← ask_user 工具
-        └── AgentHooks（钩子系统）                      ← before/after 工具与模型
+        └── AgentHooks（钩子系统）                      ← 完整生命周期钩子：before/after_tool、tool_error、
+                                                         after_tool_batch、before/after_model、
+                                                         permission_request、task_start/complete/failed、
+                                                         subagent_start/stop、before/after_compact、
+                                                         agent_start/stop
 ```
 
 通过 `$agent->getRuntime()` 可访问全部内部组件，实现高级定制。

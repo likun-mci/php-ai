@@ -1751,6 +1751,53 @@ $agent->getRuntime()->setSubAgentManager($sam);
 
 Sub-agents inherit the parent Agent's permissions and cannot exceed them.
 
+#### Background mode (Background SubAgent)
+
+The `spawn_agent` tool supports a `background` parameter. When `true`, the main Agent does not block waiting for the sub-agent to complete — it receives a `task_id` immediately and continues its own work:
+
+```php
+$sam->setBackgroundRunner(function ($task) {
+    // Execute asynchronously in Swoole/Workerman coroutines or a queue worker
+    return [
+        'status'     => 'completed',
+        'summary'    => 'Sub-task completed',
+        'iterations' => 5,
+    ];
+});
+```
+
+- With a `backgroundRunner` injected (coroutine/queue environment) → non-blocking execution, the tool returns `task_id` immediately
+- Without a runner → falls back to synchronous execution (full transcript is still recorded)
+
+#### Sub-agent transcript (P0-5)
+
+Every sub-agent run's full message history, iteration count, stop reason, and final result are recorded, separate from the main Agent's transcript:
+
+```php
+// Get the full transcript of a run
+$transcript = $sam->getTranscript('sub_1_...');
+// $transcript = [
+//     'task_id'    => 'sub_1_...',
+//     'agent'      => 'code-reviewer',
+//     'task'       => 'Review Auth.php',
+//     'status'     => 'completed',
+//     'reason'     => 'end_turn',
+//     'summary'    => 'Found 3 issues...',
+//     'messages'   => [...],           // full message history
+//     'iterations' => 8,
+//     'duration_ms'=> 12500.3,
+//     'created_at' => 1700000000,
+// ];
+
+// Query recent runs
+$recent = $sam->recentRuns(10);
+
+// Get a result summary (without full message history, suitable for feeding back to the main Agent)
+$result = $sam->getResult('sub_1_...');
+```
+
+The main Agent only sees the structured summary returned by the `spawn_agent` tool (with a `transcript_id`). The full transcript is queried separately via `getTranscript()`, so the main Agent's context never grows from sub-agent details.
+
 ### Budget control
 
 `BudgetManager` tracks token usage and estimated cost, stopping the Agent when the budget is exceeded:
@@ -1847,7 +1894,7 @@ The Agent calls the `ask_user` tool when it needs input, then pauses and waits. 
 
 ### Hooks
 
-Inject custom logic at key points in the Agent execution chain without modifying core tools:
+Inject custom logic at key points in the Agent execution chain without modifying core tools. Hooks cover the full lifecycle: before/after tool execution, before/after model calls, permission requests, tasks, sub-agents, context compaction, and agent start/stop.
 
 ```php
 $agent
@@ -1872,14 +1919,96 @@ $agent
     });
 ```
 
-Four hook types:
+Full hook list and signatures:
 
-| Hook | Signature | Description |
-|------|-----------|-------------|
-| `onBeforeTool` | `(string $name, array $input, ToolContext $ctx): ?ToolResult` | Return `ToolResult` to short-circuit, `null` to continue |
-| `onAfterTool` | `(string $name, ToolResult $result): ToolResult` | Modify/wrap the result |
-| `onBeforeModel` | `(array $messages, array $tools): array` | Return `['messages'=>..., 'tools'=>...]` to modify request |
-| `onAfterModel` | `($response): $response` | Modify/record the response |
+| Hook | Registration method | Signature | When it fires |
+|------|---------|-----------|-------------|
+| `before_tool` | `onBeforeTool` | `(string $name, array $input, ToolContext $ctx): ?ToolResult` | Before a tool runs; return `ToolResult` to short-circuit |
+| `after_tool` | `onAfterTool` | `(string $name, ToolResult $result): ToolResult` | After a tool runs; modify/wrap the result |
+| `tool_error` | `onToolError` | `(string $name, ToolResult $result): void` | After a tool errors (or permission is denied) |
+| `after_tool_batch` | `onAfterToolBatch` | `(array $results): array` | After all tools in a batch finish, before the next model call; unified audit/state refresh |
+| `before_model` | `onBeforeModel` | `(array $messages, array $tools): array` | Before a model call; return `['messages'=>..., 'tools'=>...]` to modify the request |
+| `after_model` | `onAfterModel` | `($response): $response` | After a model call; modify/record the response |
+| `permission_request` | `onPermissionRequest` | `(string $toolName, array $input, string $requestId): HookResult` | When a permission request is created; return `HookResult` to express an opinion |
+| `task_start` | `onTaskStart` | `(string $taskId, string $goal): void` | When a task starts |
+| `task_complete` | `onTaskComplete` | `(string $taskId, string $result): void` | When a task completes normally |
+| `task_failed` | `onTaskFailed` | `(string $taskId, string $error): void` | When a task fails |
+| `subagent_start` | `onSubagentStart` | `(string $agentName, string $task): void` | When a sub-agent starts |
+| `subagent_stop` | `onSubagentStop` | `(string $agentName, string $result): void` | When a sub-agent finishes |
+| `before_compact` | `onBeforeCompact` | `(int $tokenCount, int $messageCount): void` | Before context compaction |
+| `after_compact` | `onAfterCompact` | `(int $messageCount): void` | After context compaction |
+| `agent_start` | `onAgentStart` | `(): void` | When the Agent loop starts |
+| `agent_stop` | `onAgentStop` | `(string $stopReason): void` | When the Agent loop ends (with the stop reason) |
+
+`onTaskFailed` / `onAgentStart` / `onAgentStop` are not exposed as shortcut methods on `Agent` — inject the hooks container directly:
+
+```php
+use Ai\Agent\Hooks\AgentHooks;
+
+$hooks = new AgentHooks();
+$hooks->onTaskFailed(function ($taskId, $error) {
+    log_message('error', "Task {$taskId} failed: {$error}");
+});
+$hooks->onAgentStart(function () {
+    echo 'Agent started';
+});
+$hooks->onAgentStop(function ($stopReason) {
+    echo "Agent stopped: {$stopReason}";
+});
+
+$agent->getRuntime()->setHooks($hooks);
+```
+
+#### HookResult: unified return value
+
+`Ai\Agent\Hooks\HookResult` is the unified return type for hooks, supporting five actions:
+
+| Action | Factory method | Description |
+|--------|---------------|-------------|
+| `CONTINUE` | `HookResult::go()` | Continue execution (default) |
+| `ALLOW` | `HookResult::allow()` | Allow |
+| `DENY` | `HookResult::deny($reason)` | Deny, with a reason |
+| `MODIFY` | `HookResult::modify($data)` | Modify input and continue |
+| `STOP` | `HookResult::stop($reason)` | Stop the Agent |
+
+```php
+use Ai\Agent\Hooks\HookResult;
+
+$hooks->onPermissionRequest(function ($toolName, $input, $requestId) {
+    if ($toolName === 'bash' && strpos($input['command'], 'DROP TABLE') !== false) {
+        return HookResult::deny('DROP TABLE is forbidden');
+    }
+    return HookResult::go();
+});
+```
+
+`HookResult` provides `getAction()` / `getReason()` / `getData()` and `isContinue()` / `isAllow()` / `isDeny()` / `isModify()` / `isStop()`.
+
+#### Execution order
+
+Hooks are wired into the execution chain in a fixed order:
+
+```text
+Model
+ ↓
+Tool Call
+ ↓
+before_tool (may short-circuit)
+ ↓
+Permission
+ ↓
+Tool execution
+ ↓
+tool_error (on error) / after_tool
+ ↓
+after_tool_batch (after all tools)
+ ↓
+Tool Result fed back
+ ↓
+Model
+```
+
+Note: **a hook's allow cannot bypass a hard permission deny.** Priority: `Deny rules → Permission Deny → Allow → Ask`. `before_tool` can only short-circuit "the tool about to run", it cannot undo a denial already made by the permission system.
 
 ### Task system (Task)
 
@@ -1957,7 +2086,7 @@ Task lifecycle events are received via `onEvent()`:
 |-------|---------|
 | `task_start` | the task started running |
 | `task_complete` | the task completed normally |
-| `task_failed` | the task failed |
+| `task_failed` | the task failed (including exceptions/errors) |
 
 ### Runtime architecture
 
@@ -1973,7 +2102,12 @@ Agent (public API)
   ├── approve() / deny()                              ← user approval
   ├── answerUser()                                    ← answer user questions
   ├── onBeforeTool() / onAfterTool()                  ← tool hooks
+  ├── onToolError() / onAfterToolBatch()              ← tool error & batch post hooks
   ├── onBeforeModel() / onAfterModel()                ← model hooks
+  ├── onPermissionRequest()                           ← permission hook
+  ├── onTaskStart() / onTaskComplete()                ← task hooks
+  ├── onSubagentStart() / onSubagentStop()            ← sub-agent hooks
+  ├── onBeforeCompact() / onAfterCompact()            ← context compaction hooks
   └── getRuntime() ─────────────────────────────────→  AgentRuntime (execution engine)
         ├── ToolRegistry (tool registry)               ← AgentToolInterface registration
         ├── ToolExecutor (tool executor)               ← retry / timeout / output truncation
@@ -1987,7 +2121,11 @@ Agent (public API)
         ├── SubAgentManager (sub-agent manager)         ← spawn_agent tool
         ├── TaskManager (task manager)                 ← task lifecycle (AgentTask / TaskState)
         ├── UserInteractionManager (user interaction)  ← ask_user tool
-        └── AgentHooks (hooks)                         ← before/after tool & model
+        └── AgentHooks (hooks)                         ← full lifecycle hooks: before/after_tool, tool_error,
+                                                         after_tool_batch, before/after_model,
+                                                         permission_request, task_start/complete/failed,
+                                                         subagent_start/stop, before/after_compact,
+                                                         agent_start/stop
 ```
 
 Access the internals through `$agent->getRuntime()`.

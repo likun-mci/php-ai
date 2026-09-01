@@ -7,6 +7,7 @@ use Ai\Agent\Context\ContextManager;
 use Ai\Agent\Hooks\AgentHooks;
 use Ai\Agent\Permission\PermissionManager;
 use Ai\Agent\Tool\ToolRegistry;
+use Ai\Agent\Verification\VerificationManager;
 
 /**
  * Agent 运行时上下文
@@ -73,6 +74,9 @@ class AgentContext
     /** @var AgentHooks|null */
     protected $hooks = null;
 
+    /** @var VerificationManager|null */
+    protected $verification = null;
+
     /**
      * @param AI $ai
      * @param ToolRegistry $toolRegistry
@@ -123,6 +127,26 @@ class AgentContext
     public function getHooks()
     {
         return $this->hooks;
+    }
+
+    /* ---------- 验证管理 ---------- */
+
+    /**
+     * @param VerificationManager|null $vm
+     * @return $this
+     */
+    public function setVerificationManager($vm)
+    {
+        $this->verification = $vm;
+        return $this;
+    }
+
+    /**
+     * @return VerificationManager|null
+     */
+    public function getVerificationManager()
+    {
+        return $this->verification;
     }
 
     /* ---------- 上下文管理 ---------- */

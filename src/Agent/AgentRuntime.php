@@ -14,6 +14,7 @@ use Ai\Agent\SubAgent\SubAgentManager;
 use Ai\Agent\Task\TaskManager;
 use Ai\Agent\Task\TaskStatus;
 use Ai\Agent\Tool\ToolRegistry;
+use Ai\Agent\Verification\VerificationManager;
 
 /**
  * Agent Runtime——执行引擎
@@ -90,6 +91,9 @@ class AgentRuntime
 
     /** @var UserInteractionManager|null */
     protected $interaction = null;
+
+    /** @var VerificationManager|null */
+    protected $verification = null;
 
     /**
      * @param AI $ai
@@ -461,6 +465,26 @@ class AgentRuntime
     }
 
     /**
+     * 设置验证管理器
+     *
+     * @param VerificationManager|null $vm
+     * @return $this
+     */
+    public function setVerificationManager($vm)
+    {
+        $this->verification = $vm;
+        return $this;
+    }
+
+    /**
+     * @return VerificationManager|null
+     */
+    public function getVerificationManager()
+    {
+        return $this->verification;
+    }
+
+    /**
      * 回答用户问题并恢复 Agent 执行
      *
      * @param string $questionId
@@ -652,6 +676,7 @@ class AgentRuntime
         }
         $context->setContextManager($cm);
         $context->setHooks($this->hooks);
+        $context->setVerificationManager($this->verification);
         return $context;
     }
 

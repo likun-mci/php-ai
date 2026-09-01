@@ -471,6 +471,31 @@ class Agent
     }
 
     /**
+     * 设置验证策略
+     *
+     * 工具执行后自动运行验证命令（如 `php -l {file}`），
+     * 验证失败时把错误信息回填给模型，让模型自行修复。
+     *
+     * 用法：
+     * ```php
+     * $agent->setVerification([
+     *     'edit_file'  => ['php -l {file}'],
+     *     'write_file' => ['php -l {file}'],
+     *     'test'       => ['vendor/bin/phpunit'],
+     * ]);
+     * ```
+     *
+     * @param array<string, string|string[]> $rules 工具名 => 命令或命令数组
+     * @return $this
+     */
+    public function setVerification(array $rules)
+    {
+        $vm = new \Ai\Agent\Verification\VerificationManager($rules);
+        $this->runtime->setVerificationManager($vm);
+        return $this;
+    }
+
+    /**
      * 回答用户问题并恢复 Agent 执行
      *
      * @param string $questionId

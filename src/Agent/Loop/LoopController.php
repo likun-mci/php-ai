@@ -593,6 +593,49 @@ class LoopController
                 ]);
             }
 
+            // 验证环节（Verification）：工具执行后自动验证，失败信息回填给模型
+            $vm = $context->getVerificationManager();
+            if ($vm && $vm->isEnabled() && $allowedCalls) {
+                foreach ($allowedCalls as $call) {
+                    $callName = isset($call['name']) ? (string) $call['name'] : '';
+                    $callInput = isset($call['input']) && is_array($call['input']) ? $call['input'] : [];
+                    if (!$vm->hasRule($callName)) {
+                        continue;
+                    }
+                    $verificationResults = $vm->verify($callName, $callInput);
+                    foreach ($verificationResults as $vr) {
+                        if (!$vr->isPassed()) {
+                            $context->emit('tool_error', [
+                                'name'    => $callName,
+                                'message' => "验证失败：{$vr->getCommand()} — {$vr->getError()}",
+                            ]);
+                            $failedBlock = [
+                                'type'     => 'tool_result',
+                                'tool_use_id' => isset($call['id']) ? (string) $call['id'] : '',
+                                'content'  => "VERIFICATION FAILED: {$vr->getCommand()}\n{$vr->getError()}",
+                                'is_error' => true,
+                            ];
+                            // 尽量并入该调用已有的 tool_result（同一 tool_use_id），
+                            // 避免产生引用不到 tool_use 块的独立结果导致协议拒绝
+                            $merged = false;
+                            foreach ($results as $i => $r) {
+                                if (isset($r['tool_use_id'])
+                                    && (string) $r['tool_use_id'] === $failedBlock['tool_use_id']) {
+                                    $results[$i]['content'] = (string) $r['content']
+                                        . "\n\nVERIFICATION FAILED: {$vr->getCommand()}\n{$vr->getError()}";
+                                    $results[$i]['is_error'] = true;
+                                    $merged = true;
+                                    break;
+                                }
+                            }
+                            if (!$merged) {
+                                $results[] = $failedBlock;
+                            }
+                        }
+                    }
+                }
+            }
+
             // 回填工具结果（只要有结果就回填）
             $context->appendToolResults($results);
         }

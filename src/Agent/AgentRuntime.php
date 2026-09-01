@@ -18,6 +18,7 @@ use Ai\Agent\Verification\VerificationManager;
 use Ai\Agent\Workspace\WorkspaceManager;
 use Ai\Agent\Skill\SkillManager;
 use Ai\Agent\Instruction\InstructionManager;
+use Ai\Agent\Mcp\McpManager;
 
 /**
  * Agent Runtime——执行引擎
@@ -106,6 +107,9 @@ class AgentRuntime
 
     /** @var InstructionManager|null */
     protected $instruction = null;
+
+    /** @var McpManager|null */
+    protected $mcpManager = null;
 
     /**
      * @param AI $ai
@@ -415,6 +419,29 @@ class AgentRuntime
     }
 
     /**
+     * 注册 MCP 工具（如果 MCP 管理器存在）
+     *
+     * @return void
+     */
+    protected function registerMcpTools()
+    {
+        $mm = $this->mcpManager;
+        if ($mm === null) {
+            return;
+        }
+        try {
+            $adapters = $mm->getToolAdapters();
+            foreach ($adapters as $name => $adapter) {
+                if (!$this->toolRegistry->has($name)) {
+                    $this->toolRegistry->register($adapter);
+                }
+            }
+        } catch (\Throwable $e) {
+            // 单个 MCP 服务器失败不影响 Agent 启动
+        }
+    }
+
+    /**
      * 设置工具执行超时秒数（0 不限制）
      *
      * 超过此期限（含重试等待）仍未返回的工具将被标记为超时。
@@ -580,6 +607,26 @@ class AgentRuntime
     public function getInstructionManager()
     {
         return $this->instruction;
+    }
+
+    /**
+     * 设置 MCP 管理器
+     *
+     * @param McpManager|null $mm
+     * @return $this
+     */
+    public function setMcpManager($mm)
+    {
+        $this->mcpManager = $mm;
+        return $this;
+    }
+
+    /**
+     * @return McpManager|null
+     */
+    public function getMcpManager()
+    {
+        return $this->mcpManager;
     }
 
     /**
@@ -778,6 +825,7 @@ class AgentRuntime
         $context->setWorkspaceManager($this->workspace);
         $context->setSkillManager($this->skillManager);
         $context->setInstructionManager($this->instruction);
+        $context->setMcpManager($this->mcpManager);
         return $context;
     }
 
@@ -793,6 +841,7 @@ class AgentRuntime
         $this->registerSpawnAgent();
         $this->registerInteraction();
         $this->registerSkillTool();
+        $this->registerMcpTools();
         $context = $this->buildContext($messages);
 
         // 任务事件：task_start

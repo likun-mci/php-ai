@@ -575,6 +575,42 @@ class Agent
     }
 
     /**
+     * 设置 MCP 管理器
+     *
+     * @param \Ai\Agent\Mcp\McpManager $mm
+     * @return $this
+     */
+    public function setMcpManager($mm)
+    {
+        $this->runtime->setMcpManager($mm);
+        return $this;
+    }
+
+    /**
+     * 从配置数组设置 MCP 服务器并启用
+     *
+     * 快捷方式：
+     * ```php
+     * $agent->setMcpServers([
+     *     'filesystem' => [
+     *         'command' => 'npx',
+     *         'args'    => ['-y', '@modelcontextprotocol/server-fs', '/tmp'],
+     *     ],
+     * ]);
+     * ```
+     *
+     * @param array<string, array{command: string, args?: string[], options?: array<string, mixed>}> $servers
+     * @return $this
+     */
+    public function setMcpServers(array $servers)
+    {
+        $mm = new \Ai\Agent\Mcp\McpManager();
+        $mm->addServers($servers);
+        $this->runtime->setMcpManager($mm);
+        return $this;
+    }
+
+    /**
      * 回答用户问题并恢复 Agent 执行
      *
      * @param string $questionId

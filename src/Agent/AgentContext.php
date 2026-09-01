@@ -11,6 +11,7 @@ use Ai\Agent\Verification\VerificationManager;
 use Ai\Agent\Workspace\WorkspaceManager;
 use Ai\Agent\Skill\SkillManager;
 use Ai\Agent\Instruction\InstructionManager;
+use Ai\Agent\Mcp\McpManager;
 
 /**
  * Agent 运行时上下文
@@ -88,6 +89,9 @@ class AgentContext
 
     /** @var InstructionManager|null */
     protected $instruction = null;
+
+    /** @var McpManager|null */
+    protected $mcpManager = null;
 
     /**
      * @param AI $ai
@@ -219,6 +223,26 @@ class AgentContext
     public function getInstructionManager()
     {
         return $this->instruction;
+    }
+
+    /* ---------- MCP 管理 ---------- */
+
+    /**
+     * @param McpManager|null $mm
+     * @return $this
+     */
+    public function setMcpManager($mm)
+    {
+        $this->mcpManager = $mm;
+        return $this;
+    }
+
+    /**
+     * @return McpManager|null
+     */
+    public function getMcpManager()
+    {
+        return $this->mcpManager;
     }
 
     /* ---------- 上下文管理 ---------- */

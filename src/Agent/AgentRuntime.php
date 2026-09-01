@@ -869,6 +869,17 @@ class AgentRuntime
         $this->registerMcpTools();
         $context = $this->buildContext($messages);
 
+        // 注入任务 ID 到上下文（事件会带上 task_id 和 parent_task_id）
+        if ($this->taskId !== null) {
+            $context->setTaskId($this->taskId);
+        }
+        if ($this->taskManager !== null && $this->taskId !== null) {
+            $task = $this->taskManager->get($this->taskId);
+            if ($task !== null && $task->getParentTaskId() !== null) {
+                $context->setParentTaskId($task->getParentTaskId());
+            }
+        }
+
         // 任务事件：task_start
         if ($this->taskManager && $this->taskId) {
             $this->emitTaskEvent('task_start', [
@@ -1038,12 +1049,13 @@ class AgentRuntime
         if ($this->emit === null) {
             return;
         }
-        $event = array_merge([
-            'type'       => $type,
-            'session_id' => (string) $this->sessionId,
-            'agent_id'   => $this->agentId,
-            'timestamp'  => microtime(true),
-        ], $data);
+        $event = array_merge($data, [
+            'type'           => $type,
+            'session_id'     => (string) $this->sessionId,
+            'agent_id'       => $this->agentId,
+            'task_id'        => $this->taskId,
+            'timestamp'      => microtime(true),
+        ]);
         call_user_func($this->emit, $event);
     }
 

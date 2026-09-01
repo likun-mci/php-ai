@@ -96,7 +96,8 @@
             "php tests/agent_skill_test.php",
             "php tests/agent_instruction_test.php",
             "php tests/agent_mcp_test.php",
-            "php tests/agent_memory_test.php"
+            "php tests/agent_memory_test.php",
+            "php tests/agent_event_test.php"
         ],
         "analyse": "phpstan analyse --memory-limit=512M",
         "compat": "phpcs -p --standard=PHPCompatibility --runtime-set testVersion 7.1- --extensions=php --ignore='*/vendor/*' .",

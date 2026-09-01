@@ -70,6 +70,21 @@ class AgentContext
     /** @var int 事件计数器 */
     protected $eventCounter = 0;
 
+    /** @var int 事件序列号（自增，每次事件+1） */
+    protected $eventSequence = 0;
+
+    /** @var string|null 当前任务 ID */
+    protected $taskId = null;
+
+    /** @var string|null 父任务 ID */
+    protected $parentTaskId = null;
+
+    /** @var string 当前工具调用 ID */
+    protected $toolCallId = '';
+
+    /** @var string 当前消息 ID */
+    protected $messageId = '';
+
     /** @var string|null 待授权的请求 ID */
     protected $pendingPermissionId = null;
 
@@ -428,13 +443,19 @@ class AgentContext
         if (!$this->emit) {
             return;
         }
+        $this->eventSequence++;
         $event = array_merge($data, [
-            'type'       => $type,
-            'id'         => $this->nextEventId(),
-            'session_id' => $this->sessionId,
-            'agent_id'   => $this->agentId,
-            'turn_id'    => 'turn_' . $this->iterations,
-            'timestamp'  => microtime(true),
+            'type'           => $type,
+            'id'             => $this->nextEventId(),
+            'sequence'       => $this->eventSequence,
+            'session_id'     => $this->sessionId,
+            'agent_id'       => $this->agentId,
+            'turn_id'        => 'turn_' . $this->iterations,
+            'task_id'        => $this->taskId,
+            'parent_task_id' => $this->parentTaskId,
+            'tool_call_id'   => $this->toolCallId,
+            'message_id'     => $this->messageId,
+            'timestamp'      => microtime(true),
         ]);
         call_user_func($this->emit, $event);
     }
@@ -498,6 +519,78 @@ class AgentContext
     public function getAgentId()
     {
         return $this->agentId;
+    }
+
+    /* ---------- 事件增强字段 ---------- */
+
+    /**
+     * @param string|null $taskId
+     * @return $this
+     */
+    public function setTaskId($taskId)
+    {
+        $this->taskId = $taskId !== null ? (string) $taskId : null;
+        return $this;
+    }
+
+    /** @return string|null */
+    public function getTaskId()
+    {
+        return $this->taskId;
+    }
+
+    /**
+     * @param string|null $parentTaskId
+     * @return $this
+     */
+    public function setParentTaskId($parentTaskId)
+    {
+        $this->parentTaskId = $parentTaskId !== null ? (string) $parentTaskId : null;
+        return $this;
+    }
+
+    /** @return string|null */
+    public function getParentTaskId()
+    {
+        return $this->parentTaskId;
+    }
+
+    /**
+     * @param string $toolCallId
+     * @return $this
+     */
+    public function setToolCallId($toolCallId)
+    {
+        $this->toolCallId = (string) $toolCallId;
+        return $this;
+    }
+
+    /** @return string */
+    public function getToolCallId()
+    {
+        return $this->toolCallId;
+    }
+
+    /**
+     * @param string $messageId
+     * @return $this
+     */
+    public function setMessageId($messageId)
+    {
+        $this->messageId = (string) $messageId;
+        return $this;
+    }
+
+    /** @return string */
+    public function getMessageId()
+    {
+        return $this->messageId;
+    }
+
+    /** @return int */
+    public function getEventSequence()
+    {
+        return $this->eventSequence;
     }
 
     /* ---------- 待授权状态 ---------- */

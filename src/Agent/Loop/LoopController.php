@@ -454,11 +454,11 @@ class LoopController
             foreach ($toolCalls as $call) {
                 $name  = isset($call['name']) ? (string) $call['name'] : '';
                 $input = isset($call['input']) && is_array($call['input']) ? $call['input'] : [];
-
-                $context->emit('tool_call', ['name' => $name, 'input' => $input]);
-
-                // 设置当前 tool_use_id 到 ToolContext
                 $toolCallId = isset($call['id']) ? (string) $call['id'] : '';
+
+                // 设置当前 tool_use_id 到 context（事件里带 tool_call_id）和 ToolContext
+                $context->setToolCallId($toolCallId);
+                $context->emit('tool_call', ['name' => $name, 'input' => $input, 'tool_call_id' => $toolCallId]);
                 $toolContext->setToolCallId($toolCallId);
 
                 // 循环守卫检测

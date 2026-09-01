@@ -10,6 +10,8 @@ use Ai\Agent\Loop\StopReason;
 use Ai\Agent\Permission\PermissionManager;
 use Ai\Agent\Session\SessionManager;
 use Ai\Agent\SubAgent\SubAgentManager;
+use Ai\Agent\Task\TaskManager;
+use Ai\Agent\Task\TaskStatus;
 use Ai\Agent\Tool\ToolRegistry;
 
 /**
@@ -78,6 +80,12 @@ class AgentRuntime
 
     /** @var AgentHooks|null */
     protected $hooks = null;
+
+    /** @var TaskManager|null */
+    protected $taskManager = null;
+
+    /** @var string|null */
+    protected $taskId = null;
 
     /**
      * @param AI $ai
@@ -366,6 +374,46 @@ class AgentRuntime
     }
 
     /**
+     * 设置任务管理器
+     *
+     * @param TaskManager|null $tm
+     * @return $this
+     */
+    public function setTaskManager($tm)
+    {
+        $this->taskManager = $tm;
+        return $this;
+    }
+
+    /**
+     * @return TaskManager|null
+     */
+    public function getTaskManager()
+    {
+        return $this->taskManager;
+    }
+
+    /**
+     * 设置任务 ID（关联当前执行的任务）
+     *
+     * @param string|null $taskId
+     * @return $this
+     */
+    public function setTaskId($taskId)
+    {
+        $this->taskId = $taskId ? (string) $taskId : null;
+        return $this;
+    }
+
+    /**
+     * @return string|null
+     */
+    public function getTaskId()
+    {
+        return $this->taskId;
+    }
+
+    /**
      * 设置钩子容器
      *
      * @param AgentHooks $hooks
@@ -535,6 +583,14 @@ class AgentRuntime
         $this->registerSpawnAgent();
         $context = $this->buildContext($messages);
 
+        // 任务事件：task_start
+        if ($this->taskManager && $this->taskId) {
+            $this->emitTaskEvent('task_start', [
+                'task_id' => $this->taskId,
+                'goal'    => $this->getTaskGoal(),
+            ]);
+        }
+
         // 恢复会话状态（如果存在）
         $resumedStopReason = null;
         if ($this->sessionManager && $this->sessionId) {
@@ -586,15 +642,102 @@ class AgentRuntime
                 }
                 $store->save($session);
             }
+
+            // 任务事件：task_complete / task_failed
+            if ($this->taskManager && $this->taskId) {
+                $this->updateTaskFromResult($result, $context);
+                if ($result->isDone()) {
+                    $this->emitTaskEvent('task_complete', [
+                        'task_id'  => $this->taskId,
+                        'result'   => $result->getText(),
+                        'iterations' => $result->getIterations(),
+                    ]);
+                } elseif ($result->isError()) {
+                    $this->emitTaskEvent('task_failed', [
+                        'task_id' => $this->taskId,
+                        'reason'  => $result->getStopReason(),
+                        'error'   => $result->getText(),
+                    ]);
+                }
+            }
+
             return $result;
         } catch (\Throwable $e) {
             if ($this->sessionManager && $this->sessionId) {
                 $this->sessionManager->interrupt($this->sessionId);
             }
+            // 任务事件：task_failed（异常）
+            if ($this->taskManager && $this->taskId) {
+                $this->emitTaskEvent('task_failed', [
+                    'task_id' => $this->taskId,
+                    'reason'  => 'exception',
+                    'error'   => $e->getMessage(),
+                ]);
+            }
             throw $e;
         } finally {
             $this->ai->setStream($streamWasOn);
         }
+    }
+
+    /**
+     * 根据 AgentResult 更新任务状态
+     *
+     * @param AgentResult $result
+     * @param AgentContext $context
+     * @return void
+     */
+    protected function updateTaskFromResult(AgentResult $result, AgentContext $context)
+    {
+        if ($this->taskManager === null || $this->taskId === null) {
+            return;
+        }
+        $task = $this->taskManager->get($this->taskId);
+        if ($task === null) {
+            return;
+        }
+        if ($result->isDone()) {
+            $this->taskManager->complete($this->taskId);
+        } elseif ($result->getStopReason() === StopReason::PERMISSION_DENIED) {
+            $task->setStatus(TaskStatus::WAITING_PERMISSION);
+        } elseif ($result->isError()) {
+            $this->taskManager->fail($this->taskId);
+        }
+    }
+
+    /**
+     * 获取任务目标
+     *
+     * @return string
+     */
+    protected function getTaskGoal()
+    {
+        if ($this->taskManager === null || $this->taskId === null) {
+            return '';
+        }
+        $task = $this->taskManager->get($this->taskId);
+        return $task ? $task->getGoal() : '';
+    }
+
+    /**
+     * 发出任务事件
+     *
+     * @param string $type
+     * @param array<string, mixed> $data
+     * @return void
+     */
+    protected function emitTaskEvent($type, array $data)
+    {
+        if ($this->emit === null) {
+            return;
+        }
+        $event = array_merge([
+            'type'       => $type,
+            'session_id' => (string) $this->sessionId,
+            'agent_id'   => $this->agentId,
+            'timestamp'  => microtime(true),
+        ], $data);
+        call_user_func($this->emit, $event);
     }
 
     /**

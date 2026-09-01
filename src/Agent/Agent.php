@@ -318,6 +318,30 @@ class Agent
     }
 
     /**
+     * 设置任务管理器（启用任务生命周期跟踪）
+     *
+     * @param \Ai\Agent\Task\TaskManager|null $tm
+     * @return $this
+     */
+    public function setTaskManager($tm)
+    {
+        $this->runtime->setTaskManager($tm);
+        return $this;
+    }
+
+    /**
+     * 设置任务 ID（关联当前执行的任务）
+     *
+     * @param string|null $taskId
+     * @return $this
+     */
+    public function setTaskId($taskId)
+    {
+        $this->runtime->setTaskId($taskId);
+        return $this;
+    }
+
+    /**
      * 批准权限请求并恢复 Agent 执行
      *
      * @param string $requestId

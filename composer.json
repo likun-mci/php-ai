@@ -89,7 +89,8 @@
             "php tests/cli_session_test.php",
             "php tests/ssrf_test.php",
             "php tests/agent_runtime_test.php",
-            "php tests/agent_advanced_test.php"
+            "php tests/agent_advanced_test.php",
+            "php tests/agent_task_test.php"
         ],
         "analyse": "phpstan analyse --memory-limit=512M",
         "compat": "phpcs -p --standard=PHPCompatibility --runtime-set testVersion 7.1- --extensions=php --ignore='*/vendor/*' .",

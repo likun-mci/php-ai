@@ -108,7 +108,7 @@ class AgentContext
     /* ---------- 钩子系统 ---------- */
 
     /**
-     * @param AgentHooks $hooks
+     * @param AgentHooks|null $hooks
      * @return $this
      */
     public function setHooks($hooks)

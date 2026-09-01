@@ -1863,6 +1863,84 @@ $agent
 | `onBeforeModel` | `(array $messages, array $tools): array` | 返回 `['messages'=>..., 'tools'=>...]` 修改请求参数 |
 | `onAfterModel` | `($response): $response` | 可修改/记录响应 |
 
+### 任务系统（Task）
+
+Agent 任务系统将「整个用户目标」与「每一轮模型交互」分离。一个 Task 包含多个 Turn，支持完整的生命周期管理。
+
+核心组件：
+
+- `AgentTask` — 任务值对象，包含 id、goal、status、parentTaskId、sessionId
+- `TaskState` — 任务状态记录，包含 completed、pending、blocked、importantFacts、modifiedFiles、errors、subtasks
+- `TaskManager` — 任务管理器，管理任务生命周期（queued → running → waiting_permission/waiting_user → paused → completed/failed/cancelled）
+- `TaskStatus` — 状态枚举常量
+
+```php
+use Ai\Agent\Task\TaskManager;
+
+$tm = new TaskManager();
+
+// 创建任务
+$task = $tm->create('修复登录问题', 'sess_abc');
+
+// 通过 AgentRuntime 执行任务
+$result = $tm->start($task->getId(), $runtime, $messages);
+
+// 生命周期控制
+$tm->pause($task->getId());
+$tm->resume($task->getId());
+$tm->cancel($task->getId());
+```
+
+#### TaskState 进度记录
+
+TaskState 记录详细执行进度，适合注入 Context Compaction 后的系统提示词，让 Agent 在上下文压缩后仍知道任务状态：
+
+```php
+use Ai\Agent\Task\TaskState;
+
+$state = new TaskState(['goal' => '修复登录问题']);
+$state->addCompleted('找到 Auth.php');
+$state->addPending('运行 PHPUnit');
+$state->addModifiedFile('Auth.php');
+$state->addImportantFact('session 过期时间设置错误');
+
+// 生成进度摘要
+echo $state->toSummary();
+// # 任务状态
+// 目标：修复登录问题
+//
+// ## 已完成
+// - 找到 Auth.php
+//
+// ## 待处理
+// - 运行 PHPUnit
+//
+// ## 修改的文件
+// - Auth.php
+// ...
+```
+
+#### 通过 Agent 注入 TaskManager
+
+```php
+$agent = (new Agent($ai))
+    ->setSystem('助手')
+    ->setTaskManager($tm)        // 注入任务管理器
+    ->setTaskId($task->getId());  // 关联当前任务
+
+$agent->run($messages);
+// 任务完成后自动标记为 completed 或 failed
+// 同时发出 task_start / task_complete / task_failed 事件
+```
+
+任务生命周期事件可通过 `onEvent()` 接收：
+
+| 事件 | 说明 |
+|------|------|
+| `task_start` | 任务开始执行 |
+| `task_complete` | 任务正常完成 |
+| `task_failed` | 任务执行失败 |
+
 ### 运行时架构
 
 v2.0 内部结构：
@@ -1872,6 +1950,7 @@ Agent（对外 API）
   ├── setTools() / setSystem() / onEvent() / setMaxIter() / run()
   ├── setPermissionMode() / setSessionId() / setMaxBudget()
   ├── setFallbackModels() / setToolTimeout()
+  ├── setTaskManager() / setTaskId()                   ← 任务系统
   ├── approve() / deny()                              ← 用户授权
   ├── onBeforeTool() / onAfterTool()                  ← 工具钩子
   ├── onBeforeModel() / onAfterModel()                ← 模型钩子
@@ -1886,6 +1965,7 @@ Agent（对外 API）
         ├── SessionManager（会话管理器）                 ← 持久化 / 暂停 / 恢复
         ├── BudgetManager（预算管理器）                  ← token / 成本控制
         ├── SubAgentManager（子 Agent 管理器）           ← spawn_agent 工具
+        ├── TaskManager（任务管理器）                   ← 任务生命周期（AgentTask / TaskState）
         └── AgentHooks（钩子系统）                      ← before/after 工具与模型
 ```
 

@@ -1850,6 +1850,84 @@ Four hook types:
 | `onBeforeModel` | `(array $messages, array $tools): array` | Return `['messages'=>..., 'tools'=>...]` to modify request |
 | `onAfterModel` | `($response): $response` | Modify/record the response |
 
+### Task system (Task)
+
+The Agent task system separates "the whole user goal" from "what the model says each turn". A single Task spans multiple Turns and supports full lifecycle management.
+
+Core components:
+
+- `AgentTask` — task value object: id, goal, status, parentTaskId, sessionId
+- `TaskState` — task progress record: completed, pending, blocked, importantFacts, modifiedFiles, errors, subtasks
+- `TaskManager` — manages the task lifecycle (queued → running → waiting_permission/waiting_user → paused → completed/failed/cancelled)
+- `TaskStatus` — status enum constants
+
+```php
+use Ai\Agent\Task\TaskManager;
+
+$tm = new TaskManager();
+
+// Create a task
+$task = $tm->create('Fix the login issue', 'sess_abc');
+
+// Run the task through an AgentRuntime
+$result = $tm->start($task->getId(), $runtime, $messages);
+
+// Lifecycle control
+$tm->pause($task->getId());
+$tm->resume($task->getId());
+$tm->cancel($task->getId());
+```
+
+#### TaskState progress record
+
+TaskState records detailed execution progress. Feed it into the system prompt after context compaction so the Agent still knows where the task stands:
+
+```php
+use Ai\Agent\Task\TaskState;
+
+$state = new TaskState(['goal' => 'Fix the login issue']);
+$state->addCompleted('Found Auth.php');
+$state->addPending('Run PHPUnit');
+$state->addModifiedFile('Auth.php');
+$state->addImportantFact('session expiry is misconfigured');
+
+// Generate a progress summary
+echo $state->toSummary();
+// # Task state
+// Goal: Fix the login issue
+//
+// ## Completed
+// - Found Auth.php
+//
+// ## Pending
+// - Run PHPUnit
+//
+// ## Modified files
+// - Auth.php
+// ...
+```
+
+#### Injecting TaskManager through Agent
+
+```php
+$agent = (new Agent($ai))
+    ->setSystem('Assistant')
+    ->setTaskManager($tm)         // inject the task manager
+    ->setTaskId($task->getId());  // bind the current task
+
+$agent->run($messages);
+// The task is automatically marked completed or failed afterwards
+// task_start / task_complete / task_failed events are also emitted
+```
+
+Task lifecycle events are received via `onEvent()`:
+
+| Event | Meaning |
+|-------|---------|
+| `task_start` | the task started running |
+| `task_complete` | the task completed normally |
+| `task_failed` | the task failed |
+
 ### Runtime architecture
 
 Internal structure since v2.0:
@@ -1859,6 +1937,7 @@ Agent (public API)
   ├── setTools() / setSystem() / onEvent() / setMaxIter() / run()
   ├── setPermissionMode() / setSessionId() / setMaxBudget()
   ├── setFallbackModels() / setToolTimeout()
+  ├── setTaskManager() / setTaskId()                    ← task system
   ├── approve() / deny()                              ← user approval
   ├── onBeforeTool() / onAfterTool()                  ← tool hooks
   ├── onBeforeModel() / onAfterModel()                ← model hooks
@@ -1873,6 +1952,7 @@ Agent (public API)
         ├── SessionManager (session manager)            ← persistence / pause / resume
         ├── BudgetManager (budget manager)              ← token / cost control
         ├── SubAgentManager (sub-agent manager)         ← spawn_agent tool
+        ├── TaskManager (task manager)                 ← task lifecycle (AgentTask / TaskState)
         └── AgentHooks (hooks)                         ← before/after tool & model
 ```
 

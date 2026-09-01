@@ -36,6 +36,18 @@ class AgentSession
     /** @var array<string, mixed> */
     protected $extra = [];
 
+    /** @var int */
+    protected $iteration = 0;
+
+    /** @var string */
+    protected $stopReason = '';
+
+    /** @var array<string, mixed> */
+    protected $budgetState = [];
+
+    /** @var string|null */
+    protected $pendingPermissionId = null;
+
     /**
      * @param string $id
      * @param array<string, mixed> $data
@@ -51,6 +63,10 @@ class AgentSession
         $this->model     = isset($data['model']) ? (string) $data['model'] : '';
         $this->workdir   = isset($data['workdir']) ? (string) $data['workdir'] : '';
         $this->extra     = isset($data['extra']) && is_array($data['extra']) ? $data['extra'] : [];
+        $this->iteration  = isset($data['iteration']) ? (int) $data['iteration'] : 0;
+        $this->stopReason = isset($data['stop_reason']) ? (string) $data['stop_reason'] : '';
+        $this->budgetState    = isset($data['budget_state']) && is_array($data['budget_state']) ? $data['budget_state'] : [];
+        $this->pendingPermissionId = isset($data['pending_permission_id']) ? (string) $data['pending_permission_id'] : null;
     }
 
     /** @return string */
@@ -111,6 +127,36 @@ class AgentSession
     /** @return bool */
     public function isCompleted() { return $this->status === 'completed'; }
 
+    /** @return int */
+    public function getIteration() { return $this->iteration; }
+    /** @return string */
+    public function getStopReason() { return $this->stopReason; }
+    /** @return array<string, mixed> */
+    public function getBudgetState() { return $this->budgetState; }
+    /** @return string|null */
+    public function getPendingPermissionId() { return $this->pendingPermissionId; }
+
+    /**
+     * @param int $iteration
+     * @return $this
+     */
+    public function setIteration($iteration) { $this->iteration = (int) $iteration; $this->touch(); return $this; }
+    /**
+     * @param string $stopReason
+     * @return $this
+     */
+    public function setStopReason($stopReason) { $this->stopReason = (string) $stopReason; $this->touch(); return $this; }
+    /**
+     * @param array<string, mixed> $budgetState
+     * @return $this
+     */
+    public function setBudgetState(array $budgetState) { $this->budgetState = $budgetState; $this->touch(); return $this; }
+    /**
+     * @param string|null $id
+     * @return $this
+     */
+    public function setPendingPermissionId($id) { $this->pendingPermissionId = $id ? (string) $id : null; $this->touch(); return $this; }
+
     /** 转为数组
      * @return array<string, mixed>
      */
@@ -126,6 +172,10 @@ class AgentSession
             'model'      => $this->model,
             'workdir'    => $this->workdir,
             'extra'      => $this->extra,
+            'iteration'  => $this->iteration,
+            'stop_reason' => $this->stopReason,
+            'budget_state' => $this->budgetState,
+            'pending_permission_id' => $this->pendingPermissionId,
         ];
     }
 

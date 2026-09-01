@@ -90,6 +90,24 @@ class LoopController
     }
 
     /**
+     * 从工具结果列表生成签名（用于结果级进展检测）
+     *
+     * @param array<int, array{type: string, content: string, is_error: bool}> $results
+     * @return string
+     */
+    protected function signatureOfResults(array $results)
+    {
+        $parts = [];
+        foreach ($results as $r) {
+            $content = isset($r['content']) ? (string) $r['content'] : '';
+            $isError = !empty($r['is_error']);
+            // 截取前 200 字符作为签名（避免大结果导致误判）
+            $parts[] = ($isError ? 'ERR:' : 'OK:') . mb_substr($content, 0, 200);
+        }
+        return implode('||', $parts);
+    }
+
+    /**
      * 启用并行工具执行
      *
      * @param bool $parallel
@@ -362,6 +380,19 @@ class LoopController
                             'is_error'    => $isError,
                         ];
                     }
+                }
+            }
+
+            // 结果级进展检测（Progress Guard）：工具结果连续相同 → 无进展
+            if ($this->guard && $results) {
+                $resultSig = $this->signatureOfResults($results);
+                $progressCheck = $this->guard->checkResult('_results', $resultSig);
+                if (!$progressCheck['ok']) {
+                    $context->emit('error', ['message' => '工具结果连续相同，判定无进展']);
+                    return AgentResult::stopped(StopReason::NO_PROGRESS, $text, [
+                        'iterations' => $iter + 1,
+                        'hint'       => $progressCheck['hint'],
+                    ]);
                 }
             }
 

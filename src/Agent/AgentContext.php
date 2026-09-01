@@ -60,6 +60,9 @@ class AgentContext
     /** @var string */
     protected $agentId = '';
 
+    /** @var int 事件计数器 */
+    protected $eventCounter = 0;
+
     /** @var string|null 待授权的请求 ID */
     protected $pendingPermissionId = null;
 
@@ -243,16 +246,40 @@ class AgentContext
     }
 
     /**
+     * 发射事件（自动附加统一字段：id / session_id / agent_id / turn_id / timestamp）
+     *
+     * 所有 Agent 事件都带上这些字段，便于 SSE / WebSocket 断线重连后
+     * 按 last_event_id 继续接收，也便于前端按 session/turn 分组渲染。
+     *
      * @param string $type
      * @param array<string, mixed> $data
      * @return void
      */
     public function emit($type, array $data = [])
     {
-        if ($this->emit) {
-            $data['type'] = $type;
-            call_user_func($this->emit, $data);
+        if (!$this->emit) {
+            return;
         }
+        $event = array_merge($data, [
+            'type'       => $type,
+            'id'         => $this->nextEventId(),
+            'session_id' => $this->sessionId,
+            'agent_id'   => $this->agentId,
+            'turn_id'    => 'turn_' . $this->iterations,
+            'timestamp'  => microtime(true),
+        ]);
+        call_user_func($this->emit, $event);
+    }
+
+    /**
+     * 生成自增事件 ID
+     *
+     * @return string
+     */
+    protected function nextEventId()
+    {
+        $this->eventCounter++;
+        return 'evt_' . $this->eventCounter . '_' . dechex(time());
     }
 
     /* ---------- 运行时标识 ---------- */

@@ -442,23 +442,56 @@ class AgentRuntime
         $this->registerSpawnAgent();
         $context = $this->buildContext($messages);
 
+        // 恢复会话状态（如果存在）
+        $resumedStopReason = null;
+        if ($this->sessionManager && $this->sessionId) {
+            $session = $this->sessionManager->getStore()->load($this->sessionId);
+            if ($session) {
+                $context->setMessages($session->getMessages() ?: $messages);
+                if ($session->getIteration() > 0) {
+                    $context->setIteration($session->getIteration());
+                }
+                $resumedStopReason = $session->getStopReason();
+                // 标记为 running
+                $session->resume();
+                $this->sessionManager->getStore()->save($session);
+            }
+        }
+
         // 临时切换流式开关
         $streamWasOn = $this->ai->isStreaming();
         $this->ai->setStream($this->stream);
 
         try {
             $result = $this->loop->run($context);
-            // 自动保存会话
+            // 自动保存会话（完整状态）
             if ($this->sessionManager && $this->sessionId) {
-                $this->sessionManager->save(
-                    $this->sessionId,
-                    $context->getMessages(),
-                    $this->system,
-                    ['result_text' => $result->getText(), 'stop_reason' => $result->getStopReason()]
-                );
-                if ($result->isDone()) {
-                    $this->sessionManager->complete($this->sessionId);
+                $store = $this->sessionManager->getStore();
+                $session = $store->load($this->sessionId);
+                if ($session === null) {
+                    $session = new \Ai\Agent\Session\AgentSession($this->sessionId, [
+                        'messages' => $context->getMessages(),
+                        'system'   => $this->system,
+                        'model'    => $this->ai->model() ? $this->ai->model()->getName() : '',
+                        'workdir'  => $this->workdir,
+                    ]);
                 }
+                $session->setMessages($context->getMessages());
+                $session->setIteration($context->getIteration());
+                $session->setStopReason($result->getStopReason());
+                if ($this->budget) {
+                    $session->setBudgetState($this->budget->summary());
+                }
+                if ($result->isDone()) {
+                    $session->complete();
+                } elseif ($result->getStopReason() === \Ai\Agent\Loop\StopReason::PERMISSION_DENIED) {
+                    $session->pause();
+                    $permId = $result->getExtra()['request_id'] ?? '';
+                    if ($permId) {
+                        $session->setPendingPermissionId($permId);
+                    }
+                }
+                $store->save($session);
             }
             return $result;
         } catch (\Throwable $e) {

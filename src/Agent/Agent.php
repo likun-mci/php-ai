@@ -14,15 +14,22 @@ use Ai\AI;
  * Anthropic 系的 tool_use / tool_result 块），因此同一段 Agent 代码
  * 可以直接跑在 40 个协议上，换平台只改 protocol 配置。
  *
- * 工具格式：
- *   $tools = [
+ * 工具格式（兼容旧版与新版）：
+ * ```php
+ * // 旧版（闭包）
+ * $tools = [
  *     'read_file' => [
  *        'description'  => '...',
- *        'input_schema' => ['type'=>'object','properties'=>[...],'required'=>[...]],
- *        'handler'      => function(array $input): string { ... return 工具结果文本; },
+ *        'input_schema' => ['type'=>'object',...],
+ *        'handler'      => function(array $input): string { ... },
  *     ],
- *     ...
- *   ]
+ * ];
+ *
+ * // 新版（对象）
+ * $tools = [
+ *     new ReadFileTool(),
+ * ];
+ * ```
  *
  * 事件回调 onEvent(array $event)：
  *   - ['type'=>'agent_text','text'=>...]      模型自然语言
@@ -31,61 +38,69 @@ use Ai\AI;
  *   - ['type'=>'done']                        正常结束
  *   - ['type'=>'error','message'=>...]
  *   （工具内部的细粒度事件——如 diff/todo——由各 handler 自行通过闭包发出）
+ *
+ * 内部实现：
+ *  v2.0 起内部委托给 {@see AgentRuntime} 执行，但 public API 与事件结构
+ *  完全向后兼容，已有代码无需修改。
  */
 class Agent
 {
     /** @var AI */
     protected $ai;
-    /**
-     * @var array<string, array<string, mixed>>
-     */
-    protected $tools = [];
-    /**
-     * @var string
-     */
-    protected $system = '';
-    /**
-     * @var callable|null
-     */
-    protected $emit = null;
-    /**
-     * @var int
-     */
-    protected $maxIter = 25;
-    /**
-     * @var string
-     */
-    protected $lastText = '';
-    /**
-     * 是否以流式跑循环。默认 false，与旧版本一致。
-     * @var bool
-     */
-    protected $stream = false;
 
+    /** @var AgentRuntime */
+    protected $runtime;
+
+    /** @var string */
+    protected $lastText = '';
+
+    /**
+     * @param AI $ai
+     */
     public function __construct(AI $ai)
     {
         $this->ai = $ai;
+        $this->runtime = new AgentRuntime($ai);
     }
 
     /**
      * @param mixed $system
      * @return $this
      */
-    public function setSystem($system) { $this->system = (string) $system; return $this; }
+    public function setSystem($system)
+    {
+        $this->runtime->setSystem($system);
+        return $this;
+    }
+
     /**
      * @param array<string, array{description?: string, input_schema?: array<mixed>, handler?: callable}> $tools
      * @return $this
      */
-    public function setTools(array $tools) { $this->tools = $tools; return $this; }
+    public function setTools(array $tools)
+    {
+        $this->runtime->setTools($tools);
+        return $this;
+    }
+
     /**
      * @return $this
      */
-    public function onEvent(callable $emit) { $this->emit = $emit; return $this; }
+    public function onEvent(callable $emit)
+    {
+        $this->runtime->onEvent($emit);
+        return $this;
+    }
+
     /**
      * @param mixed $n
      * @return $this
      */
-    public function setMaxIter($n) { $this->maxIter = max(1, (int) $n); return $this; }
+    public function setMaxIter($n)
+    {
+        $this->runtime->setMaxIter($n);
+        return $this;
+    }
 
     /**
      * 是否以流式跑这个循环
@@ -100,136 +115,42 @@ class Agent
      * @param bool $stream
      * @return $this
      */
-    public function setStream($stream = true) { $this->stream = (bool) $stream; return $this; }
+    public function setStream($stream = true)
+    {
+        $this->runtime->setStream($stream);
+        return $this;
+    }
+
     /**
      * @return string
      */
-    public function lastText() { return $this->lastText; }
-
-    /** Anthropic tools 定义（去掉 handler）
-     * @return array<int, array<string, mixed>>
-     */
-    protected function toolDefs()
+    public function lastText()
     {
-        $defs = [];
-        foreach ($this->tools as $name => $t) {
-            $defs[] = [
-                'name'         => $name,
-                'description'  => isset($t['description']) ? $t['description'] : '',
-                'input_schema' => isset($t['input_schema']) ? $t['input_schema'] : ['type' => 'object', 'properties' => new \stdClass()],
-            ];
-        }
-        return $defs;
+        return $this->lastText;
     }
 
     /**
      * 运行循环
+     *
      * @param array<mixed> $messages 初始消息（通常 [['role'=>'user','content'=>...]]）
      * @return void
      */
     public function run(array $messages)
     {
-        $toolDefs = $this->toolDefs();
+        // 委托给 AgentRuntime 执行
+        $result = $this->runtime->run($messages);
 
-        // 借用调用方的 AI 实例：按本 Agent 的设置临时切换流式开关，
-        // 跑完在 finally 里恢复——否则调用方原本的设置会被永久改写。
-        $streamWasOn = $this->ai->isStreaming();
-        $this->ai->setStream($this->stream);
-
-        try {
-            $this->loop($messages, $toolDefs);
-        } finally {
-            $this->ai->setStream($streamWasOn);
-        }
+        // 保持 lastText 兼容
+        $this->lastText = $result->getText();
     }
 
     /**
-     * 实际的迭代循环
+     * 获取内部的 AgentRuntime 实例（用于高级扩展）
      *
-     * @param array<int, array<string, mixed>> $messages
-     * @param array<int, array<string, mixed>> $toolDefs
-     * @return void
+     * @return AgentRuntime
      */
-    protected function loop(array $messages, array $toolDefs)
+    public function getRuntime()
     {
-        for ($iter = 0; $iter < $this->maxIter; $iter++) {
-            $this->fire(['type' => 'thinking', 'iter' => $iter + 1]);
-            try {
-                $resp = $this->ai->chat([
-                    'system'   => $this->system,
-                    'messages' => $messages,
-                    'tools'    => $toolDefs,
-                ]);
-            } catch (\Throwable $e) {
-                // 捕获 \Throwable：循环中途崩掉不如报成 error 事件，让调用方能收尾
-                $this->fire(['type' => 'error', 'message' => $e->getMessage()]);
-                return;
-            }
-
-            // 全部走归一后的接口，不再直接翻平台原始结构
-            $text      = $resp->getContent();
-            $toolCalls = $resp->getToolCalls();
-
-            // 记录 assistant 回合（含 tool_use 块）以维持多轮上下文
-            $messages[] = $resp->toAssistantMessage();
-
-            if (trim($text) !== '') {
-                $this->lastText = $text;
-                $this->fire(['type' => 'agent_text', 'text' => $text]);
-            }
-
-            if (!$toolCalls) {
-                $this->fire(['type' => 'done']);
-                return;
-            }
-
-            $results = [];
-            foreach ($toolCalls as $call) {
-                $name  = $call['name'] ?? '';
-                $input = isset($call['input']) && is_array($call['input']) ? $call['input'] : [];
-                $id    = $call['id'] ?? '';
-
-                $this->fire(['type' => 'tool_call', 'name' => $name, 'input' => $input]);
-
-                $isError = false;
-                if (isset($this->tools[$name]['handler']) && is_callable($this->tools[$name]['handler'])) {
-                    try {
-                        // 捕获 \Throwable 而非 \Exception：handler 里的 TypeError 等
-                        // Error 类异常不该穿透整个 Agent 循环，应作为工具失败回填给模型
-                        $out = (string) call_user_func($this->tools[$name]['handler'], $input);
-                    } catch (\Throwable $e) {
-                        $out = 'ERROR: ' . $e->getMessage();
-                        $isError = true;
-                    }
-                } else {
-                    $out = 'ERROR: 未知工具 ' . $name;
-                    $isError = true;
-                }
-
-                if ($isError) {
-                    $this->fire(['type' => 'tool_error', 'name' => $name, 'message' => $out]);
-                }
-
-                $results[] = [
-                    'type'        => 'tool_result',
-                    'tool_use_id' => $id,
-                    'content'     => $out,
-                    'is_error'    => $isError,
-                ];
-            }
-
-            $messages[] = ['role' => 'user', 'content' => $results];
-        }
-
-        $this->fire(['type' => 'error', 'message' => '已达最大迭代步数（' . $this->maxIter . '）']);
-    }
-
-    /**
-     * @param array<mixed> $event
-     * @return void
-     */
-    protected function fire(array $event)
-    {
-        if ($this->emit) call_user_func($this->emit, $event);
+        return $this->runtime;
     }
 }

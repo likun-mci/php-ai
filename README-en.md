@@ -1347,7 +1347,7 @@ Log::setLogger(null);                      // back to the default error_log
 
 ## Agent: the tool-calling loop
 
-`Ai\Agent\Agent` implements the full agentic loop: the model decides which tool to call → the library runs it → the result is fed back → repeat, until the model produces a final answer or the iteration cap is reached.
+`Ai\Agent\Agent` implements the full agentic loop: the model decides which tool to call → the library runs it → the result is fed back → repeat, until the model produces a final answer or the iteration cap is reached. Since v2.0 it runs on an `AgentRuntime` architecture with an object-oriented tool interface and a loop guard against infinite loops.
 
 **All 40 protocols work.** The vendors express the same idea in two different shapes; the library absorbs the difference in the protocol layer:
 
@@ -1485,6 +1485,61 @@ The `onEvent()` callback receives, in order:
 | `error` | `message` | failed, or hit the iteration cap |
 
 Fine-grained events inside a tool (diffs, progress …) are emitted by each `handler` through its own closure; the library makes no assumptions.
+
+### AgentToolInterface: object-oriented tool definitions
+
+Since v2.0 tools can be written as objects implementing `Ai\Agent\Tool\AgentToolInterface`:
+
+```php
+use Ai\Agent\Tool\AgentToolInterface;
+use Ai\Agent\Tool\ToolContext;
+use Ai\Agent\Tool\ToolResult;
+
+class ReadFileTool implements AgentToolInterface
+{
+    public function name()        { return 'read_file'; }
+    public function description() { return 'Read a file inside the workspace'; }
+    public function schema()      { return ['type' => 'object', 'properties' => ['path' => ['type' => 'string']]]; }
+    public function execute(array $input, ToolContext $context): ToolResult
+    {
+        return ToolResult::success('file content');
+    }
+}
+
+$agent->setTools([new ReadFileTool()]);
+```
+
+Object tools and legacy closure tools can be mixed:
+
+```php
+$agent->setTools([
+    new ReadFileTool(),                    // object
+    'get_weather' => [                     // closure (legacy format)
+        'description'  => 'Get the weather',
+        'input_schema' => [...],
+        'handler'      => function (array $in) { return 'sunny'; },
+    ],
+]);
+```
+
+### Loop guard
+
+The Agent automatically detects repeated tool calls (the same tool with the same arguments 3 times in a row), stops with `no_progress`, and prevents the model from spinning in a loop.
+
+### Runtime architecture
+
+Internal structure since v2.0:
+
+```
+Agent (public API)
+  └── AgentRuntime (execution engine)
+        ├── LoopController (the self-loop)
+        ├── ToolRegistry (tool registry)
+        ├── ToolExecutor (tool executor)
+        └── LoopGuard (loop guard)
+```
+
+Access the internals through `$agent->getRuntime()`.
 
 ---
 

@@ -1354,7 +1354,7 @@ Log::setLogger(null);                      // 恢复默认的 error_log
 
 ## Agent：工具调用循环
 
-`Ai\Agent\Agent` 实现完整的 agentic 循环：模型决定调用哪个工具 → 库执行工具 → 结果回填给模型 → 继续，直到模型给出最终答复或达到迭代上限。
+`Ai\Agent\Agent` 实现完整的 agentic 循环：模型决定调用哪个工具 → 库执行工具 → 结果回填给模型 → 继续，直到模型给出最终答复或达到迭代上限。v2.0 起内部采用 `AgentRuntime` 架构，新增面向对象的工具接口与防死循环守卫。
 
 **40 个协议全部可用**。各家把同一件事写成了两套结构，库在协议层吃掉了差异：
 
@@ -1497,6 +1497,61 @@ $reply = $agent->lastText();   // 最终自然语言回复
 | `error` | `message` | 出错或达到最大迭代步数 |
 
 工具内部的细粒度事件（如 diff、进度）由各 `handler` 自行通过闭包发出，库不做假设。
+
+### AgentToolInterface：面向对象的工具定义
+
+v2.0 起工具可以写成对象，实现 `Ai\Agent\Tool\AgentToolInterface`：
+
+```php
+use Ai\Agent\Tool\AgentToolInterface;
+use Ai\Agent\Tool\ToolContext;
+use Ai\Agent\Tool\ToolResult;
+
+class ReadFileTool implements AgentToolInterface
+{
+    public function name()        { return 'read_file'; }
+    public function description() { return '读取工作区内的文件内容'; }
+    public function schema()      { return ['type' => 'object', 'properties' => ['path' => ['type' => 'string']]]; }
+    public function execute(array $input, ToolContext $context): ToolResult
+    {
+        return ToolResult::success('文件内容');
+    }
+}
+
+$agent->setTools([new ReadFileTool()]);
+```
+
+对象工具与旧格式闭包工具可混用：
+
+```php
+$agent->setTools([
+    new ReadFileTool(),                    // 对象
+    'get_weather' => [                     // 闭包（旧格式）
+        'description'  => '查询天气',
+        'input_schema' => [...],
+        'handler'      => function (array $in) { return '晴'; },
+    ],
+]);
+```
+
+### 循环守卫（LoopGuard）
+
+Agent 自动检测连续重复的工具调用（相同工具 + 相同参数连续 3 次），触发 `no_progress` 停止，防止模型陷入死循环。
+
+### 运行时架构
+
+v2.0 内部结构：
+
+```
+Agent（对外 API）
+  └── AgentRuntime（执行引擎）
+        ├── LoopController（自循环）
+        ├── ToolRegistry（工具注册表）
+        ├── ToolExecutor（工具执行器）
+        └── LoopGuard（防死循环）
+```
+
+通过 `$agent->getRuntime()` 可访问内部组件。
 
 ---
 

@@ -234,6 +234,66 @@ class Agent
     }
 
     /**
+     * 注册 before_tool 钩子
+     *
+     * 在工具执行前调用。返回 ToolResult 则短路执行（不执行实际工具）。
+     * 签名：function (string $name, array $input, ToolContext $ctx): ?ToolResult
+     *
+     * @param callable $cb
+     * @return $this
+     */
+    public function onBeforeTool($cb)
+    {
+        $this->runtime->onBeforeTool($cb);
+        return $this;
+    }
+
+    /**
+     * 注册 after_tool 钩子
+     *
+     * 在工具执行后调用，可修改/包装结果。
+     * 签名：function (string $name, ToolResult $result): ToolResult
+     *
+     * @param callable $cb
+     * @return $this
+     */
+    public function onAfterTool($cb)
+    {
+        $this->runtime->onAfterTool($cb);
+        return $this;
+    }
+
+    /**
+     * 注册 before_model 钩子
+     *
+     * 在模型调用前调用，可修改请求参数。
+     * 签名：function (array $messages, array $tools): array
+     *
+     * @param callable $cb
+     * @return $this
+     */
+    public function onBeforeModel($cb)
+    {
+        $this->runtime->onBeforeModel($cb);
+        return $this;
+    }
+
+    /**
+     * 注册 after_model 钩子
+     *
+     * 在模型调用后调用，可修改/记录响应。
+     * 签名：function ($response): $response
+     *
+     * @param callable $cb
+     * @return $this
+     */
+    public function onAfterModel($cb)
+    {
+        $this->runtime->onAfterModel($cb);
+        return $this;
+    }
+
+    /**
      * 设置 Agent 标识（事件里带 agent_id 字段，便于前端区分）
      *
      * @param string $agentId

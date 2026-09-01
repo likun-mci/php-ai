@@ -9,6 +9,7 @@ use Ai\Agent\Tool\ParallelToolExecutor;
 use Ai\Agent\Tool\ToolContext;
 use Ai\Agent\Tool\ToolExecutor;
 use Ai\Agent\Tool\ToolRegistry;
+use Ai\Agent\Tool\ToolResult;
 
 /**
  * 循环控制器——Agent 自循环的核心
@@ -47,6 +48,9 @@ class LoopController
 
     /** @var int 工具执行超时秒数（0 不限制），透传给 ToolExecutor 与 ToolContext */
     protected $toolTimeout = 0;
+
+    /** @var string[] 降级模型名，按优先级排列 */
+    protected $fallbackModels = [];
 
     /** @var array<string, mixed>|null 待恢复的权限调用 */
     protected $pendingPermissionCall = null;
@@ -150,6 +154,24 @@ class LoopController
     public function getToolTimeout()
     {
         return $this->toolTimeout;
+    }
+
+    /**
+     * 设置降级模型（主模型服务级错误时自动切换）
+     *
+     * @param string[] $models 降级模型名，按优先级排列
+     * @return $this
+     */
+    public function setFallbackModels(array $models)
+    {
+        $this->fallbackModels = $models;
+        return $this;
+    }
+
+    /** @return string[] */
+    public function getFallbackModels()
+    {
+        return $this->fallbackModels;
     }
 
     /**
@@ -260,17 +282,47 @@ class LoopController
                 }
             }
 
-            // 调用 AI 模型
-            try {
-                $resp = $ai->chat([
-                    'system'   => $context->getSystem(),
-                    'messages' => $context->getMessages(),
-                    'tools'    => $toolDefs,
-                ]);
-            } catch (\Throwable $e) {
-                $context->emit('error', ['message' => $e->getMessage()]);
+            // 调用 AI 模型（带降级重试）
+            $modelError = null;
+            $modelAttempts = $this->fallbackModels;
+            $resp = null;
+            // 第 1 次用当前模型
+            for ($mi = 0; $mi <= count($modelAttempts); $mi++) {
+                if ($mi > 0) {
+                    $fbModel = $modelAttempts[$mi - 1];
+                    // 切换到降级模型
+                    $context->emit('model_fallback', [
+                        'model' => $fbModel,
+                        'error' => $modelError ? $modelError->getMessage() : '',
+                    ]);
+                    $ai->setModel($fbModel);
+                }
+                try {
+                    $modelParams = [
+                        'system'   => $context->getSystem(),
+                        'messages' => $context->getMessages(),
+                        'tools'    => $toolDefs,
+                    ];
+                    // before_model 钩子
+                    $hooks = $context->getHooks();
+                    if ($hooks && $hooks->hasBeforeModel()) {
+                        $modelParams = $hooks->triggerBeforeModel($modelParams);
+                    }
+                    $resp = $ai->chat($modelParams);
+                    // after_model 钩子
+                    if ($hooks && $hooks->hasAfterModel()) {
+                        $resp = $hooks->triggerAfterModel($resp);
+                    }
+                    break;  // 成功
+                } catch (\Throwable $e) {
+                    $modelError = $e;
+                    // 继续尝试下一个降级模型
+                }
+            }
+            if ($resp === null) {
+                $context->emit('error', ['message' => $modelError ? $modelError->getMessage() : '模型调用失败']);
                 return AgentResult::stopped(StopReason::MODEL_ERROR, '', [
-                    'error' => $e->getMessage(),
+                    'error' => $modelError ? $modelError->getMessage() : '模型调用失败',
                     'iterations' => $iter,
                 ]);
             }
@@ -395,16 +447,61 @@ class LoopController
                     if ($this->parallelRunner) {
                         $parallelExec->setParallelRunner($this->parallelRunner);
                     }
+                    // 并行路径也走 after_tool 钩子
                     $parallelResults = $parallelExec->executeAll($allowedCalls, $toolContext);
+                    $hooks = $context->getHooks();
+                    if ($hooks && $hooks->hasAfterTool()) {
+                        foreach ($parallelResults as $i => $pr) {
+                            $callName = isset($allowedCalls[$i]['name']) ? (string) $allowedCalls[$i]['name'] : '';
+                            $tr = new ToolResult([
+                                'success' => empty($pr['is_error']),
+                                'content' => $pr['content'] ?? '',
+                                'error'   => empty($pr['is_error']) ? '' : ($pr['content'] ?? ''),
+                            ]);
+                            $tr = $hooks->triggerAfterTool($callName, $tr);
+                            $parallelResults[$i]['content'] = (string) $tr;
+                            $parallelResults[$i]['is_error'] = !$tr->isSuccess();
+                        }
+                    }
                     $results = array_merge($results, $parallelResults);
                 } else {
-                    // 顺序执行
+                    // 顺序执行（带钩子）
                     foreach ($allowedCalls as $call) {
+                        $callName = isset($call['name']) ? (string) $call['name'] : '';
+                        $callInput = isset($call['input']) && is_array($call['input']) ? $call['input'] : [];
+
+                        // before_tool 钩子：可短路
+                        $hooks = $context->getHooks();
+                        if ($hooks && $hooks->hasBeforeTool()) {
+                            $hookResult = $hooks->triggerBeforeTool($callName, $callInput, $toolContext);
+                            if ($hookResult instanceof ToolResult) {
+                                $result = $hookResult;
+                                $isError = !$result->isSuccess();
+                                $out = (string) $result;
+                                if ($isError) {
+                                    $context->emit('tool_error', ['name' => $callName, 'message' => $out]);
+                                }
+                                $results[] = [
+                                    'type'        => 'tool_result',
+                                    'tool_use_id' => isset($call['id']) ? (string) $call['id'] : '',
+                                    'content'     => $out,
+                                    'is_error'    => $isError,
+                                ];
+                                continue;
+                            }
+                        }
+
                         $result = $executor->execute($call, $toolContext);
+
+                        // after_tool 钩子
+                        if ($hooks && $hooks->hasAfterTool()) {
+                            $result = $hooks->triggerAfterTool($callName, $result);
+                        }
+
                         $isError = !$result->isSuccess();
                         $out     = (string) $result;
                         if ($isError) {
-                            $context->emit('tool_error', ['name' => $call['name'] ?? '', 'message' => $out]);
+                            $context->emit('tool_error', ['name' => $callName, 'message' => $out]);
                         }
                         $results[] = [
                             'type'        => 'tool_result',

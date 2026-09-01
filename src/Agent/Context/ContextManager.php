@@ -98,7 +98,77 @@ class ContextManager
     }
 
     /**
-     * 执行压缩：把除最近 keepRecent 条之外的消息，通过摘要器压成一条系统消息
+     * 将消息列表按 Agent Turn 分组
+     *
+     * 一个 Turn 包含：
+     *   1. 用户输入（role=user，不含 tool_result）
+     *   2. 模型回复（role=assistant，可能含 tool_use）
+     *   3. 工具结果（role=user，含 tool_result）
+     *
+     * 分组后每个 Turn 内的 tool_use/tool_result 配对完整，不会被拆散。
+     *
+     * @return Turn[]
+     */
+    public function turns()
+    {
+        $turns = [];
+        $current = new Turn();
+
+        foreach ($this->messages as $msg) {
+            // 遇到新的用户输入（非 tool_result）→ 之前的 Turn 结束，开启新 Turn
+            if (Turn::isUserInput($msg) && $current->count() > 0) {
+                $turns[] = $current;
+                $current = new Turn();
+            }
+            $current->addMessage($msg);
+
+            // 模型回复不含 tool_use → 当前 Turn 结束
+            if (($msg['role'] ?? '') === 'assistant' && !$this->hasToolUse($msg)) {
+                $turns[] = $current;
+                $current = new Turn();
+            }
+
+            // tool_result 消息（user 消息，含 tool_result 块）→ 当前 Turn 结束
+            if (Turn::isToolResultMessage($msg)) {
+                $turns[] = $current;
+                $current = new Turn();
+            }
+        }
+
+        // 有余留的未结束 Turn
+        if ($current->count() > 0) {
+            $turns[] = $current;
+        }
+
+        return $turns;
+    }
+
+    /**
+     * 判断一条消息是否含有 tool_use 块
+     *
+     * @param array<string, mixed> $msg
+     * @return bool
+     */
+    protected function hasToolUse(array $msg)
+    {
+        if (($msg['role'] ?? '') !== 'assistant') {
+            return false;
+        }
+        $content = $msg['content'] ?? '';
+        if (!is_array($content)) {
+            return false;
+        }
+        foreach ($content as $block) {
+            if (is_array($block) && ($block['type'] ?? '') === 'tool_use') {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * 执行压缩：以 Turn 为单位，保留最近 keepRecent 条消息（至少完整 1 个 Turn），
+     * 把更早的 Turn 通过摘要器压成一条系统消息。
      *
      * @param callable $summarizer function(array $messages, string $taskHint): string
      *                             传入被压缩的旧消息，返回摘要文本
@@ -112,8 +182,29 @@ class ContextManager
             return $this->messages;
         }
 
-        $old = array_slice($this->messages, 0, $count - $this->keepRecent);
-        $recent = array_slice($this->messages, $count - $this->keepRecent);
+        // 方案一：按 Turn 切割
+        $turnList = $this->turns();
+        $turnCount = count($turnList);
+
+        // 从后往前保留 Turn，直到消息数 >= keepRecent 或仅剩 1 个 Turn
+        $keepMessages = [];
+        $keepTurnMessages = 0;
+        for ($i = $turnCount - 1; $i >= 0; $i--) {
+            $turnMsgs = $turnList[$i]->messages();
+            $keepTurnMessages += count($turnMsgs);
+            $keepMessages = array_merge($turnMsgs, $keepMessages);
+            // 如果保留的消息数 >= keepRecent，或这是最后一个 Turn，停止
+            if ($keepTurnMessages >= $this->keepRecent || $i === 0) {
+                break;
+            }
+        }
+
+        // 计算被压缩的旧消息
+        $oldCount = $count - count($keepMessages);
+        if ($oldCount <= 0) {
+            return $this->messages;
+        }
+        $old = array_slice($this->messages, 0, $oldCount);
 
         $summary = call_user_func($summarizer, $old, $taskHint);
         if (!is_string($summary) || $summary === '') {
@@ -129,12 +220,12 @@ class ContextManager
                 }
                 return true;
             });
-            $this->messages = array_merge(array_values($old), $recent);
+            $this->messages = array_merge(array_values($old), $keepMessages);
             return $this->messages;
         }
 
         $summaryMsg = ['role' => 'system', 'content' => '[Conversation summary]\n' . $summary];
-        $this->messages = array_merge([$summaryMsg], $recent);
+        $this->messages = array_merge([$summaryMsg], $keepMessages);
         return $this->messages;
     }
 

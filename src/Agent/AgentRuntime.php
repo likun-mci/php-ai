@@ -4,6 +4,7 @@ namespace Ai\Agent;
 use Ai\AI;
 use Ai\Agent\Budget\BudgetManager;
 use Ai\Agent\Context\ContextManager;
+use Ai\Agent\Hooks\AgentHooks;
 use Ai\Agent\Loop\LoopController;
 use Ai\Agent\Loop\StopReason;
 use Ai\Agent\Permission\PermissionManager;
@@ -74,6 +75,9 @@ class AgentRuntime
 
     /** @var string[] */
     protected $fallbackModels = [];
+
+    /** @var AgentHooks|null */
+    protected $hooks = null;
 
     /**
      * @param AI $ai
@@ -357,6 +361,79 @@ class AgentRuntime
     public function setFallbackModels(array $models)
     {
         $this->fallbackModels = $models;
+        $this->loop->setFallbackModels($models);
+        return $this;
+    }
+
+    /**
+     * 设置钩子容器
+     *
+     * @param AgentHooks $hooks
+     * @return $this
+     */
+    public function setHooks($hooks)
+    {
+        $this->hooks = $hooks;
+        return $this;
+    }
+
+    /**
+     * 注册 before_tool 钩子（快捷方式）
+     *
+     * @param callable $cb
+     * @return $this
+     */
+    public function onBeforeTool($cb)
+    {
+        if ($this->hooks === null) {
+            $this->hooks = new AgentHooks();
+        }
+        $this->hooks->onBeforeTool($cb);
+        return $this;
+    }
+
+    /**
+     * 注册 after_tool 钩子（快捷方式）
+     *
+     * @param callable $cb
+     * @return $this
+     */
+    public function onAfterTool($cb)
+    {
+        if ($this->hooks === null) {
+            $this->hooks = new AgentHooks();
+        }
+        $this->hooks->onAfterTool($cb);
+        return $this;
+    }
+
+    /**
+     * 注册 before_model 钩子（快捷方式）
+     *
+     * @param callable $cb
+     * @return $this
+     */
+    public function onBeforeModel($cb)
+    {
+        if ($this->hooks === null) {
+            $this->hooks = new AgentHooks();
+        }
+        $this->hooks->onBeforeModel($cb);
+        return $this;
+    }
+
+    /**
+     * 注册 after_model 钩子（快捷方式）
+     *
+     * @param callable $cb
+     * @return $this
+     */
+    public function onAfterModel($cb)
+    {
+        if ($this->hooks === null) {
+            $this->hooks = new AgentHooks();
+        }
+        $this->hooks->onAfterModel($cb);
         return $this;
     }
 
@@ -442,6 +519,7 @@ class AgentRuntime
             $cm->setMessages($context->getMessages());
         }
         $context->setContextManager($cm);
+        $context->setHooks($this->hooks);
         return $context;
     }
 

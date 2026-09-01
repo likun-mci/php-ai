@@ -1699,7 +1699,7 @@ if ($result->getStopReason() === 'permission_denied') {
 
 ### 上下文压缩
 
-Agent 自动检测上下文长度，超过阈值时用 AI 自身将历史消息压缩为摘要，避免 token 超限：
+Agent 自动检测上下文长度，超过阈值时用 AI 自身将历史消息压缩为摘要，避免 token 超限。压缩以 Agent Turn（一轮完整交互）为单位，保证 `tool_use` 与对应的 `tool_result` 永远不会被拆散：
 
 ```php
 use Ai\Agent\Context\ContextManager;
@@ -1816,6 +1816,53 @@ $agent->getRuntime()->setToolTimeout(30);  // 或通过 Runtime 设置
 
 超时工具的 `StopReason` 为 `timeout`，结果中的 `error` 包含超时详情。
 
+### 模型降级
+
+主模型服务级错误时，Agent 自动按序切换降级模型，保持上下文和工具状态不变：
+
+```php
+$agent->setFallbackModels(['claude-sonnet', 'claude-haiku']);
+```
+
+降级发生后会发出 `model_fallback` 事件，包含当前使用的模型名与原始错误信息。所有降级模型均失败后，Agent 才以 `MODEL_ERROR` 停止。
+
+### 钩子系统（Hooks）
+
+在 Agent 执行链的关键节点注入自定义逻辑，无需修改核心工具：
+
+```php
+$agent
+    // 工具执行前调用：返回 ToolResult 可短路执行（跳过实际工具）
+    ->onBeforeTool(function ($name, $input, $ctx) {
+        if ($name === 'bash') {
+            // 记录所有 bash 命令到审计日志
+            return null; // 返回 null 继续执行
+        }
+    })
+    // 工具执行后调用：可修改/包装结果
+    ->onAfterTool(function ($name, $result) {
+        return $result;
+    })
+    // 模型调用前调用：可修改请求参数
+    ->onBeforeModel(function ($messages, $tools) {
+        // 注入额外的系统消息或过滤敏感数据
+        return ['messages' => $messages, 'tools' => $tools];
+    })
+    // 模型调用后调用：可记录响应或注入额外数据
+    ->onAfterModel(function ($resp) {
+        return $resp;
+    });
+```
+
+四种钩子及签名：
+
+| 钩子 | 签名 | 说明 |
+|------|------|------|
+| `onBeforeTool` | `(string $name, array $input, ToolContext $ctx): ?ToolResult` | 返回 `ToolResult` 则短路，不执行实际工具 |
+| `onAfterTool` | `(string $name, ToolResult $result): ToolResult` | 可修改/包装结果 |
+| `onBeforeModel` | `(array $messages, array $tools): array` | 返回 `['messages'=>..., 'tools'=>...]` 修改请求参数 |
+| `onAfterModel` | `($response): $response` | 可修改/记录响应 |
+
 ### 运行时架构
 
 v2.0 内部结构：
@@ -1824,18 +1871,22 @@ v2.0 内部结构：
 Agent（对外 API）
   ├── setTools() / setSystem() / onEvent() / setMaxIter() / run()
   ├── setPermissionMode() / setSessionId() / setMaxBudget()
+  ├── setFallbackModels() / setToolTimeout()
   ├── approve() / deny()                              ← 用户授权
+  ├── onBeforeTool() / onAfterTool()                  ← 工具钩子
+  ├── onBeforeModel() / onAfterModel()                ← 模型钩子
   └── getRuntime() ─────────────────────────────────→  AgentRuntime（执行引擎）
         ├── ToolRegistry（工具注册表）                  ← AgentToolInterface 注册
         ├── ToolExecutor（工具执行器）                  ← 重试 / 超时 / 输出截断
-        ├── LoopController（自循环控制器）              ← 驱动主循环
-        ├── LoopGuard（防死循环守卫）                   ← 重复调用检测
+        ├── LoopController（自循环控制器）              ← 驱动主循环（含降级模型）
+        ├── LoopGuard（防死循环守卫）                   ← 重复调用检测 + 结果级进展检测
         ├── ParallelToolExecutor（并行执行器）           ← 并行安全工具
         ├── PermissionManager（权限管理器）              ← 6 种模式 + 规则匹配
-        ├── ContextManager（上下文管理器）               ← 自动压缩历史
+        ├── ContextManager（上下文管理器）               ← Turn-aware 自动压缩
         ├── SessionManager（会话管理器）                 ← 持久化 / 暂停 / 恢复
         ├── BudgetManager（预算管理器）                  ← token / 成本控制
-        └── SubAgentManager（子 Agent 管理器）           ← spawn_agent 工具
+        ├── SubAgentManager（子 Agent 管理器）           ← spawn_agent 工具
+        └── AgentHooks（钩子系统）                      ← before/after 工具与模型
 ```
 
 通过 `$agent->getRuntime()` 可访问全部内部组件，实现高级定制。

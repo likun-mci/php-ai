@@ -1687,7 +1687,7 @@ if ($result->getStopReason() === 'permission_denied') {
 
 ### Context compaction
 
-The Agent automatically detects when the context window is getting full and compresses old history into a summary using the AI model itself, preventing token overflows:
+The Agent automatically detects when the context window is getting full and compresses old history into a summary using the AI model itself, preventing token overflows. Compaction is turn-aware — it groups messages by Agent Turn (user input → assistant response → tool results), so `tool_use` and `tool_result` blocks are never split apart:
 
 ```php
 use Ai\Agent\Context\ContextManager;
@@ -1804,6 +1804,52 @@ The timeout check happens after each execution attempt and before each retry wai
 
 A timed-out tool produces `StopReason::timeout`, and the `error` field contains the timeout details.
 
+### Model fallback
+
+When the primary model returns a service-level error, the Agent automatically switches to a fallback model in order, preserving the same context and tool state:
+
+```php
+$agent->setFallbackModels(['claude-sonnet', 'claude-haiku']);
+```
+
+A `model_fallback` event is emitted whenever a fallback is triggered, including the model name and the original error message. If all fallback models also fail, the Agent stops with `MODEL_ERROR`.
+
+### Hooks
+
+Inject custom logic at key points in the Agent execution chain without modifying core tools:
+
+```php
+$agent
+    // Called before each tool: return ToolResult to short-circuit (skip actual execution)
+    ->onBeforeTool(function ($name, $input, $ctx) {
+        if ($name === 'bash') {
+            // log all bash commands to an audit trail
+            return null; // return null to continue
+        }
+    })
+    // Called after each tool: modify/wrap the result
+    ->onAfterTool(function ($name, $result) {
+        return $result;
+    })
+    // Called before each model call: modify request parameters
+    ->onBeforeModel(function ($messages, $tools) {
+        return ['messages' => $messages, 'tools' => $tools];
+    })
+    // Called after each model call: record or modify the response
+    ->onAfterModel(function ($resp) {
+        return $resp;
+    });
+```
+
+Four hook types:
+
+| Hook | Signature | Description |
+|------|-----------|-------------|
+| `onBeforeTool` | `(string $name, array $input, ToolContext $ctx): ?ToolResult` | Return `ToolResult` to short-circuit, `null` to continue |
+| `onAfterTool` | `(string $name, ToolResult $result): ToolResult` | Modify/wrap the result |
+| `onBeforeModel` | `(array $messages, array $tools): array` | Return `['messages'=>..., 'tools'=>...]` to modify request |
+| `onAfterModel` | `($response): $response` | Modify/record the response |
+
 ### Runtime architecture
 
 Internal structure since v2.0:
@@ -1812,18 +1858,22 @@ Internal structure since v2.0:
 Agent (public API)
   ├── setTools() / setSystem() / onEvent() / setMaxIter() / run()
   ├── setPermissionMode() / setSessionId() / setMaxBudget()
+  ├── setFallbackModels() / setToolTimeout()
   ├── approve() / deny()                              ← user approval
+  ├── onBeforeTool() / onAfterTool()                  ← tool hooks
+  ├── onBeforeModel() / onAfterModel()                ← model hooks
   └── getRuntime() ─────────────────────────────────→  AgentRuntime (execution engine)
         ├── ToolRegistry (tool registry)               ← AgentToolInterface registration
         ├── ToolExecutor (tool executor)               ← retry / timeout / output truncation
-        ├── LoopController (loop controller)           ← drives the main loop
-        ├── LoopGuard (loop guard)                     ← repeated-call detection
+        ├── LoopController (loop controller)           ← drives the main loop (with fallback)
+        ├── LoopGuard (loop guard)                     ← repeated-call & progress detection
         ├── ParallelToolExecutor (parallel executor)   ← parallel-safe tools
         ├── PermissionManager (permission manager)     ← 6 modes + rule matching
-        ├── ContextManager (context manager)            ← automatic compaction
+        ├── ContextManager (context manager)            ← turn-aware compaction
         ├── SessionManager (session manager)            ← persistence / pause / resume
         ├── BudgetManager (budget manager)              ← token / cost control
-        └── SubAgentManager (sub-agent manager)         ← spawn_agent tool
+        ├── SubAgentManager (sub-agent manager)         ← spawn_agent tool
+        └── AgentHooks (hooks)                         ← before/after tool & model
 ```
 
 Access the internals through `$agent->getRuntime()`.

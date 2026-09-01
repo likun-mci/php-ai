@@ -4,6 +4,7 @@ namespace Ai\Agent;
 use Ai\AI;
 use Ai\Agent\Budget\BudgetManager;
 use Ai\Agent\Context\ContextManager;
+use Ai\Agent\Hooks\AgentHooks;
 use Ai\Agent\Permission\PermissionManager;
 use Ai\Agent\Tool\ToolRegistry;
 
@@ -69,6 +70,9 @@ class AgentContext
     /** @var array<string, mixed>|null 待授权的工具调用 */
     protected $pendingPermissionCall = null;
 
+    /** @var AgentHooks|null */
+    protected $hooks = null;
+
     /**
      * @param AI $ai
      * @param ToolRegistry $toolRegistry
@@ -99,6 +103,26 @@ class AgentContext
     public function getBudget()
     {
         return $this->budget;
+    }
+
+    /* ---------- 钩子系统 ---------- */
+
+    /**
+     * @param AgentHooks $hooks
+     * @return $this
+     */
+    public function setHooks($hooks)
+    {
+        $this->hooks = $hooks;
+        return $this;
+    }
+
+    /**
+     * @return AgentHooks|null
+     */
+    public function getHooks()
+    {
+        return $this->hooks;
     }
 
     /* ---------- 上下文管理 ---------- */

@@ -675,7 +675,7 @@ class AgentRuntime
                 'goal'    => $this->getTaskGoal(),
             ]);
             // task_start 钩子
-            if ($this->hooks && $this->hooks->hasTaskStart()) {
+            if ($this->hooks && $this->hooks->hasTaskStart() && $this->taskId !== null) {
                 $this->hooks->triggerTaskStart($this->taskId, $this->getTaskGoal());
             }
         }

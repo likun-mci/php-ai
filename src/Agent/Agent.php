@@ -301,10 +301,12 @@ class Agent
      */
     public function onToolError($cb)
     {
-        if ($this->runtime->getHooks() === null) {
-            $this->runtime->setHooks(new \Ai\Agent\Hooks\AgentHooks());
+        $hooks = $this->runtime->getHooks();
+        if ($hooks === null) {
+            $hooks = new \Ai\Agent\Hooks\AgentHooks();
+            $this->runtime->setHooks($hooks);
         }
-        $this->runtime->getHooks()->onToolError($cb);
+        $hooks->onToolError($cb);
         return $this;
     }
 
@@ -316,10 +318,12 @@ class Agent
      */
     public function onAfterToolBatch($cb)
     {
-        if ($this->runtime->getHooks() === null) {
-            $this->runtime->setHooks(new \Ai\Agent\Hooks\AgentHooks());
+        $hooks = $this->runtime->getHooks();
+        if ($hooks === null) {
+            $hooks = new \Ai\Agent\Hooks\AgentHooks();
+            $this->runtime->setHooks($hooks);
         }
-        $this->runtime->getHooks()->onAfterToolBatch($cb);
+        $hooks->onAfterToolBatch($cb);
         return $this;
     }
 
@@ -331,10 +335,12 @@ class Agent
      */
     public function onPermissionRequest($cb)
     {
-        if ($this->runtime->getHooks() === null) {
-            $this->runtime->setHooks(new \Ai\Agent\Hooks\AgentHooks());
+        $hooks = $this->runtime->getHooks();
+        if ($hooks === null) {
+            $hooks = new \Ai\Agent\Hooks\AgentHooks();
+            $this->runtime->setHooks($hooks);
         }
-        $this->runtime->getHooks()->onPermissionRequest($cb);
+        $hooks->onPermissionRequest($cb);
         return $this;
     }
 
@@ -346,10 +352,12 @@ class Agent
      */
     public function onTaskStart($cb)
     {
-        if ($this->runtime->getHooks() === null) {
-            $this->runtime->setHooks(new \Ai\Agent\Hooks\AgentHooks());
+        $hooks = $this->runtime->getHooks();
+        if ($hooks === null) {
+            $hooks = new \Ai\Agent\Hooks\AgentHooks();
+            $this->runtime->setHooks($hooks);
         }
-        $this->runtime->getHooks()->onTaskStart($cb);
+        $hooks->onTaskStart($cb);
         return $this;
     }
 
@@ -361,10 +369,12 @@ class Agent
      */
     public function onTaskComplete($cb)
     {
-        if ($this->runtime->getHooks() === null) {
-            $this->runtime->setHooks(new \Ai\Agent\Hooks\AgentHooks());
+        $hooks = $this->runtime->getHooks();
+        if ($hooks === null) {
+            $hooks = new \Ai\Agent\Hooks\AgentHooks();
+            $this->runtime->setHooks($hooks);
         }
-        $this->runtime->getHooks()->onTaskComplete($cb);
+        $hooks->onTaskComplete($cb);
         return $this;
     }
 
@@ -376,10 +386,12 @@ class Agent
      */
     public function onSubagentStart($cb)
     {
-        if ($this->runtime->getHooks() === null) {
-            $this->runtime->setHooks(new \Ai\Agent\Hooks\AgentHooks());
+        $hooks = $this->runtime->getHooks();
+        if ($hooks === null) {
+            $hooks = new \Ai\Agent\Hooks\AgentHooks();
+            $this->runtime->setHooks($hooks);
         }
-        $this->runtime->getHooks()->onSubagentStart($cb);
+        $hooks->onSubagentStart($cb);
         return $this;
     }
 
@@ -391,10 +403,12 @@ class Agent
      */
     public function onSubagentStop($cb)
     {
-        if ($this->runtime->getHooks() === null) {
-            $this->runtime->setHooks(new \Ai\Agent\Hooks\AgentHooks());
+        $hooks = $this->runtime->getHooks();
+        if ($hooks === null) {
+            $hooks = new \Ai\Agent\Hooks\AgentHooks();
+            $this->runtime->setHooks($hooks);
         }
-        $this->runtime->getHooks()->onSubagentStop($cb);
+        $hooks->onSubagentStop($cb);
         return $this;
     }
 
@@ -406,10 +420,12 @@ class Agent
      */
     public function onBeforeCompact($cb)
     {
-        if ($this->runtime->getHooks() === null) {
-            $this->runtime->setHooks(new \Ai\Agent\Hooks\AgentHooks());
+        $hooks = $this->runtime->getHooks();
+        if ($hooks === null) {
+            $hooks = new \Ai\Agent\Hooks\AgentHooks();
+            $this->runtime->setHooks($hooks);
         }
-        $this->runtime->getHooks()->onBeforeCompact($cb);
+        $hooks->onBeforeCompact($cb);
         return $this;
     }
 
@@ -421,10 +437,12 @@ class Agent
      */
     public function onAfterCompact($cb)
     {
-        if ($this->runtime->getHooks() === null) {
-            $this->runtime->setHooks(new \Ai\Agent\Hooks\AgentHooks());
+        $hooks = $this->runtime->getHooks();
+        if ($hooks === null) {
+            $hooks = new \Ai\Agent\Hooks\AgentHooks();
+            $this->runtime->setHooks($hooks);
         }
-        $this->runtime->getHooks()->onAfterCompact($cb);
+        $hooks->onAfterCompact($cb);
         return $this;
     }
 

@@ -395,7 +395,8 @@ class SubAgentManager
         ];
         $run['transcript_id'] = $runId;
         unset($run['messages']);  // 完整 transcript 不塞给模型，用 transcript_id 引用
-        return json_encode($run, JSON_UNESCAPED_UNICODE);
+        $encoded = json_encode($run, JSON_UNESCAPED_UNICODE);
+        return $encoded !== false ? $encoded : '{"status":"failed","summary":"编码失败"}';
     }
 
     /**

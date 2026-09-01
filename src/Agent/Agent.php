@@ -511,6 +511,38 @@ class Agent
     }
 
     /**
+     * 设置技能管理器
+     *
+     * @param \Ai\Agent\Skill\SkillManager $sm
+     * @return $this
+     */
+    public function setSkillManager($sm)
+    {
+        $this->runtime->setSkillManager($sm);
+        return $this;
+    }
+
+    /**
+     * 从目录加载技能并启用
+     *
+     * 快捷方式：创建 SkillManager，从指定目录加载 SKILL.md，
+     * 注入到 Runtime。
+     *
+     * @param string|string[] $dirs 技能目录路径（单个或多个）
+     * @return $this
+     */
+    public function loadSkills($dirs)
+    {
+        $sm = new \Ai\Agent\Skill\SkillManager();
+        $list = is_array($dirs) ? $dirs : [(string) $dirs];
+        foreach ($list as $dir) {
+            $sm->loadFromDir((string) $dir);
+        }
+        $this->runtime->setSkillManager($sm);
+        return $this;
+    }
+
+    /**
      * 回答用户问题并恢复 Agent 执行
      *
      * @param string $questionId

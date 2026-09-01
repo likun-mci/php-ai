@@ -358,6 +358,14 @@ class LoopController
                             $systemPrompt .= "\n\n<workspace>\n{$wsContext}\n</workspace>";
                         }
                     }
+                    // 技能描述注入（默认只给名称和描述，完整内容通过 use_skill 加载）
+                    $sm = $context->getSkillManager();
+                    if ($sm && $sm->isEnabled() && $sm->count() > 0) {
+                        $skillPrompt = $sm->toSystemPrompt();
+                        if ($skillPrompt !== '') {
+                            $systemPrompt .= "\n\n<skills>\n{$skillPrompt}\n</skills>";
+                        }
+                    }
                     $modelParams = [
                         'system'   => $systemPrompt,
                         'messages' => $context->getMessages(),

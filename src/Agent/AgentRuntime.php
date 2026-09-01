@@ -16,6 +16,7 @@ use Ai\Agent\Task\TaskStatus;
 use Ai\Agent\Tool\ToolRegistry;
 use Ai\Agent\Verification\VerificationManager;
 use Ai\Agent\Workspace\WorkspaceManager;
+use Ai\Agent\Skill\SkillManager;
 
 /**
  * Agent Runtime——执行引擎
@@ -98,6 +99,9 @@ class AgentRuntime
 
     /** @var WorkspaceManager|null */
     protected $workspace = null;
+
+    /** @var SkillManager|null */
+    protected $skillManager = null;
 
     /**
      * @param AI $ai
@@ -385,6 +389,28 @@ class AgentRuntime
     }
 
     /**
+     * 注册 use_skill 工具（如果技能管理器存在）
+     *
+     * @return void
+     */
+    protected function registerSkillTool()
+    {
+        $sm = $this->skillManager;
+        if ($sm === null || !$sm->isEnabled() || $sm->count() === 0) {
+            return;
+        }
+        if ($this->toolRegistry->has('use_skill')) {
+            return;
+        }
+        $schema = $sm->getUseSkillToolSchema();
+        $this->toolRegistry->register('use_skill', [
+            'description'  => $schema['description'],
+            'input_schema' => $schema['input_schema'],
+            'handler'      => $sm->getUseSkillHandler(),
+        ]);
+    }
+
+    /**
      * 设置工具执行超时秒数（0 不限制）
      *
      * 超过此期限（含重试等待）仍未返回的工具将被标记为超时。
@@ -510,6 +536,26 @@ class AgentRuntime
     public function getWorkspaceManager()
     {
         return $this->workspace;
+    }
+
+    /**
+     * 设置技能管理器
+     *
+     * @param SkillManager|null $sm
+     * @return $this
+     */
+    public function setSkillManager($sm)
+    {
+        $this->skillManager = $sm;
+        return $this;
+    }
+
+    /**
+     * @return SkillManager|null
+     */
+    public function getSkillManager()
+    {
+        return $this->skillManager;
     }
 
     /**
@@ -706,6 +752,7 @@ class AgentRuntime
         $context->setHooks($this->hooks);
         $context->setVerificationManager($this->verification);
         $context->setWorkspaceManager($this->workspace);
+        $context->setSkillManager($this->skillManager);
         return $context;
     }
 
@@ -720,6 +767,7 @@ class AgentRuntime
         // 构造上下文
         $this->registerSpawnAgent();
         $this->registerInteraction();
+        $this->registerSkillTool();
         $context = $this->buildContext($messages);
 
         // 任务事件：task_start

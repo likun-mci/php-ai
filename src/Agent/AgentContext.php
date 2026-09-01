@@ -9,6 +9,7 @@ use Ai\Agent\Permission\PermissionManager;
 use Ai\Agent\Tool\ToolRegistry;
 use Ai\Agent\Verification\VerificationManager;
 use Ai\Agent\Workspace\WorkspaceManager;
+use Ai\Agent\Skill\SkillManager;
 
 /**
  * Agent 运行时上下文
@@ -80,6 +81,9 @@ class AgentContext
 
     /** @var WorkspaceManager|null */
     protected $workspace = null;
+
+    /** @var SkillManager|null */
+    protected $skillManager = null;
 
     /**
      * @param AI $ai
@@ -171,6 +175,26 @@ class AgentContext
     public function getWorkspaceManager()
     {
         return $this->workspace;
+    }
+
+    /* ---------- 技能管理 ---------- */
+
+    /**
+     * @param SkillManager|null $sm
+     * @return $this
+     */
+    public function setSkillManager($sm)
+    {
+        $this->skillManager = $sm;
+        return $this;
+    }
+
+    /**
+     * @return SkillManager|null
+     */
+    public function getSkillManager()
+    {
+        return $this->skillManager;
     }
 
     /* ---------- 上下文管理 ---------- */

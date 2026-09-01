@@ -5,28 +5,24 @@ namespace Ai\Agent\Tool;
  * 工具执行上下文
  *
  * 工具在执行时不仅需要模型传入的参数（$input），还需要知道周围的环境：
- * 当前工作目录、取消状态、事件发射器等。这些信息在这里统一传递，
- * 而不是作为 handler 闭包的 use 变量。
+ * 当前工作目录、会话 ID、Agent ID、迭代计数、取消状态、事件发射器等。
+ * 这些信息在这里统一传递，而不是作为 handler 闭包的 use 变量。
  *
- * 用法：
- * ```php
- * class ReadFileTool implements AgentToolInterface
- * {
- *     public function execute(array $input, ToolContext $context): ToolResult
- *     {
- *         if ($context->isCancelled()) {
- *             return ToolResult::error('执行已取消');
- *         }
- *         $path = $context->workdir() . '/' . $input['path'];
- *         // ...
- *     }
- * }
- * ```
+ * 由 AgentRuntime 在每次循环中构造，工具通过 ToolContext 获取运行时信息。
  */
 class ToolContext
 {
     /** @var string */
     protected $workdir = '';
+
+    /** @var string */
+    protected $sessionId = '';
+
+    /** @var string */
+    protected $agentId = '';
+
+    /** @var string */
+    protected $parentAgentId = '';
 
     /** @var callable|null */
     protected $emit = null;
@@ -34,44 +30,66 @@ class ToolContext
     /** @var bool */
     protected $cancelled = false;
 
+    /** @var int */
+    protected $iteration = 0;
+
+    /** @var string */
+    protected $toolCallId = '';
+
     /**
-     * @param string $workdir 当前工作目录
-     * @param callable|null $emit 事件发射器
+     * @param array<string, mixed>|string $options 选项数组，或旧版「工作目录字符串」兼容写法
+     * @param callable|null $oldEmit 旧版「事件发射器」参数（仅当 $options 为字符串时使用）
      */
-    public function __construct($workdir = '', $emit = null)
+    public function __construct($options = [], $oldEmit = null)
     {
-        $this->workdir = (string) $workdir;
-        $this->emit = is_callable($emit) ? $emit : null;
+        // 旧版写法：new ToolContext('/var/www', $emit)
+        if (is_string($options)) {
+            $this->workdir = $options;
+            $this->emit = is_callable($oldEmit) ? $oldEmit : null;
+            return;
+        }
+        $options = (array) $options;
+        $this->workdir      = isset($options['workdir']) ? (string) $options['workdir'] : '';
+        $this->sessionId    = isset($options['sessionId']) ? (string) $options['sessionId'] : '';
+        $this->agentId      = isset($options['agentId']) ? (string) $options['agentId'] : '';
+        $this->parentAgentId = isset($options['parentAgentId']) ? (string) $options['parentAgentId'] : '';
+        $this->emit         = isset($options['emit']) && is_callable($options['emit']) ? $options['emit'] : null;
+        $this->cancelled    = !empty($options['cancelled']);
+        $this->iteration    = isset($options['iteration']) ? (int) $options['iteration'] : 0;
+        $this->toolCallId   = isset($options['toolCallId']) ? (string) $options['toolCallId'] : '';
     }
 
-    /** 当前工作目录
-     * @return string
-     */
-    public function workdir()
-    {
-        return $this->workdir;
-    }
+    /** @return string */
+    public function workdir() { return $this->workdir; }
 
-    /** 是否已取消（工具应尽快返回，避免继续执行）
-     * @return bool
-     */
-    public function isCancelled()
-    {
-        return $this->cancelled;
-    }
+    /** @return string */
+    public function sessionId() { return $this->sessionId; }
 
-    /** 标记取消
-     * @return $this
-     */
+    /** @return string */
+    public function agentId() { return $this->agentId; }
+
+    /** @return string */
+    public function parentAgentId() { return $this->parentAgentId; }
+
+    /** @return bool */
+    public function isCancelled() { return $this->cancelled; }
+
+    /** @return int */
+    public function iteration() { return $this->iteration; }
+
+    /** @return string */
+    public function toolCallId() { return $this->toolCallId; }
+
+    /** @return $this */
     public function cancel()
     {
         $this->cancelled = true;
         return $this;
     }
 
-    /** 发射事件
-     * @param string $type 事件类型
-     * @param array<string, mixed> $data 事件数据
+    /**
+     * @param string $type
+     * @param array<string, mixed> $data
      * @return void
      */
     public function emit($type, array $data = [])
@@ -82,7 +100,7 @@ class ToolContext
         }
     }
 
-    /** 日志输出（通过 emit 透传）
+    /**
      * @param string $message
      * @param array<string, mixed> $context
      * @return void

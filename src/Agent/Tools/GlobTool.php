@@ -2,6 +2,7 @@
 namespace Ai\Agent\Tools;
 
 use Ai\Agent\Tool\AgentToolInterface;
+use Ai\Agent\Tool\ParallelSafeToolInterface;
 use Ai\Agent\Tool\ToolContext;
 use Ai\Agent\Tool\ToolResult;
 
@@ -15,7 +16,7 @@ use Ai\Agent\Tool\ToolResult;
  *   glob(pattern: "** /*.php")
  *   glob(pattern: "src/** /*.php", limit: 20)
  */
-class GlobTool implements AgentToolInterface
+class GlobTool implements AgentToolInterface, ParallelSafeToolInterface
 {
     /** @var PathSafety */
     protected $pathSafety;
@@ -36,6 +37,11 @@ class GlobTool implements AgentToolInterface
     public function name()
     {
         return 'glob';
+    }
+
+    public function isParallelSafe()
+    {
+        return true;
     }
 
     public function description()

@@ -10,6 +10,9 @@ use Ai\Agent\Tool\ToolContext;
  * 在工具执行前做权限检查，返回 allow / deny / ask 三种结果。
  * 支持 Claude Code 风格的权限模式与多级规则匹配。
  *
+ * ask 结果会创建 PermissionRequest，暂停 Agent 循环，等待业务层
+ * 通过 approve() / deny() 响应。请求可被持久化，跨 PHP 请求恢复。
+ *
  * 权限模式（setMode）：
  *   - manual       危险工具询问用户
  *   - auto         自动放行已授权的工具
@@ -23,8 +26,10 @@ use Ai\Agent\Tool\ToolContext;
  *   $pm->allowTool('write_file', ['path' => '/var/www/project/*']);
  *   $pm->denyTool('bash', ['command' => 'rm *']);
  *
- * 询问用户回调：
- *   $pm->onAsk(function (array $request) { ... return true/false; });
+ * 暂停/恢复：
+ *   $pm->onAsk(function (PermissionRequest $req) { ... });
+ *   $pm->approve('req_xxx');   // 放行
+ *   $pm->deny('req_xxx', '不需要');  // 拒绝
  */
 class PermissionManager
 {
@@ -53,12 +58,31 @@ class PermissionManager
     /** @var string[] 需要询问的危险工具 */
     protected static $dangerousTools = ['bash', 'delete_file', 'rm', 'exec'];
 
+    /** @var array<string, PermissionRequest> 待处理的权限请求 */
+    protected $requests = [];
+
+    /** @var int 请求自增序号 */
+    protected $requestCounter = 0;
+
+    /** @var string|null 当前会话 ID */
+    protected $sessionId = null;
+
     /**
      * @param string $mode 初始权限模式
      */
     public function __construct($mode = self::MODE_MANUAL)
     {
         $this->setMode($mode);
+    }
+
+    /** 设置会话 ID（权限请求归属）
+     * @param string $sessionId
+     * @return $this
+     */
+    public function setSessionId($sessionId)
+    {
+        $this->sessionId = (string) $sessionId;
+        return $this;
     }
 
     /** 设置权限模式
@@ -161,7 +185,7 @@ class PermissionManager
                 if (in_array($toolName, self::$editTools, true)) {
                     return PermissionResult::allow();
                 }
-                return $this->ask($toolName, $input);
+                return $this->createRequest($toolName, $input);
 
             case self::MODE_DONT_ASK:
                 return PermissionResult::allow();
@@ -175,37 +199,116 @@ class PermissionManager
                     return PermissionResult::allow();
                 }
                 if (in_array($toolName, self::$dangerousTools, true)) {
-                    return $this->ask($toolName, $input);
+                    return $this->createRequest($toolName, $input);
                 }
                 return PermissionResult::allow();
         }
     }
 
     /**
-     * 询问用户（manual/accept_edits 模式的危险操作走这里）
+     * 创建权限请求（需要用户决策）
      *
      * @param string $toolName
      * @param array<string, mixed> $input
      * @return PermissionResult
      */
-    protected function ask($toolName, array $input)
+    protected function createRequest($toolName, array $input)
     {
-        if ($this->askHandler) {
-            $request = [
-                'tool'  => $toolName,
-                'input' => $input,
-            ];
-            $decision = call_user_func($this->askHandler, $request);
-            if ($decision instanceof PermissionResult) {
-                return $decision;
-            }
-            if ($decision) {
-                return PermissionResult::allow();
-            }
-            return PermissionResult::deny('用户拒绝执行 ' . $toolName);
+        $this->requestCounter++;
+        $requestId = 'req_' . $this->requestCounter . '_' . dechex(time());
+
+        // 检查是否有未决的请求（避免重复）
+        $summary = $this->describeInput($toolName, $input);
+        $request = new PermissionRequest($requestId, [
+            'sessionId'   => $this->sessionId ?: '',
+            'toolName'    => $toolName,
+            'input'       => $input,
+            'description' => $summary,
+        ]);
+        $this->requests[$requestId] = $request;
+
+        return PermissionResult::ask($this->askMessage($toolName, $summary), $request);
+    }
+
+    /**
+     * 批准一个权限请求
+     *
+     * @param string $requestId
+     * @return bool 请求是否存在且为 pending
+     */
+    public function approve($requestId)
+    {
+        if (!isset($this->requests[$requestId])) {
+            return false;
         }
-        // 没有询问回调 → 默认拒绝（安全优先）
-        return PermissionResult::deny('缺少权限询问回调，已拒绝执行 ' . $toolName);
+        $req = $this->requests[$requestId];
+        if (!$req->isPending()) {
+            return false;
+        }
+        $req->approve();
+        return true;
+    }
+
+    /**
+     * 拒绝一个权限请求
+     *
+     * @param string $requestId
+     * @param string $reason
+     * @return bool 请求是否存在且为 pending
+     */
+    public function deny($requestId, $reason = '')
+    {
+        if (!isset($this->requests[$requestId])) {
+            return false;
+        }
+        $req = $this->requests[$requestId];
+        if (!$req->isPending()) {
+            return false;
+        }
+        $req->deny($reason);
+        return true;
+    }
+
+    /**
+     * 获取请求状态
+     *
+     * @param string $requestId
+     * @return PermissionRequest|null
+     */
+    public function getRequest($requestId)
+    {
+        return isset($this->requests[$requestId]) ? $this->requests[$requestId] : null;
+    }
+
+    /**
+     * 获取所有待处理的请求
+     *
+     * @return PermissionRequest[]
+     */
+    public function getPendingRequests()
+    {
+        $pending = [];
+        foreach ($this->requests as $id => $req) {
+            if ($req->isPending()) {
+                $pending[$id] = $req;
+            }
+        }
+        return $pending;
+    }
+
+    /**
+     * 清理已处理的请求（approved / denied）
+     *
+     * @return $this
+     */
+    public function cleanRequests()
+    {
+        foreach ($this->requests as $id => $req) {
+            if (!$req->isPending()) {
+                unset($this->requests[$id]);
+            }
+        }
+        return $this;
     }
 
     /**
@@ -219,5 +322,31 @@ class PermissionManager
             return '（' . $rule->getTool() . '）';
         }
         return '（' . $rule->getTool() . ' ' . json_encode($patterns, JSON_UNESCAPED_UNICODE) . '）';
+    }
+
+    /**
+     * @param string $toolName
+     * @param string $summary
+     * @return string
+     */
+    protected function askMessage($toolName, $summary)
+    {
+        return '是否允许执行 ' . $toolName . (($summary !== '') ? '（' . $summary . '）' : '') . '？';
+    }
+
+    /**
+     * @param string $toolName
+     * @param array<string, mixed> $input
+     * @return string
+     */
+    protected function describeInput($toolName, array $input)
+    {
+        if ($toolName === 'bash' && isset($input['command'])) {
+            return mb_substr((string) $input['command'], 0, 120);
+        }
+        if (isset($input['path'])) {
+            return (string) $input['path'];
+        }
+        return '';
     }
 }

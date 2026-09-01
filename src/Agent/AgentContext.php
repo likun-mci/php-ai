@@ -51,6 +51,21 @@ class AgentContext
     /** @var BudgetManager|null */
     protected $budget = null;
 
+    /** @var string */
+    protected $workdir = '';
+
+    /** @var string */
+    protected $sessionId = '';
+
+    /** @var string */
+    protected $agentId = '';
+
+    /** @var string|null 待授权的请求 ID */
+    protected $pendingPermissionId = null;
+
+    /** @var array<string, mixed>|null 待授权的工具调用 */
+    protected $pendingPermissionCall = null;
+
     /**
      * @param AI $ai
      * @param ToolRegistry $toolRegistry
@@ -238,6 +253,82 @@ class AgentContext
             $data['type'] = $type;
             call_user_func($this->emit, $data);
         }
+    }
+
+    /* ---------- 运行时标识 ---------- */
+
+    /**
+     * @param string $workdir
+     * @return $this
+     */
+    public function setWorkdir($workdir)
+    {
+        $this->workdir = (string) $workdir;
+        return $this;
+    }
+
+    /** @return string */
+    public function getWorkdir()
+    {
+        return $this->workdir;
+    }
+
+    /**
+     * @param string $sessionId
+     * @return $this
+     */
+    public function setSessionId($sessionId)
+    {
+        $this->sessionId = (string) $sessionId;
+        return $this;
+    }
+
+    /** @return string */
+    public function getSessionId()
+    {
+        return $this->sessionId;
+    }
+
+    /**
+     * @param string $agentId
+     * @return $this
+     */
+    public function setAgentId($agentId)
+    {
+        $this->agentId = (string) $agentId;
+        return $this;
+    }
+
+    /** @return string */
+    public function getAgentId()
+    {
+        return $this->agentId;
+    }
+
+    /* ---------- 待授权状态 ---------- */
+
+    /**
+     * @param string|null $requestId
+     * @param array<string, mixed>|null $call
+     * @return $this
+     */
+    public function setPendingPermission($requestId, $call = null)
+    {
+        $this->pendingPermissionId = $requestId ? (string) $requestId : null;
+        $this->pendingPermissionCall = is_array($call) ? $call : null;
+        return $this;
+    }
+
+    /** @return string|null */
+    public function getPendingPermissionId()
+    {
+        return $this->pendingPermissionId;
+    }
+
+    /** @return array<string, mixed>|null */
+    public function getPendingPermissionCall()
+    {
+        return $this->pendingPermissionCall;
     }
 
     /* ---------- 状态管理 ---------- */

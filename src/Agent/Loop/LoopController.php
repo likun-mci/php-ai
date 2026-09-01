@@ -5,6 +5,7 @@ use Ai\Agent\AgentContext;
 use Ai\Agent\AgentResult;
 use Ai\Agent\Budget\BudgetManager;
 use Ai\Agent\Permission\PermissionResult;
+use Ai\Agent\Tool\ParallelToolExecutor;
 use Ai\Agent\Tool\ToolContext;
 use Ai\Agent\Tool\ToolExecutor;
 use Ai\Agent\Tool\ToolRegistry;
@@ -32,8 +33,26 @@ class LoopController
     /** @var int 最大迭代次数 */
     protected $maxIter = 25;
 
+    /** @var int 起始迭代序号（resume 时从上次暂停处继续） */
+    protected $startIter = 0;
+
     /** @var LoopGuard|null 循环守卫 */
     protected $guard = null;
+
+    /** @var bool 是否启用并行工具执行 */
+    protected $parallelTools = false;
+
+    /** @var callable|null 并行运行器 */
+    protected $parallelRunner = null;
+
+    /** @var array<string, mixed>|null 待恢复的权限调用 */
+    protected $pendingPermissionCall = null;
+
+    /** @var string|null 待恢复的权限请求 ID */
+    protected $pendingPermissionId = null;
+
+    /** @var array<int, array<string, mixed>>|null 暂停时的上下文消息 */
+    protected $pendingContextMessages = null;
 
     /**
      * @param int $maxIter 最大迭代次数
@@ -68,6 +87,30 @@ class LoopController
     public function getGuard()
     {
         return $this->guard;
+    }
+
+    /**
+     * 启用并行工具执行
+     *
+     * @param bool $parallel
+     * @return $this
+     */
+    public function setParallelTools($parallel = true)
+    {
+        $this->parallelTools = (bool) $parallel;
+        return $this;
+    }
+
+    /**
+     * 注入并行运行器（Swoole/Workerman 协程环境用）
+     *
+     * @param callable|null $runner
+     * @return $this
+     */
+    public function setParallelRunner($runner)
+    {
+        $this->parallelRunner = is_callable($runner) ? $runner : null;
+        return $this;
     }
 
     /**
@@ -137,9 +180,11 @@ class LoopController
 
         // 构造工具执行器与上下文
         $executor     = new ToolExecutor($registry);
-        $toolContext  = new ToolContext('', $emit ? function ($event) use ($emit) {
-            $emit($event);
-        } : null);
+        $toolContext  = new ToolContext([
+            'workdir'   => $context->getWorkdir(),
+            'sessionId' => $context->getSessionId(),
+            'emit'      => $emit ? function ($event) use ($emit) { $emit($event); } : null,
+        ]);
 
         // 重置守卫
         if ($this->guard) {
@@ -219,7 +264,10 @@ class LoopController
             }
 
             // 执行工具调用
-            $results = [];
+            // 1. 执行权限检查与守卫检测，过滤掉被拒绝的调用
+            $allowedCalls = [];
+            $deniedResults = [];
+            $askPermission = false;
             foreach ($toolCalls as $call) {
                 $name  = isset($call['name']) ? (string) $call['name'] : '';
                 $input = isset($call['input']) && is_array($call['input']) ? $call['input'] : [];
@@ -246,7 +294,7 @@ class LoopController
                         $permResult = $perm->check($toolObj, $input, $toolContext);
                         if ($permResult->isDenied()) {
                             $context->emit('tool_error', ['name' => $name, 'message' => $permResult->getReason()]);
-                            $results[] = [
+                            $deniedResults[] = [
                                 'type'        => 'tool_result',
                                 'tool_use_id' => isset($call['id']) ? (string) $call['id'] : '',
                                 'content'     => 'ERROR: Permission denied — ' . $permResult->getReason(),
@@ -255,30 +303,69 @@ class LoopController
                             continue;
                         }
                         if ($permResult->needsAsk()) {
-                            $context->emit('tool_permission', ['name' => $name, 'input' => $input, 'prompt' => $permResult->getReason()]);
+                            $request = $permResult->getRequest();
+                            $requestId = $request ? $request->getId() : '';
+                            $context->emit('tool_permission', [
+                                'name'       => $name,
+                                'input'      => $input,
+                                'prompt'     => $permResult->getReason(),
+                                'request_id' => $requestId,
+                            ]);
+                            // 暂停 Agent，等待用户决策
+                            // 将已收集到的结果一并返回，让上下文保持完整
+                            if ($deniedResults) {
+                                $context->appendToolResults($deniedResults);
+                            }
+                            // 记录当前 pending 的调用到上下文，供 resume 使用
+                            $context->setPendingPermission($requestId, $call);
+                            $context->emit('error', ['message' => '等待用户授权：' . $name]);
+                            return AgentResult::stopped(StopReason::PERMISSION_DENIED, $text, [
+                                'iterations'    => $iter + 1,
+                                'permission'    => 'pending',
+                                'request_id'    => $requestId,
+                                'tool_name'     => $name,
+                                'tool_input'    => $input,
+                                'pending_call'  => $call,
+                            ]);
                         }
                     }
                 }
 
-                // 执行工具
-                $result = $executor->execute($call, $toolContext);
-
-                $isError = !$result->isSuccess();
-                $out     = (string) $result;
-
-                if ($isError) {
-                    $context->emit('tool_error', ['name' => $name, 'message' => $out]);
-                }
-
-                $results[] = [
-                    'type'        => 'tool_result',
-                    'tool_use_id' => isset($call['id']) ? (string) $call['id'] : '',
-                    'content'     => $out,
-                    'is_error'    => $isError,
-                ];
+                $allowedCalls[] = $call;
             }
 
-            // 回填工具结果
+            // 如果有被拒绝的调用，先回填它们
+            $results = $deniedResults;
+
+            // 2. 执行允许的调用（并行或串行）
+            if ($allowedCalls) {
+                if ($this->parallelTools && count($allowedCalls) > 1) {
+                    $parallelExec = new ParallelToolExecutor($registry);
+                    if ($this->parallelRunner) {
+                        $parallelExec->setParallelRunner($this->parallelRunner);
+                    }
+                    $parallelResults = $parallelExec->executeAll($allowedCalls, $toolContext);
+                    $results = array_merge($results, $parallelResults);
+                } else {
+                    // 顺序执行
+                    foreach ($allowedCalls as $call) {
+                        $result = $executor->execute($call, $toolContext);
+                        $isError = !$result->isSuccess();
+                        $out     = (string) $result;
+                        if ($isError) {
+                            $context->emit('tool_error', ['name' => $call['name'] ?? '', 'message' => $out]);
+                        }
+                        $results[] = [
+                            'type'        => 'tool_result',
+                            'tool_use_id' => isset($call['id']) ? (string) $call['id'] : '',
+                            'content'     => $out,
+                            'is_error'    => $isError,
+                        ];
+                    }
+                }
+            }
+
+            // 回填工具结果（只要有结果就回填）
             $context->appendToolResults($results);
         }
 

@@ -122,6 +122,30 @@ class Agent
     }
 
     /**
+     * 设置工作目录
+     *
+     * @param string $workdir
+     * @return $this
+     */
+    public function setWorkdir($workdir)
+    {
+        $this->runtime->setWorkdir($workdir);
+        return $this;
+    }
+
+    /**
+     * 启用并行工具执行
+     *
+     * @param bool $parallel
+     * @return $this
+     */
+    public function setParallelTools($parallel = true)
+    {
+        $this->runtime->setParallelTools($parallel);
+        return $this;
+    }
+
+    /**
      * 设置权限模式
      *
      * @param string $mode manual|auto|plan|accept_edits|dont_ask|bypass

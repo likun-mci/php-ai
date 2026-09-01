@@ -2,6 +2,7 @@
 namespace Ai\Agent\SubAgent;
 
 use Ai\Agent\AgentRuntime;
+use Ai\Agent\Permission\PermissionManager;
 use Ai\AI;
 
 /**
@@ -37,12 +38,42 @@ class SubAgentManager
     /** @var array<string, SubAgentDefinition> */
     protected $agents = [];
 
+    /** @var PermissionManager|null 父权限（子 Agent 继承，且不允许超越父权限） */
+    protected $parentPermission = null;
+
+    /** @var string */
+    protected $workdir = '';
+
     /**
      * @param AI $ai 共享的 AI 实例（子 Agent 复用同一个 AI 配置）
      */
     public function __construct(AI $ai)
     {
         $this->ai = $ai;
+    }
+
+    /**
+     * 设置父权限管理器（子 Agent 继承，且不允许超越）
+     *
+     * @param PermissionManager|null $pm
+     * @return $this
+     */
+    public function setParentPermission($pm)
+    {
+        $this->parentPermission = $pm;
+        return $this;
+    }
+
+    /**
+     * 设置工作目录
+     *
+     * @param string $workdir
+     * @return $this
+     */
+    public function setWorkdir($workdir)
+    {
+        $this->workdir = (string) $workdir;
+        return $this;
     }
 
     /**
@@ -151,10 +182,21 @@ class SubAgentManager
             }
 
             // 创建子 Agent 的独立运行时
+            // 核心原则：子 Agent 权限 ⊆ 父 Agent 权限
+            // 用父权限管理器创建子运行时的权限，子 Agent 不能超越父权限
             $subRuntime = new AgentRuntime($self->ai);
             $subRuntime->setSystem($def->getSystemPrompt());
             $subRuntime->setMaxIter($def->getMaxIter());
-            $subRuntime->setPermissionMode('bypass');  // 子 Agent 继承主 Agent 的权限
+            $subRuntime->setWorkdir($self->workdir);
+
+            // 权限继承：子 Agent 不能超越父 Agent 的权限范围
+            $parentPm = $self->parentPermission;
+            if ($parentPm) {
+                $subRuntime->setPermission($parentPm);
+            } else {
+                // 父权限未设置时走 dont_ask（子 Agent 默认自动放行，因为父 Agent 已授权 spawn）
+                $subRuntime->setPermissionMode('dont_ask');
+            }
 
             $tools = $def->getTools();
             if ($tools) {

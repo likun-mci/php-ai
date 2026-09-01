@@ -33,6 +33,9 @@ class StopReason
     /** 权限被拒绝 */
     const PERMISSION_DENIED = 'permission_denied';
 
+    /** 等待用户授权（Agent 暂停，需 resume） */
+    const WAITING_PERMISSION = 'waiting_permission';
+
     /** 模型返回错误 */
     const MODEL_ERROR = 'model_error';
 

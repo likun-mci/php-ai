@@ -2,6 +2,7 @@
 namespace Ai\Agent\Tools;
 
 use Ai\Agent\Tool\AgentToolInterface;
+use Ai\Agent\Tool\ParallelSafeToolInterface;
 use Ai\Agent\Tool\ToolContext;
 use Ai\Agent\Tool\ToolResult;
 
@@ -17,7 +18,7 @@ use Ai\Agent\Tool\ToolResult;
  * grep(pattern: "login", path: "src/", include: "*.php", limit: 20)
  * ```
  */
-class GrepTool implements AgentToolInterface
+class GrepTool implements AgentToolInterface, ParallelSafeToolInterface
 {
     /** @var PathSafety */
     protected $pathSafety;
@@ -41,6 +42,11 @@ class GrepTool implements AgentToolInterface
     public function name()
     {
         return 'grep';
+    }
+
+    public function isParallelSafe()
+    {
+        return true;
     }
 
     public function description()

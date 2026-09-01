@@ -146,17 +146,17 @@ check($r->isAllowed(), 'plan 模式：read_file 放行');
 $r = $pm->check($bash2, ['command' => 'ls'], $ctx);
 check($r->isDenied(), 'plan 模式：bash 拒绝');
 
-// manual 模式：只读放行，bash 询问
-$pm2 = new PermissionManager('manual');
-$asked = null;
-$pm2->onAsk(function ($req) use (&$asked) {
-    $asked = $req['tool'];
-    return true;  // 用户同意
-});
-$r = $pm2->check($rf2, ['path' => 'x'], $ctx);
-check($r->isAllowed(), 'manual 模式：read_file 放行');
-$r = $pm2->check($bash2, ['command' => 'ls'], $ctx);
-check($r->isAllowed() && $asked === 'bash', 'manual 模式：bash 询问用户后放行', $asked ?? 'null');
+// manual 模式：只读放行，bash 创建权限请求
+$pm2 = new PermissionManager("manual");
+$r = $pm2->check($rf2, ["path" => "x"], $ctx);
+check($r->isAllowed(), "manual 模式：read_file 放行");
+$r = $pm2->check($bash2, ["command" => "ls"], $ctx);
+check($r->needsAsk(), "manual 模式：bash 需要询问", $r->getReason());
+$request = $r->getRequest();
+check($request !== null && $request->getToolName() === "bash", "manual 模式：已创建 PermissionRequest",
+      $request ? $request->getToolName() : "null");
+check($pm2->approve($request->getId()), "approve() 批准请求");
+check($request->isApproved(), "请求状态为 approved");
 
 // 规则匹配：allowTool / denyTool + 参数模式
 $pm3 = new PermissionManager('manual');

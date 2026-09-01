@@ -2,6 +2,7 @@
 namespace Ai\Agent\Tools;
 
 use Ai\Agent\Tool\AgentToolInterface;
+use Ai\Agent\Tool\ParallelSafeToolInterface;
 use Ai\Agent\Tool\ToolContext;
 use Ai\Agent\Tool\ToolResult;
 
@@ -20,7 +21,7 @@ use Ai\Agent\Tool\ToolResult;
  * read_file(path: "src/User.php", offset: 100, limit: 50)
  * ```
  */
-class ReadFileTool implements AgentToolInterface
+class ReadFileTool implements AgentToolInterface, ParallelSafeToolInterface
 {
     /** @var PathSafety */
     protected $pathSafety;
@@ -41,6 +42,11 @@ class ReadFileTool implements AgentToolInterface
     public function name()
     {
         return 'read_file';
+    }
+
+    public function isParallelSafe()
+    {
+        return true;
     }
 
     public function description()

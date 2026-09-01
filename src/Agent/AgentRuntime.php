@@ -502,6 +502,14 @@ class AgentRuntime
     }
 
     /**
+     * @return AgentHooks|null
+     */
+    public function getHooks()
+    {
+        return $this->hooks;
+    }
+
+    /**
      * 注册 before_tool 钩子（快捷方式）
      *
      * @param callable $cb
@@ -666,6 +674,10 @@ class AgentRuntime
                 'task_id' => $this->taskId,
                 'goal'    => $this->getTaskGoal(),
             ]);
+            // task_start 钩子
+            if ($this->hooks && $this->hooks->hasTaskStart()) {
+                $this->hooks->triggerTaskStart($this->taskId, $this->getTaskGoal());
+            }
         }
 
         // 恢复会话状态（如果存在）
@@ -688,8 +700,17 @@ class AgentRuntime
         $streamWasOn = $this->ai->isStreaming();
         $this->ai->setStream($this->stream);
 
+        // agent_start 钩子
+        if ($this->hooks && $this->hooks->hasAgentStart()) {
+            $this->hooks->triggerAgentStart();
+        }
+
         try {
             $result = $this->loop->run($context);
+            // agent_stop 钩子
+            if ($this->hooks && $this->hooks->hasAgentStop()) {
+                $this->hooks->triggerAgentStop($result->getStopReason());
+            }
             // 自动保存会话（完整状态）
             if ($this->sessionManager && $this->sessionId) {
                 $store = $this->sessionManager->getStore();
@@ -775,10 +796,18 @@ class AgentRuntime
         }
         if ($result->isDone()) {
             $this->taskManager->complete($this->taskId);
+            // task_complete 钩子
+            if ($this->hooks && $this->hooks->hasTaskComplete()) {
+                $this->hooks->triggerTaskComplete($this->taskId, $result->getText());
+            }
         } elseif ($result->getStopReason() === StopReason::PERMISSION_DENIED) {
             $task->setStatus(TaskStatus::WAITING_PERMISSION);
         } elseif ($result->isError()) {
             $this->taskManager->fail($this->taskId);
+            // task_failed 钩子
+            if ($this->hooks && $this->hooks->hasTaskFailed()) {
+                $this->hooks->triggerTaskFailed($this->taskId, $result->getStopReason());
+            }
         }
     }
 

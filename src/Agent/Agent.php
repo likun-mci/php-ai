@@ -294,6 +294,141 @@ class Agent
     }
 
     /**
+     * 注册 tool_error 钩子
+     *
+     * @param callable $cb
+     * @return $this
+     */
+    public function onToolError($cb)
+    {
+        if ($this->runtime->getHooks() === null) {
+            $this->runtime->setHooks(new \Ai\Agent\Hooks\AgentHooks());
+        }
+        $this->runtime->getHooks()->onToolError($cb);
+        return $this;
+    }
+
+    /**
+     * 注册 after_tool_batch 钩子
+     *
+     * @param callable $cb
+     * @return $this
+     */
+    public function onAfterToolBatch($cb)
+    {
+        if ($this->runtime->getHooks() === null) {
+            $this->runtime->setHooks(new \Ai\Agent\Hooks\AgentHooks());
+        }
+        $this->runtime->getHooks()->onAfterToolBatch($cb);
+        return $this;
+    }
+
+    /**
+     * 注册 permission_request 钩子
+     *
+     * @param callable $cb
+     * @return $this
+     */
+    public function onPermissionRequest($cb)
+    {
+        if ($this->runtime->getHooks() === null) {
+            $this->runtime->setHooks(new \Ai\Agent\Hooks\AgentHooks());
+        }
+        $this->runtime->getHooks()->onPermissionRequest($cb);
+        return $this;
+    }
+
+    /**
+     * 注册 task_start 钩子
+     *
+     * @param callable $cb
+     * @return $this
+     */
+    public function onTaskStart($cb)
+    {
+        if ($this->runtime->getHooks() === null) {
+            $this->runtime->setHooks(new \Ai\Agent\Hooks\AgentHooks());
+        }
+        $this->runtime->getHooks()->onTaskStart($cb);
+        return $this;
+    }
+
+    /**
+     * 注册 task_complete 钩子
+     *
+     * @param callable $cb
+     * @return $this
+     */
+    public function onTaskComplete($cb)
+    {
+        if ($this->runtime->getHooks() === null) {
+            $this->runtime->setHooks(new \Ai\Agent\Hooks\AgentHooks());
+        }
+        $this->runtime->getHooks()->onTaskComplete($cb);
+        return $this;
+    }
+
+    /**
+     * 注册 subagent_start 钩子
+     *
+     * @param callable $cb
+     * @return $this
+     */
+    public function onSubagentStart($cb)
+    {
+        if ($this->runtime->getHooks() === null) {
+            $this->runtime->setHooks(new \Ai\Agent\Hooks\AgentHooks());
+        }
+        $this->runtime->getHooks()->onSubagentStart($cb);
+        return $this;
+    }
+
+    /**
+     * 注册 subagent_stop 钩子
+     *
+     * @param callable $cb
+     * @return $this
+     */
+    public function onSubagentStop($cb)
+    {
+        if ($this->runtime->getHooks() === null) {
+            $this->runtime->setHooks(new \Ai\Agent\Hooks\AgentHooks());
+        }
+        $this->runtime->getHooks()->onSubagentStop($cb);
+        return $this;
+    }
+
+    /**
+     * 注册 before_compact 钩子
+     *
+     * @param callable $cb
+     * @return $this
+     */
+    public function onBeforeCompact($cb)
+    {
+        if ($this->runtime->getHooks() === null) {
+            $this->runtime->setHooks(new \Ai\Agent\Hooks\AgentHooks());
+        }
+        $this->runtime->getHooks()->onBeforeCompact($cb);
+        return $this;
+    }
+
+    /**
+     * 注册 after_compact 钩子
+     *
+     * @param callable $cb
+     * @return $this
+     */
+    public function onAfterCompact($cb)
+    {
+        if ($this->runtime->getHooks() === null) {
+            $this->runtime->setHooks(new \Ai\Agent\Hooks\AgentHooks());
+        }
+        $this->runtime->getHooks()->onAfterCompact($cb);
+        return $this;
+    }
+
+    /**
      * 设置 Agent 标识（事件里带 agent_id 字段，便于前端区分）
      *
      * @param string $agentId

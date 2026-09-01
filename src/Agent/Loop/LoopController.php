@@ -314,12 +314,21 @@ class LoopController
                         'tokens'    => $cm->tokenCount(),
                         'messages'  => count($cm->messages()),
                     ]);
+                    // before_compact 钩子
+                    $hooks = $context->getHooks();
+                    if ($hooks && $hooks->hasBeforeCompact()) {
+                        $hooks->triggerBeforeCompact($cm->tokenCount(), count($cm->messages()));
+                    }
                     $summarizer = $this->makeSummarizer($ai);
                     $newMessages = $cm->compact($summarizer, $context->getSystem());
                     $context->setMessages($newMessages);
                     $context->emit('context_compact_done', [
                         'messages' => count($newMessages),
                     ]);
+                    // after_compact 钩子
+                    if ($hooks && $hooks->hasAfterCompact()) {
+                        $hooks->triggerAfterCompact(count($newMessages));
+                    }
                 }
             }
 
@@ -552,6 +561,12 @@ class LoopController
                         ];
                     }
                 }
+            }
+
+            // after_tool_batch 钩子（整批工具执行完成后、回填之前）
+            $hooks = $context->getHooks();
+            if ($hooks && $hooks->hasAfterToolBatch()) {
+                $results = $hooks->triggerAfterToolBatch($results);
             }
 
             // 结果级进展检测（Progress Guard）：工具结果连续相同 → 无进展

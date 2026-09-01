@@ -27,6 +27,9 @@ class SubAgentDefinition
     /** @var array<string, mixed> 额外配置 */
     protected $extra = [];
 
+    /** @var bool 是否后台运行（主 Agent 不等待） */
+    protected $background = false;
+
     /**
      * @param string $name
      * @param array<string, mixed> $config
@@ -41,8 +44,12 @@ class SubAgentDefinition
         }
         $this->tools = isset($config['tools']) && is_array($config['tools']) ? $config['tools'] : [];
         $this->maxIter = isset($config['max_iter']) ? (int) $config['max_iter'] : 25;
+        $this->background = !empty($config['background']);
         $this->extra = isset($config['extra']) && is_array($config['extra']) ? $config['extra'] : [];
     }
+
+    /** @return bool */
+    public function isBackground() { return $this->background; }
 
     /** @return string */
     public function getName() { return $this->name; }

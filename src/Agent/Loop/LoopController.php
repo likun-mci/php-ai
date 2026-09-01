@@ -3,6 +3,8 @@ namespace Ai\Agent\Loop;
 
 use Ai\Agent\AgentContext;
 use Ai\Agent\AgentResult;
+use Ai\Agent\Budget\BudgetManager;
+use Ai\Agent\Permission\PermissionResult;
 use Ai\Agent\Tool\ToolContext;
 use Ai\Agent\Tool\ToolExecutor;
 use Ai\Agent\Tool\ToolRegistry;
@@ -69,6 +71,58 @@ class LoopController
     }
 
     /**
+     * 创建一个摘要器闭包，用 AI 自身压缩历史消息
+     *
+     * @param \Ai\AI $ai
+     * @return callable
+     */
+    protected function makeSummarizer($ai)
+    {
+        return function (array $messages, $taskHint) use ($ai) {
+            $serialized = '';
+            foreach ($messages as $i => $m) {
+                $role = isset($m['role']) ? (string) $m['role'] : '';
+                $content = $m['content'] ?? '';
+                if (is_array($content)) {
+                    $parts = [];
+                    foreach ($content as $block) {
+                        if (is_array($block) && isset($block['text'])) {
+                            $parts[] = (string) $block['text'];
+                        } elseif (is_array($block) && isset($block['type'])) {
+                            $parts[] = '[' . $block['type'] . ']';
+                        }
+                    }
+                    $content = implode(' ', $parts);
+                }
+                $serialized .= $role . ': ' . mb_substr((string) $content, 0, 500) . "\n";
+                if ($i > 50) {
+                    $serialized .= "... (" . (count($messages) - 50) . " more messages)\n";
+                    break;
+                }
+            }
+
+            $system = '你是一个对话摘要器。将以下 Agent 对话历史压缩成简洁的摘要，'
+                . '保留：已完成的任务、关键发现、已修改的文件、当前状态。'
+                . '忽略：工具调用细节、错误堆栈、临时输出。'
+                . '用中文，控制在 500 字以内。';
+            if ($taskHint !== '') {
+                $system .= "\n\n任务背景：{$taskHint}";
+            }
+
+            try {
+                $resp = $ai->chat([
+                    'system'   => $system,
+                    'messages' => [['role' => 'user', 'content' => '请压缩以下对话历史：\n\n' . $serialized]],
+                    'max_tokens' => 1024,
+                ]);
+                return $resp->getContent();
+            } catch (\Throwable $e) {
+                return '';
+            }
+        };
+    }
+
+    /**
      * 运行主循环
      *
      * @param AgentContext $context
@@ -96,6 +150,24 @@ class LoopController
             $context->setIteration($iter + 1);
             $context->emit('thinking', ['iter' => $iter + 1]);
 
+            // 上下文压缩检查（Phase 4）
+            $cm = $context->getContextManager();
+            if ($cm) {
+                $cm->setMessages($context->getMessages());
+                if ($cm->shouldCompact()) {
+                    $context->emit('context_compact', [
+                        'tokens'    => $cm->tokenCount(),
+                        'messages'  => count($cm->messages()),
+                    ]);
+                    $summarizer = $this->makeSummarizer($ai);
+                    $newMessages = $cm->compact($summarizer, $context->getSystem());
+                    $context->setMessages($newMessages);
+                    $context->emit('context_compact_done', [
+                        'messages' => count($newMessages),
+                    ]);
+                }
+            }
+
             // 调用 AI 模型
             try {
                 $resp = $ai->chat([
@@ -113,6 +185,20 @@ class LoopController
 
             $text      = $resp->getContent();
             $toolCalls = $resp->getToolCalls();
+
+            // 预算检查（Phase 7）
+            $budget = $context->getBudget();
+            if ($budget) {
+                $budget->record($resp->getUsage());
+                if ($budget->exceeded()) {
+                    $summary = $budget->summary();
+                    $context->emit('error', ['message' => $summary['reason']]);
+                    return AgentResult::stopped(StopReason::BUDGET_EXCEEDED, $text, [
+                        'iterations' => $iter + 1,
+                        'budget'     => $summary,
+                    ]);
+                }
+            }
 
             // 记录 assistant 回合
             $context->appendAssistant($resp);
@@ -144,12 +230,33 @@ class LoopController
                 if ($this->guard) {
                     $guardCheck = $this->guard->check($name, $input);
                     if (!$guardCheck['ok']) {
-                        // 无进展：给模型一个内部提示，停止当前循环
                         $context->emit('error', ['message' => '模型重复调用同一工具，已停止']);
                         return AgentResult::stopped(StopReason::NO_PROGRESS, $text, [
                             'iterations' => $iter + 1,
                             'hint'       => $this->guard->getHint(),
                         ]);
+                    }
+                }
+
+                // 权限检查
+                $perm = $context->getPermission();
+                if ($perm) {
+                    $toolObj = $registry->get($name);
+                    if ($toolObj) {
+                        $permResult = $perm->check($toolObj, $input, $toolContext);
+                        if ($permResult->isDenied()) {
+                            $context->emit('tool_error', ['name' => $name, 'message' => $permResult->getReason()]);
+                            $results[] = [
+                                'type'        => 'tool_result',
+                                'tool_use_id' => isset($call['id']) ? (string) $call['id'] : '',
+                                'content'     => 'ERROR: Permission denied — ' . $permResult->getReason(),
+                                'is_error'    => true,
+                            ];
+                            continue;
+                        }
+                        if ($permResult->needsAsk()) {
+                            $context->emit('tool_permission', ['name' => $name, 'input' => $input, 'prompt' => $permResult->getReason()]);
+                        }
                     }
                 }
 

@@ -2,6 +2,9 @@
 namespace Ai\Agent;
 
 use Ai\AI;
+use Ai\Agent\Budget\BudgetManager;
+use Ai\Agent\Context\ContextManager;
+use Ai\Agent\Permission\PermissionManager;
 use Ai\Agent\Tool\ToolRegistry;
 
 /**
@@ -39,6 +42,15 @@ class AgentContext
     /** @var bool */
     protected $stopped = false;
 
+    /** @var PermissionManager|null */
+    protected $permission = null;
+
+    /** @var ContextManager|null */
+    protected $contextManager = null;
+
+    /** @var BudgetManager|null */
+    protected $budget = null;
+
     /**
      * @param AI $ai
      * @param ToolRegistry $toolRegistry
@@ -49,6 +61,66 @@ class AgentContext
         $this->ai = $ai;
         $this->toolRegistry = $toolRegistry;
         $this->emit = is_callable($emit) ? $emit : null;
+    }
+
+    /* ---------- 预算管理 ---------- */
+
+    /**
+     * @param BudgetManager $bm
+     * @return $this
+     */
+    public function setBudget($bm)
+    {
+        $this->budget = $bm;
+        return $this;
+    }
+
+    /**
+     * @return BudgetManager|null
+     */
+    public function getBudget()
+    {
+        return $this->budget;
+    }
+
+    /* ---------- 上下文管理 ---------- */
+
+    /**
+     * @param ContextManager $cm
+     * @return $this
+     */
+    public function setContextManager($cm)
+    {
+        $this->contextManager = $cm;
+        return $this;
+    }
+
+    /**
+     * @return ContextManager|null
+     */
+    public function getContextManager()
+    {
+        return $this->contextManager;
+    }
+
+    /* ---------- 权限管理 ---------- */
+
+    /**
+     * @param PermissionManager $pm
+     * @return $this
+     */
+    public function setPermission($pm)
+    {
+        $this->permission = $pm;
+        return $this;
+    }
+
+    /**
+     * @return PermissionManager|null
+     */
+    public function getPermission()
+    {
+        return $this->permission;
     }
 
     /* ---------- 消息管理 ---------- */

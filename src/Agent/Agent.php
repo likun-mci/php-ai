@@ -122,6 +122,67 @@ class Agent
     }
 
     /**
+     * 设置权限模式
+     *
+     * @param string $mode manual|auto|plan|accept_edits|dont_ask|bypass
+     * @return $this
+     */
+    public function setPermissionMode($mode)
+    {
+        $this->runtime->setPermissionMode($mode);
+        return $this;
+    }
+
+    /**
+     * 设置会话 ID（启用会话持久化时需要）
+     *
+     * @param string $id
+     * @return $this
+     */
+    public function setSessionId($id)
+    {
+        $this->runtime->setSessionId($id);
+        return $this;
+    }
+
+    /**
+     * 设置会话管理器（启用持久化）
+     *
+     * @param \Ai\Agent\Session\SessionManager $sm
+     * @return $this
+     */
+    public function setSessionManager($sm)
+    {
+        $this->runtime->setSessionManager($sm);
+        return $this;
+    }
+
+    /**
+     * 设置预算上限
+     *
+     * @param float $maxBudget 美元
+     * @param array<string, mixed> $pricing 价格表
+     * @return $this
+     */
+    public function setMaxBudget($maxBudget, array $pricing = [])
+    {
+        $this->runtime->setMaxBudget($maxBudget, $pricing);
+        return $this;
+    }
+
+    /**
+     * 设置降级模型
+     *
+     * @param string[] $models
+     * @return $this
+     */
+    public function setFallbackModels(array $models)
+    {
+        $this->runtime->setFallbackModels($models);
+        return $this;
+    }
+
+    /**
      * @return string
      */
     public function lastText()

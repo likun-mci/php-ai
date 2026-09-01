@@ -543,6 +543,38 @@ class Agent
     }
 
     /**
+     * 设置指令管理器
+     *
+     * @param \Ai\Agent\Instruction\InstructionManager $im
+     * @return $this
+     */
+    public function setInstructionManager($im)
+    {
+        $this->runtime->setInstructionManager($im);
+        return $this;
+    }
+
+    /**
+     * 从目录加载项目指令
+     *
+     * 快捷方式：创建 InstructionManager，从指定目录加载 CLAUDE.md / AGENTS.md，
+     * 注入到 Runtime。
+     *
+     * @param string|string[] $dirs 目录路径（单个或多个，优先级递增）
+     * @return $this
+     */
+    public function loadInstructions($dirs)
+    {
+        $im = new \Ai\Agent\Instruction\InstructionManager();
+        $list = is_array($dirs) ? $dirs : [(string) $dirs];
+        foreach ($list as $dir) {
+            $im->loadFromTree((string) $dir);
+        }
+        $this->runtime->setInstructionManager($im);
+        return $this;
+    }
+
+    /**
      * 回答用户问题并恢复 Agent 执行
      *
      * @param string $questionId

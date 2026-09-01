@@ -366,6 +366,14 @@ class LoopController
                             $systemPrompt .= "\n\n<skills>\n{$skillPrompt}\n</skills>";
                         }
                     }
+                    // 项目指令注入（CLAUDE.md / AGENTS.md）
+                    $im = $context->getInstructionManager();
+                    if ($im && $im->isEnabled()) {
+                        $instPrompt = $im->toSystemPrompt();
+                        if ($instPrompt !== '') {
+                            $systemPrompt .= "\n\n" . $instPrompt;
+                        }
+                    }
                     $modelParams = [
                         'system'   => $systemPrompt,
                         'messages' => $context->getMessages(),

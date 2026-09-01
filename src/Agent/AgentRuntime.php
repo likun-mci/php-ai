@@ -17,6 +17,7 @@ use Ai\Agent\Tool\ToolRegistry;
 use Ai\Agent\Verification\VerificationManager;
 use Ai\Agent\Workspace\WorkspaceManager;
 use Ai\Agent\Skill\SkillManager;
+use Ai\Agent\Instruction\InstructionManager;
 
 /**
  * Agent Runtime——执行引擎
@@ -102,6 +103,9 @@ class AgentRuntime
 
     /** @var SkillManager|null */
     protected $skillManager = null;
+
+    /** @var InstructionManager|null */
+    protected $instruction = null;
 
     /**
      * @param AI $ai
@@ -559,6 +563,26 @@ class AgentRuntime
     }
 
     /**
+     * 设置指令管理器
+     *
+     * @param InstructionManager|null $im
+     * @return $this
+     */
+    public function setInstructionManager($im)
+    {
+        $this->instruction = $im;
+        return $this;
+    }
+
+    /**
+     * @return InstructionManager|null
+     */
+    public function getInstructionManager()
+    {
+        return $this->instruction;
+    }
+
+    /**
      * 回答用户问题并恢复 Agent 执行
      *
      * @param string $questionId
@@ -753,6 +777,7 @@ class AgentRuntime
         $context->setVerificationManager($this->verification);
         $context->setWorkspaceManager($this->workspace);
         $context->setSkillManager($this->skillManager);
+        $context->setInstructionManager($this->instruction);
         return $context;
     }
 

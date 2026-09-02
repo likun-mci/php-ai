@@ -1003,6 +1003,10 @@ class AgentRuntime
 
             return $result;
         } catch (\Throwable $e) {
+            // 崩溃时保存检查点（最后一次 checkpoint 已由 LoopController 每轮保存）
+            // 供 recover() 恢复用
+            $this->saveCrashCheckpoint($context);
+
             if ($this->sessionManager && $this->sessionId) {
                 $this->sessionManager->interrupt($this->sessionId);
             }
@@ -1018,6 +1022,61 @@ class AgentRuntime
         } finally {
             $this->ai->setStream($streamWasOn);
         }
+    }
+
+    /**
+     * 崩溃时保存检查点
+     *
+     * @param AgentContext $context
+     * @return void
+     */
+    protected function saveCrashCheckpoint(AgentContext $context)
+    {
+        if ($this->checkpointManager === null || !$this->checkpointManager->isEnabled()) {
+            return;
+        }
+        $cpId = $this->taskId !== null ? $this->taskId : $this->sessionId;
+        if ($cpId === null) {
+            return;
+        }
+        $this->checkpointManager->save(
+            $cpId,
+            $context->getIteration(),
+            $context->getMessages(),
+            ['crash_recovery' => true, 'error' => 'crash before save']
+        );
+    }
+
+    /**
+     * 从崩溃中恢复——加载最新检查点，恢复消息上下文
+     *
+     * 恢复流程：
+     *   1. 从 CheckpointManager 加载最新检查点
+     *   2. 恢复消息历史
+     *   3. 恢复迭代计数
+     *   4. 返回恢复后的消息数组，供 run() 继续执行
+     *
+     * @param string $taskId 任务 ID 与会话 ID
+     * @return array<int, array<string, mixed>>|null 恢复后的消息，无法恢复时返回 null
+     */
+    public function recover($taskId)
+    {
+        if ($this->checkpointManager === null || !$this->checkpointManager->isEnabled()) {
+            return null;
+        }
+
+        $latest = $this->checkpointManager->loadLatest((string) $taskId);
+        if ($latest === null) {
+            return null;
+        }
+
+        // 设置迭代计数到 LoopController
+        $this->loop->setMaxIter(max($this->loop->getMaxIter(), $latest->getIteration() + 25));
+
+        // 设置任务 ID
+        $this->taskId = (string) $taskId;
+
+        return $latest->getMessages();
     }
 
     /**

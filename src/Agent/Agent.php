@@ -655,6 +655,26 @@ class Agent
     }
 
     /**
+     * 从崩溃中恢复——加载最新检查点，继续执行
+     *
+     * 用法：
+     * ```php
+     * $agent->setCheckpointDir('/tmp/checkpoints');
+     * $messages = $agent->recoverFromCrash('task_1');
+     * if ($messages !== null) {
+     *     $result = $agent->run($messages);
+     * }
+     * ```
+     *
+     * @param string $taskId 任务 ID
+     * @return array<int, array<string, mixed>>|null 恢复后的消息，无可恢复的检查点时返回 null
+     */
+    public function recoverFromCrash($taskId)
+    {
+        return $this->runtime->recover((string) $taskId);
+    }
+
+    /**
      * 回答用户问题并恢复 Agent 执行
      *
      * @param string $questionId

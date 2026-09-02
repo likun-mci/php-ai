@@ -1873,6 +1873,260 @@ $agent->setFallbackModels(['claude-sonnet', 'claude-haiku']);
 
 降级发生后会发出 `model_fallback` 事件，包含当前使用的模型名与原始错误信息。所有降级模型均失败后，Agent 才以 `MODEL_ERROR` 停止。
 
+### 验证管理（VerificationManager）
+
+工具执行后自动运行验证命令（如 `php -l`），确保代码改动真实可用，而不是让模型"记得自己测试"。验证失败的错误信息会回填给模型，让它自行修复。
+
+```php
+$agent->setVerification([
+    'edit_file'  => ['php -l {file}'],
+    'write_file' => ['php -l {file}'],
+    'test'       => ['vendor/bin/phpunit'],
+]);
+```
+
+验证策略按工具名配置，支持多条命令；命令中的 `{file}` 占位符会替换为工具输入里的 `file_path`。验证通过 `exec()` 同步执行，退出码 0 视为通过，非 0 的错误输出回填给模型。
+
+单独使用 `VerificationManager`：
+
+```php
+use Ai\Agent\Verification\VerificationManager;
+
+$vm = new VerificationManager([
+    'edit_file' => ['php -l {file}'],
+]);
+$results = $vm->verify('edit_file', ['file_path' => 'src/Auth.php']);
+// $results[0]->isPassed()  => true / false
+// $results[0]->getError()  => 错误信息
+```
+
+### 工作区管理（WorkspaceManager）
+
+跟踪 Agent 当前工作区的 Git 状态，让模型了解 cwd、分支、已修改文件等。状态按需刷新（默认 5 秒缓存），不会每轮都跑 git 命令。
+
+```php
+$agent->setWorkspaceDir('/var/www/project');
+
+// 或手动创建
+use Ai\Agent\Workspace\WorkspaceManager;
+
+$wm = new WorkspaceManager('/var/www/project');
+$wm->refresh();
+echo $wm->getBranch();        // 'main'
+echo $wm->getProjectName();   // 'project'
+print_r($wm->getModified());  // ['src/Auth.php']
+```
+
+工作区状态被格式化为 `<workspace>` 块，在每次迭代时自动注入系统提示词，让模型知道当前工作目录、分支、已修改文件等上下文。
+
+**注意**：`setWorkdir()` 也会自动创建 `WorkspaceManager`（如果未显式设置），因此已有的 `setWorkdir()` 调用会自动获得工作区状态跟踪能力。
+
+### 技能系统（Skills）
+
+技能（Skill）是某项能力或工作流程的详细指令，按目录组织。默认只把「名称 + 描述」注入系统提示词（节省 Context），模型需要时通过 `use_skill` 工具加载完整正文。
+
+```php
+$agent->loadSkills('/path/to/skills');
+
+// 或手动创建
+use Ai\Agent\Skill\SkillManager;
+
+$sm = new SkillManager();
+$sm->register('deploy', [
+    'description'  => '部署项目到生产环境',
+    'content'      => "# 部署流程\n1. 构建...",
+    'allowedTools' => ['Bash(git *)'],
+]);
+$agent->setSkillManager($sm);
+```
+
+#### SKILL.md 目录格式
+
+Skills 目录约定为 `{dir}/{skill-name}/SKILL.md`，支持 frontmatter：
+
+```markdown
+---
+name: deploy
+description: 部署项目到生产环境
+allowed-tools:
+  - Bash(git *)
+  - Bash(docker *)
+---
+# 部署流程
+
+1. 执行构建
+2. 上传到服务器
+3. 重启服务
+```
+
+`use_skill` 工具被自动注册到 Agent 工具注册表，模型调用后加载完整技能正文，同时收集 `allowed-tools` 中的工具限制（不能突破全局权限）。
+
+### 项目指令（InstructionManager）
+
+加载项目级指令文件（CLAUDE.md / AGENTS.md），这些是项目必须遵守的长期规则，与 Skill 不同：
+
+- **CLAUDE.md / AGENTS.md** = 项目必须遵守的长期规则
+- **Skill** = 某项能力 / 工作流程
+- **Tool** = 实际执行动作
+
+```php
+$agent->loadInstructions('/var/www/project');
+
+// 或手动创建
+use Ai\Agent\Instruction\InstructionManager;
+
+$im = new InstructionManager();
+$im->loadFromTree('/var/www/project');         // 加载 .claude/ .ai/ 根目录的指令
+$im->loadFromDir('/var/www/project/src');      // 子目录级指令（优先级更高）
+$agent->setInstructionManager($im);
+```
+
+加载优先级（后加载的优先级更高）：Global → Project → Subdirectory → Task。指令内容被格式化为 `<instructions>` 块注入系统提示词。
+
+```php
+// 自定义文件名
+$im->setFilenames(['CLAUDE.md', 'AGENTS.md', '.ai/AGENTS.md']);
+```
+
+### MCP Runtime（McpManager）
+
+MCP（Model Context Protocol）服务器管理，通过 stdio 子进程运行 MCP 服务器，将 MCP 工具自动注册到 Agent 工具注册表。
+
+```php
+$agent->setMcpServers([
+    'filesystem' => [
+        'command' => 'npx',
+        'args'    => ['-y', '@modelcontextprotocol/server-fs', '/tmp'],
+    ],
+]);
+
+// 或手动创建
+use Ai\Agent\Mcp\McpManager;
+
+$mm = new McpManager();
+$mm->addServer('filesystem', 'npx', [
+    '-y', '@modelcontextprotocol/server-fs', '/tmp',
+]);
+$agent->setMcpManager($mm);
+```
+
+每个 MCP 服务器通过独立的子进程运行，通过 JSON-RPC 2.0 over stdio 通信。工具名格式为 `{serverName}__{toolName}`，避免不同服务器间的工具名冲突。
+
+```php
+// 批量配置
+$mm->addServers([
+    'fs'   => ['command' => 'npx', 'args' => ['-y', '@modelcontextprotocol/server-fs', '/tmp']],
+    'db'   => ['command' => 'npx', 'args' => ['-y', '@modelcontextprotocol/server-sqlite', './data']],
+]);
+
+// 关闭所有 MCP 服务器
+$mm->shutdown();
+```
+
+### 作用域记忆（MemoryManager）
+
+分作用域的长期记忆管理，支持 `user` / `project` / `session` / `task` / `agent` 五个作用域，各有独立的记忆文件。注入系统提示词时按作用域顺序合并，让模型感知不同层级的记忆上下文。
+
+```php
+$agent->setMemoryDir('/tmp/agent_memory');
+
+// 或手动创建
+use Ai\Agent\Memory\MemoryManager;
+
+$mm = new MemoryManager('/tmp/agent_memory');
+$mm->remember('user', '用户喜欢 PHP');
+$mm->remember('project', '项目使用 CodeIgniter 3');
+$mm->remember('session', '当前正在修登录');
+$mm->remember('task', '正在修改 Auth.php');
+$mm->remember('agent', '上次尝试方案 A 失败');
+$agent->setMemoryManager($mm);
+```
+
+记忆文件持久化在 `{baseDir}/{scope}.md`，支持追加、覆盖、清空、读取：
+
+```php
+$mm->read('user');        // 读取
+$mm->write('user', '仅此一条');  // 覆盖
+$mm->forget('user');      // 清空
+$mm->clearAll();          // 清空全部作用域
+$mm->forPrompt();         // 生成注入系统提示词的 <memory> 块
+```
+
+### 检查点（CheckpointManager）
+
+每轮迭代结束时自动保存检查点（Checkpoint），Runtime 崩溃后可从最新检查点恢复。每个检查点以 JSON 文件持久化，按任务 ID 分组。
+
+```php
+$agent->setCheckpointDir('/tmp/checkpoints');
+
+// 或手动创建
+use Ai\Agent\Checkpoint\CheckpointManager;
+
+$cm = new CheckpointManager('/tmp/checkpoints');
+$cm->save('task_1', 5, $messages, ['extra' => 'data']);
+$latest = $cm->loadLatest('task_1');
+echo $latest->getIteration();  // 5
+```
+
+默认保留最近 5 个检查点，超出的旧检查点自动清理。支持过期清理：
+
+```php
+// 自定义保留数
+$cm = new CheckpointManager('/tmp/checkpoints', [
+    'maxCheckpoints' => 10,
+]);
+
+// 清理超过 7 天的检查点
+$cm->cleanExpired('task_1', 7);
+```
+
+### 崩溃恢复（Crash Recovery）
+
+从崩溃中恢复——加载最新检查点，恢复消息上下文，继续执行。
+
+```php
+$agent->setCheckpointDir('/tmp/checkpoints');
+
+$messages = $agent->recoverFromCrash('task_1');
+if ($messages !== null) {
+    // 恢复成功，继续执行
+    $result = $agent->run($messages);
+} else {
+    // 无可用检查点，从头开始
+    $agent->run([['role' => 'user', 'content' => '请检查项目']]);
+}
+```
+
+`recoverFromCrash()` 内部调用 `AgentRuntime::recover()`，自动加载最新检查点、恢复迭代计数、设置任务 ID。异常时也会自动保存崩溃时的检查点，防止数据丢失。
+
+### 任务队列（AgentQueue）
+
+将任务（Task）+ 运行时（AgentRuntime）按入队顺序排队执行，适用于 PHP-FPM 下需要后台执行的场景。
+
+```php
+use Ai\Agent\Queue\AgentQueue;
+
+$queue = new AgentQueue();
+$task = $queue->dispatch('检查并修复项目', $runtime, $messages, 'sess_1');
+
+// 逐个处理待执行任务
+while ($queue->hasPending()) {
+    $result = $queue->processNext();
+    // $result->getText() 获取最终回复
+}
+
+// 或处理指定任务
+$result = $queue->process('task_xxx');
+
+// 任务控制
+$queue->cancel('task_xxx');    // 取消
+$queue->resume('task_xxx');    // 恢复暂停的任务
+
+echo $task->getStatus();  // queued / running / completed / failed / cancelled
+```
+
+`AgentQueue` 内部使用 `TaskManager` 管理任务生命周期，自动创建或复用外部传入的 `TaskManager`。
+
 ### 用户交互（AskUser）
 
 当任务描述不明确、存在多个合理执行方案或涉及关键选择时，Agent 可以向用户提问，而不是自行猜测。这与 Permission 有本质区别：
@@ -2112,6 +2366,13 @@ Agent（对外 API）
   ├── setFallbackModels() / setToolTimeout()
   ├── setTaskManager() / setTaskId()                   ← 任务系统
   ├── setUserInteractionManager()                      ← 用户交互
+  ├── setVerification()                                ← 验证管理
+  ├── setWorkspaceDir()                                ← 工作区管理
+  ├── loadSkills() / setSkillManager()                 ← 技能系统
+  ├── loadInstructions() / setInstructionManager()     ← 项目指令
+  ├── setMcpServers() / setMcpManager()                ← MCP Runtime
+  ├── setMemoryDir() / setMemoryManager()              ← 作用域记忆
+  ├── setCheckpointDir() / recoverFromCrash()          ← 检查点 / 崩溃恢复
   ├── approve() / deny()                              ← 用户授权
   ├── answerUser()                                    ← 回答用户提问
   ├── onBeforeTool() / onAfterTool()                  ← 工具钩子
@@ -2131,6 +2392,13 @@ Agent（对外 API）
         ├── ContextManager（上下文管理器）               ← Turn-aware 自动压缩
         ├── SessionManager（会话管理器）                 ← 持久化 / 暂停 / 恢复
         ├── BudgetManager（预算管理器）                  ← token / 成本控制
+        ├── VerificationManager（验证管理器）            ← 工具执行后自动验证
+        ├── WorkspaceManager（工作区管理器）             ← Git 状态跟踪
+        ├── SkillManager（技能管理器）                   ← 技能目录 + use_skill 工具
+        ├── InstructionManager（项目指令管理器）          ← CLAUDE.md / AGENTS.md
+        ├── McpManager（MCP 管理器）                    ← stdio JSON-RPC 工具
+        ├── MemoryManager（记忆管理器）                  ← 分作用域长期记忆
+        ├── CheckpointManager（检查点管理器）            ← 每轮 checkpoint 自动保存
         ├── SubAgentManager（子 Agent 管理器）           ← spawn_agent 工具
         ├── TaskManager（任务管理器）                   ← 任务生命周期（AgentTask / TaskState）
         ├── UserInteractionManager（用户交互管理器）      ← ask_user 工具

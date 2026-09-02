@@ -1861,6 +1861,260 @@ $agent->setFallbackModels(['claude-sonnet', 'claude-haiku']);
 
 A `model_fallback` event is emitted whenever a fallback is triggered, including the model name and the original error message. If all fallback models also fail, the Agent stops with `MODEL_ERROR`.
 
+### Verification management (VerificationManager)
+
+Automatically run verification commands (such as `php -l`) after a tool executes, so code changes are validated without relying on the model to "remember to test itself". Verification failures are fed back to the model so it can fix them.
+
+```php
+$agent->setVerification([
+    'edit_file'  => ['php -l {file}'],
+    'write_file' => ['php -l {file}'],
+    'test'       => ['vendor/bin/phpunit'],
+]);
+```
+
+Verification rules are configured per tool name, supporting multiple commands. The `{file}` placeholder is replaced with the tool input's `file_path`. Commands run synchronously via `exec()`, exit code 0 means pass, non-zero output is fed back to the model.
+
+Standalone usage:
+
+```php
+use Ai\Agent\Verification\VerificationManager;
+
+$vm = new VerificationManager([
+    'edit_file' => ['php -l {file}'],
+]);
+$results = $vm->verify('edit_file', ['file_path' => 'src/Auth.php']);
+// $results[0]->isPassed()  => true / false
+// $results[0]->getError()  => error message
+```
+
+### Workspace management (WorkspaceManager)
+
+Tracks the Agent's working directory Git status so the model knows cwd, branch, modified files, and more. The state is refreshed on demand (5-second cache by default) instead of running git commands every turn.
+
+```php
+$agent->setWorkspaceDir('/var/www/project');
+
+// Or manually
+use Ai\Agent\Workspace\WorkspaceManager;
+
+$wm = new WorkspaceManager('/var/www/project');
+$wm->refresh();
+echo $wm->getBranch();        // 'main'
+echo $wm->getProjectName();   // 'project'
+print_r($wm->getModified());  // ['src/Auth.php']
+```
+
+The workspace state is formatted as a `<workspace>` block and injected into the system prompt each iteration, so the model always knows the current working directory, branch, and modified files.
+
+**Note**: `setWorkdir()` also creates a `WorkspaceManager` automatically (if one is not explicitly set), so existing `setWorkdir()` calls gain workspace state tracking for free.
+
+### Skills (SkillManager)
+
+A Skill is a set of detailed instructions for a capability or workflow, organised by directory. Only the "name + description" is injected into the system prompt (saving context), and the model loads the full content via the `use_skill` tool when needed.
+
+```php
+$agent->loadSkills('/path/to/skills');
+
+// Or manually
+use Ai\Agent\Skill\SkillManager;
+
+$sm = new SkillManager();
+$sm->register('deploy', [
+    'description'  => 'Deploy to production',
+    'content'      => "# Deployment\n1. Build...",
+    'allowedTools' => ['Bash(git *)'],
+]);
+$agent->setSkillManager($sm);
+```
+
+#### SKILL.md directory format
+
+Skills directory convention: `{dir}/{skill-name}/SKILL.md`, with frontmatter support:
+
+```markdown
+---
+name: deploy
+description: Deploy to production
+allowed-tools:
+  - Bash(git *)
+  - Bash(docker *)
+---
+# Deployment
+
+1. Build
+2. Upload to server
+3. Restart service
+```
+
+The `use_skill` tool is automatically registered in the Agent's tool registry. When the model calls it, the full skill content is loaded and any `allowed-tools` restrictions are collected (these cannot break through global permissions).
+
+### Project instructions (InstructionManager)
+
+Loads project-level instruction files (CLAUDE.md / AGENTS.md). These are long-term rules the project must follow, distinct from Skills:
+
+- **CLAUDE.md / AGENTS.md** = long-term project rules
+- **Skill** = capability / workflow instructions
+- **Tool** = actual action execution
+
+```php
+$agent->loadInstructions('/var/www/project');
+
+// Or manually
+use Ai\Agent\Instruction\InstructionManager;
+
+$im = new InstructionManager();
+$im->loadFromTree('/var/www/project');         // loads .claude/ .ai/ and root directory
+$im->loadFromDir('/var/www/project/src');      // subdirectory instructions (higher priority)
+$agent->setInstructionManager($im);
+```
+
+Load priority (later loads take precedence): Global → Project → Subdirectory → Task. Instructions are formatted as `<instructions>` blocks and injected into the system prompt.
+
+```php
+// Custom filenames
+$im->setFilenames(['CLAUDE.md', 'AGENTS.md', '.ai/AGENTS.md']);
+```
+
+### MCP Runtime (McpManager)
+
+MCP (Model Context Protocol) server management. Runs MCP servers as stdio subprocesses and automatically registers their tools into the Agent's tool registry.
+
+```php
+$agent->setMcpServers([
+    'filesystem' => [
+        'command' => 'npx',
+        'args'    => ['-y', '@modelcontextprotocol/server-fs', '/tmp'],
+    ],
+]);
+
+// Or manually
+use Ai\Agent\Mcp\McpManager;
+
+$mm = new McpManager();
+$mm->addServer('filesystem', 'npx', [
+    '-y', '@modelcontextprotocol/server-fs', '/tmp',
+]);
+$agent->setMcpManager($mm);
+```
+
+Each MCP server runs as an independent subprocess communicating via JSON-RPC 2.0 over stdio. Tool names are formatted as `{serverName}__{toolName}` to avoid conflicts between servers.
+
+```php
+// Batch configuration
+$mm->addServers([
+    'fs'   => ['command' => 'npx', 'args' => ['-y', '@modelcontextprotocol/server-fs', '/tmp']],
+    'db'   => ['command' => 'npx', 'args' => ['-y', '@modelcontextprotocol/server-sqlite', './data']],
+]);
+
+// Shut down all MCP servers
+$mm->shutdown();
+```
+
+### Scoped memory (MemoryManager)
+
+Scope-based long-term memory management supporting five scopes: `user` / `project` / `session` / `task` / `agent`, each with its own memory file. When injected into the system prompt, memories are merged in scope order so the model perceives different levels of memory context.
+
+```php
+$agent->setMemoryDir('/tmp/agent_memory');
+
+// Or manually
+use Ai\Agent\Memory\MemoryManager;
+
+$mm = new MemoryManager('/tmp/agent_memory');
+$mm->remember('user', 'The user prefers PHP');
+$mm->remember('project', 'The project uses CodeIgniter 3');
+$mm->remember('session', 'Currently fixing the login issue');
+$mm->remember('task', 'Working on Auth.php');
+$mm->remember('agent', 'Last attempt with plan A failed');
+$agent->setMemoryManager($mm);
+```
+
+Memory files are persisted at `{baseDir}/{scope}.md`, supporting append, overwrite, clear, and read:
+
+```php
+$mm->read('user');          // read
+$mm->write('user', 'single entry');  // overwrite
+$mm->forget('user');        // clear
+$mm->clearAll();            // clear all scopes
+$mm->forPrompt();           // generate <memory> block for system prompt
+```
+
+### Checkpoint (CheckpointManager)
+
+Automatically saves a checkpoint at the end of each iteration. If the Runtime crashes, it can resume from the latest checkpoint. Each checkpoint is persisted as a JSON file, grouped by task ID.
+
+```php
+$agent->setCheckpointDir('/tmp/checkpoints');
+
+// Or manually
+use Ai\Agent\Checkpoint\CheckpointManager;
+
+$cm = new CheckpointManager('/tmp/checkpoints');
+$cm->save('task_1', 5, $messages, ['extra' => 'data']);
+$latest = $cm->loadLatest('task_1');
+echo $latest->getIteration();  // 5
+```
+
+Keeps the most recent 5 checkpoints by default; older ones are cleaned up automatically. Also supports expiry-based cleanup:
+
+```php
+// Custom retention
+$cm = new CheckpointManager('/tmp/checkpoints', [
+    'maxCheckpoints' => 10,
+]);
+
+// Clean checkpoints older than 7 days
+$cm->cleanExpired('task_1', 7);
+```
+
+### Crash recovery
+
+Recover from a crash by loading the latest checkpoint, restoring the message context, and continuing execution.
+
+```php
+$agent->setCheckpointDir('/tmp/checkpoints');
+
+$messages = $agent->recoverFromCrash('task_1');
+if ($messages !== null) {
+    // Recovery succeeded, continue
+    $result = $agent->run($messages);
+} else {
+    // No checkpoint available, start fresh
+    $agent->run([['role' => 'user', 'content' => 'Please check the project']]);
+}
+```
+
+`recoverFromCrash()` internally calls `AgentRuntime::recover()`, which loads the latest checkpoint, restores the iteration count, and sets the task ID. A crash checkpoint is also saved automatically when an exception occurs.
+
+### Task queue (AgentQueue)
+
+Enqueues tasks (Task) with runtimes (AgentRuntime) in FIFO order for sequential processing. Useful for background execution in PHP-FPM environments.
+
+```php
+use Ai\Agent\Queue\AgentQueue;
+
+$queue = new AgentQueue();
+$task = $queue->dispatch('Check and fix the project', $runtime, $messages, 'sess_1');
+
+// Process pending tasks one by one
+while ($queue->hasPending()) {
+    $result = $queue->processNext();
+    // $result->getText() gets the final reply
+}
+
+// Or process a specific task
+$result = $queue->process('task_xxx');
+
+// Task control
+$queue->cancel('task_xxx');    // cancel
+$queue->resume('task_xxx');    // resume a paused task
+
+echo $task->getStatus();  // queued / running / completed / failed / cancelled
+```
+
+`AgentQueue` uses `TaskManager` internally for task lifecycle management, creating one automatically or reusing an externally provided one.
+
 ### User interaction (AskUser)
 
 When a task description is ambiguous, multiple approaches are reasonable, or a key decision is needed, the Agent can ask the user a question instead of guessing. This is fundamentally different from Permission:
@@ -2099,6 +2353,13 @@ Agent (public API)
   ├── setFallbackModels() / setToolTimeout()
   ├── setTaskManager() / setTaskId()                    ← task system
   ├── setUserInteractionManager()                      ← user interaction
+  ├── setVerification()                                ← verification management
+  ├── setWorkspaceDir()                                ← workspace management
+  ├── loadSkills() / setSkillManager()                 ← skills
+  ├── loadInstructions() / setInstructionManager()     ← project instructions
+  ├── setMcpServers() / setMcpManager()                ← MCP runtime
+  ├── setMemoryDir() / setMemoryManager()              ← scoped memory
+  ├── setCheckpointDir() / recoverFromCrash()          ← checkpoint / crash recovery
   ├── approve() / deny()                              ← user approval
   ├── answerUser()                                    ← answer user questions
   ├── onBeforeTool() / onAfterTool()                  ← tool hooks
@@ -2118,6 +2379,13 @@ Agent (public API)
         ├── ContextManager (context manager)            ← turn-aware compaction
         ├── SessionManager (session manager)            ← persistence / pause / resume
         ├── BudgetManager (budget manager)              ← token / cost control
+        ├── VerificationManager (verification manager)  ← auto-verify after tool execution
+        ├── WorkspaceManager (workspace manager)        ← git status tracking
+        ├── SkillManager (skill manager)                ← skill directory + use_skill tool
+        ├── InstructionManager (instruction manager)    ← CLAUDE.md / AGENTS.md
+        ├── McpManager (MCP manager)                    ← stdio JSON-RPC tools
+        ├── MemoryManager (memory manager)              ← scoped long-term memory
+        ├── CheckpointManager (checkpoint manager)       ← per-iteration checkpoint auto-save
         ├── SubAgentManager (sub-agent manager)         ← spawn_agent tool
         ├── TaskManager (task manager)                 ← task lifecycle (AgentTask / TaskState)
         ├── UserInteractionManager (user interaction)  ← ask_user tool

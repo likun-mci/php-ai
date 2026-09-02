@@ -39,6 +39,18 @@ use Ai\AI;
  * // 获取 spawn_agent 工具定义（主 Agent 注册用）
  * $tools['spawn_agent'] = $sam->getToolDef();
  * ```
+ *
+ * 多平台（P0-6）：
+ *   每个子 Agent 可以挂在不同平台的接口上——coder 用 DeepSeek、reviewer 用 Kimi、
+ *   planner 用 OpenAI，三家各自的 Key 与地址。写法有三种，优先级从高到低：
+ *
+ *   1. `'ai' => $someAiInstance` —— 直接给一个配好的 AI 实例
+ *   2. `'model' => 'moonshot-v1-32k', 'api_key' => $kimiKey` —— 连接信息写在定义里
+ *   3. `setPlatformConfig('moonshot', ['api_key' => $kimiKey])` —— 平台配置表，
+ *      按模型名自动匹配；ModelRouter 选出来的模型也走这条，不必逐个角色重复写 Key
+ *
+ *   子 Agent 拿到的是**独立的 AI 实例**（从父实例 clone 而来，transport 与流式回调
+ *   跟着走），父 Agent 的模型与连接不会被改动。
  */
 class SubAgentManager
 {
@@ -75,6 +87,18 @@ class SubAgentManager
     /** @var string transcript 落盘目录，空则只留在内存 */
     protected $transcriptDir = '';
 
+    /** @var array<string, array<string, mixed>> 平台 / 模型名 => 连接配置 */
+    protected $platformConfigs = [];
+
+    /** @var \Ai\Agent\Orchestrator\ModelRouter|null 模型路由器，定义里没写 model 时问它 */
+    protected $modelRouter = null;
+
+    /** @var callable|array<string, mixed>|null 路由上下文补充（预算、优先级等） */
+    protected $routeContext = null;
+
+    /** @var array<string, AI> 派生出的子 AI 实例缓存，键为 '角色名|模型名' */
+    protected $aiCache = [];
+
     /**
      * @param AI $ai 共享的 AI 实例（子 Agent 复用同一个 AI 配置）
      */
@@ -105,6 +129,248 @@ class SubAgentManager
     {
         $this->workdir = (string) $workdir;
         return $this;
+    }
+
+    /**
+     * 登记一个平台的连接配置
+     *
+     * 子 Agent 只写 `'model' => 'moonshot-v1-32k'` 时，库按模型名推断出平台是
+     * `moonshot`，再从这张表里取该平台的 Key 与地址。这样跨平台编排不必在每个
+     * 角色里重复贴 Key，ModelRouter 动态选出来的模型也能自动配上正确的凭据。
+     *
+     * ```php
+     * $sam->setPlatformConfig('deepseek', ['api_key' => $dsKey]);
+     * $sam->setPlatformConfig('moonshot', ['api_key' => $kimiKey]);
+     * $sam->setPlatformConfig('openai',   ['api_key' => $oaKey]);
+     *
+     * $sam->register('coder',    ['description' => '写代码', 'model' => 'deepseek-chat']);
+     * $sam->register('reviewer', ['description' => '审代码', 'model' => 'moonshot-v1-32k']);
+     * ```
+     *
+     * 键可以是平台名（`deepseek` / `moonshot` / `openai` ……，取值同
+     * `AI::platformOfModel()`），也可以是**具体模型名**——模型名精确匹配优先，
+     * 用于同一平台下不同模型要走不同网关的情况。
+     *
+     * @param string $platform 平台名或模型名
+     * @param array<string, mixed> $config 连接配置，键见 SubAgentDefinition::$connectionKeys
+     * @return $this
+     */
+    public function setPlatformConfig($platform, array $config)
+    {
+        $this->platformConfigs[(string) $platform] = $config;
+        $this->aiCache = [];   // 连接变了，之前派生的实例作废
+        return $this;
+    }
+
+    /**
+     * 批量登记平台连接配置
+     *
+     * @param array<string, array<string, mixed>> $configs 平台名 => 连接配置
+     * @return $this
+     */
+    public function setPlatformConfigs(array $configs)
+    {
+        foreach ($configs as $platform => $config) {
+            if (is_array($config)) {
+                $this->setPlatformConfig($platform, $config);
+            }
+        }
+        return $this;
+    }
+
+    /**
+     * 已登记的平台连接配置
+     *
+     * @return array<string, array<string, mixed>>
+     */
+    public function getPlatformConfigs()
+    {
+        return $this->platformConfigs;
+    }
+
+    /**
+     * 注入模型路由器
+     *
+     * 子 Agent 定义里没写 `model` 时，由它按角色 / 任务复杂度 / 预算选一个。
+     * 定义里写死了 `model` 的以定义为准——显式配置不该被启发式覆盖。
+     *
+     * @param \Ai\Agent\Orchestrator\ModelRouter|null $router
+     * @return $this
+     */
+    public function setModelRouter($router)
+    {
+        $this->modelRouter = $router;
+        $this->aiCache = [];
+        return $this;
+    }
+
+    /**
+     * @return \Ai\Agent\Orchestrator\ModelRouter|null
+     */
+    public function getModelRouter()
+    {
+        return $this->modelRouter;
+    }
+
+    /**
+     * 补充路由上下文（预算余量、优先级等）
+     *
+     * ModelRouter 会看 `budget_left` / `priority`，但这些只有调用方知道。
+     * 传数组是固定值，传闭包则每次路由前调用一次取实时值：
+     *
+     * ```php
+     * $sam->setRouteContext(function ($def, $task) use ($budget) {
+     *     return ['budget_left' => $budget->remainingRatio()];
+     * });
+     * ```
+     *
+     * @param callable|array<string, mixed>|null $context
+     * @return $this
+     */
+    public function setRouteContext($context)
+    {
+        $this->routeContext = $context;
+        return $this;
+    }
+
+    /**
+     * 定下这次运行用哪个模型
+     *
+     * 定义里写死的优先，否则问路由器；都没有则返回空串（沿用父 Agent 的模型）。
+     *
+     * @param SubAgentDefinition $def
+     * @param string $task
+     * @return string
+     */
+    public function resolveModel(SubAgentDefinition $def, $task = '')
+    {
+        $model = $def->getModel();
+        if ($model !== '' || $this->modelRouter === null) {
+            return $model;
+        }
+
+        $context = ['agent' => $def->getName(), 'task' => (string) $task];
+        if ($this->routeContext !== null) {
+            $extra = is_callable($this->routeContext)
+                ? call_user_func($this->routeContext, $def, (string) $task)
+                : $this->routeContext;
+            if (is_array($extra)) {
+                $context = array_merge($context, $extra);
+            }
+        }
+
+        $routed = $this->modelRouter->route($context);
+        return is_string($routed) ? $routed : '';
+    }
+
+    /**
+     * 取该子 Agent 该用的 AI 实例
+     *
+     * 没有任何模型 / 连接要求时直接返回父实例（与旧版行为一致）；有要求时派生一个
+     * 独立实例并缓存——**不改动父实例**，所以子 Agent 跑完父 Agent 的模型不会被换掉，
+     * 并行执行时也不会互相踩。
+     *
+     * @param SubAgentDefinition $def
+     * @param string $model 本次运行的模型（路由器选的），空则用定义里的
+     * @return AI
+     */
+    public function aiFor(SubAgentDefinition $def, $model = '')
+    {
+        $own = $def->getAi();
+        if ($own !== null) {
+            return $own;
+        }
+
+        $model = (string) $model !== '' ? (string) $model : $def->getModel();
+        if ($model === '' && !$def->hasConnection()) {
+            return $this->ai;
+        }
+
+        $key = $def->getName() . '|' . $model;
+        if (!isset($this->aiCache[$key])) {
+            $this->aiCache[$key] = $this->deriveAi($def, $model);
+        }
+        return $this->aiCache[$key];
+    }
+
+    /**
+     * 派生一个子 AI 实例
+     *
+     * 连接信息（打到哪个平台、哪个地址、用哪把钥匙）与生成参数（temperature 之类）
+     * 分开处理：生成参数照常从父 Agent 继承；连接信息**只要子 Agent 自己给了，
+     * 父 Agent 的就整份丢弃**。半继承是这里最危险的做法——留下父 Agent 的
+     * `base_url`，Kimi 的模型名就会被发到 DeepSeek 的地址上，报回来的是
+     * 「模型不存在」，没人会往连接信息上想。
+     *
+     * @param SubAgentDefinition $def
+     * @param string $model
+     * @return AI
+     */
+    protected function deriveAi(SubAgentDefinition $def, $model)
+    {
+        $conn = $def->getConnection();
+
+        // 定义里没写连接，就按模型名去平台配置表里找
+        if ($conn === [] && $model !== '') {
+            $conn = $this->platformConfigFor($model);
+        }
+
+        $config = $conn === []
+            ? $this->ai->getConfig()
+            : array_merge($this->stripConnection($this->ai->getConfig()), $conn);
+
+        // 模型名一律显式写死：父 Agent 可能是 setModel() 直接设的，
+        // 那样 config['model'] 里躺着的还是构造时那个旧名字
+        $name = $model;
+        if ($name === '') {
+            $current = $this->ai->model();
+            $name = $current !== null ? $current->getName() : '';
+        }
+        if ($name !== '') {
+            $config['model'] = $name;
+        } else {
+            unset($config['model']);
+        }
+
+        // clone 而非 new AI：父 Agent 注入的 transport、流式回调要跟着走
+        $sub = clone $this->ai;
+        $sub->replaceConfig($config);
+        return $sub;
+    }
+
+    /**
+     * 按模型名找平台连接配置
+     *
+     * 先按模型名精确匹配（同平台不同模型走不同网关的情况），再按推断出的平台名。
+     *
+     * @param string $model
+     * @return array<string, mixed>
+     */
+    protected function platformConfigFor($model)
+    {
+        if ($this->platformConfigs === []) {
+            return [];
+        }
+        $name = (string) $model;
+        if (isset($this->platformConfigs[$name])) {
+            return $this->platformConfigs[$name];
+        }
+        $platform = $this->ai->platformOfModel($name);
+        return isset($this->platformConfigs[$platform]) ? $this->platformConfigs[$platform] : [];
+    }
+
+    /**
+     * 去掉配置里的连接信息，只留生成参数
+     *
+     * @param array<string, mixed> $config
+     * @return array<string, mixed>
+     */
+    protected function stripConnection(array $config)
+    {
+        foreach (SubAgentDefinition::$connectionKeys as $key) {
+            unset($config[$key]);
+        }
+        return $config;
     }
 
     /**
@@ -304,16 +570,19 @@ class SubAgentManager
     /**
      * 按定义组装一个子 Agent 运行时
      *
-     * 权限、工具、模型、技能、MCP、钩子、记忆都在这里落位。
+     * 权限、工具、模型、平台、技能、MCP、钩子、记忆都在这里落位。
      * 核心不变式：**子 Agent 的能力永远是父 Agent 的子集**。
      *
      * @param SubAgentDefinition $def
      * @param string $workdir 覆盖工作目录（worktree 隔离时用）
+     * @param string $model 本次运行的模型（路由器选的），空则用定义里的
      * @return AgentRuntime
      */
-    public function buildRuntime(SubAgentDefinition $def, $workdir = '')
+    public function buildRuntime(SubAgentDefinition $def, $workdir = '', $model = '')
     {
-        $runtime = new AgentRuntime($this->ai);
+        // 模型 / 平台由 aiFor() 落位：需要换平台的子 Agent 拿到独立 AI 实例，
+        // 其余的仍复用父实例
+        $runtime = new AgentRuntime($this->aiFor($def, $model));
         $runtime->setSystem($def->getSystemPrompt());
         $runtime->setMaxIter($def->getMaxIter());
         $runtime->setWorkdir($workdir !== '' ? (string) $workdir : $this->workdir);
@@ -372,10 +641,12 @@ class SubAgentManager
     }
 
     /**
-     * 带模型切换执行一段逻辑
+     * 直接执行一段逻辑（保留给子类覆盖）
      *
-     * AI 实例是父子共享的，子 Agent 想用别的模型只能临时切换再切回来——
-     * 否则子 Agent 跑完，父 Agent 的模型就被悄悄改掉了。
+     * 旧版靠「在共享的 AI 实例上临时 setModel 再切回来」实现子 Agent 换模型，
+     * 那样只换得了模型名，api_key / base_url 还是父 Agent 的，跨平台必然 401。
+     * 现在模型与平台都由 `aiFor()` 通过独立 AI 实例解决，这里不再需要切换，
+     * 方法本身保留——已有子类可能覆盖了它。
      *
      * @param SubAgentDefinition $def
      * @param callable $callback
@@ -383,20 +654,7 @@ class SubAgentManager
      */
     protected function withModel(SubAgentDefinition $def, callable $callback)
     {
-        $model = $def->getModel();
-        if ($model === '') {
-            return call_user_func($callback);
-        }
-
-        $previous = $this->ai->model();
-        try {
-            $this->ai->setModel($model);
-            return call_user_func($callback);
-        } finally {
-            if ($previous !== null) {
-                $this->ai->setModel($previous);
-            }
-        }
+        return call_user_func($callback);
     }
 
     /**
@@ -446,7 +704,14 @@ class SubAgentManager
      */
     public function register($name, array $config = [])
     {
-        $this->agents[(string) $name] = new SubAgentDefinition((string) $name, $config);
+        $name = (string) $name;
+        $this->agents[$name] = new SubAgentDefinition($name, $config);
+        // 同名重注册时旧的派生实例作废，否则改了 api_key 也还在用旧连接
+        foreach (array_keys($this->aiCache) as $key) {
+            if (strpos($key, $name . '|') === 0) {
+                unset($this->aiCache[$key]);
+            }
+        }
         return $this;
     }
 
@@ -638,7 +903,8 @@ class SubAgentManager
 
         // 创建子 Agent 的独立运行时
         // 核心原则：子 Agent 权限 ⊆ 父 Agent 权限
-        $subRuntime = $this->buildRuntime($def);
+        $model = $this->resolveModel($def, $task);
+        $subRuntime = $this->buildRuntime($def, '', $model);
 
         $start = microtime(true);
         $messages = [['role' => 'user', 'content' => $task]];
@@ -741,7 +1007,8 @@ class SubAgentManager
         }
 
         // 运行子 Agent（工作目录指向 worktree，父工作区不受影响）
-        $subRuntime = $this->buildRuntime($def, $worktreeDir);
+        $model = $this->resolveModel($def, $task);
+        $subRuntime = $this->buildRuntime($def, $worktreeDir, $model);
 
         $start = microtime(true);
         $messages = [['role' => 'user', 'content' => $task]];

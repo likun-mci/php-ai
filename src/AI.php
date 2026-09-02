@@ -380,6 +380,37 @@ class AI
     }
 
     /**
+     * 整份替换配置（不与旧配置合并）
+     *
+     * `setConfig()` 是 `array_merge`，只增不减——把模型从 deepseek 换成 moonshot 时，
+     * 旧的 `base_url` / `api_key` / `protocol` 会静静留在配置里，于是新模型名被发到
+     * 上一个平台的地址上，报错信息还指向「模型不存在」，很难往连接信息上想。
+     * 换平台请用本方法：没在 $config 里出现的键一律丢弃。
+     *
+     * 未给 `model` 时沿用当前模型实例，但协议对象一定重建——协议持有端点等连接状态，
+     * 复用旧对象等于换了平台还用着旧地址。
+     *
+     * @param array<string, mixed> $config 完整的新配置
+     */
+    public function replaceConfig(array $config): self
+    {
+        $model = array_key_exists('model', $config) && $config['model'] !== ''
+            ? $config['model']
+            : $this->model;
+
+        // 只清 config：模型与协议在下面的 setConfig() 里整个重建，
+        // 这里置 null 反而让「本来就没有模型」与「刚被清空」两种状态混在一起
+        $this->config = [];
+
+        if ($model !== null && $model !== '') {
+            $config['model'] = $model;
+        } else {
+            unset($config['model']);
+        }
+        return $this->setConfig($config);
+    }
+
+    /**
      * 创建 AI 实例（工厂方法）
      * @param array<mixed> $config
      */

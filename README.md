@@ -2685,6 +2685,28 @@ $router->route(['agent' => 'coder', 'budget_left' => 0.05]);  // cheap（预算�
 
 **不配置模型名就不路由**：返回空串，调用方沿用当前模型。硬塞一个猜的模型名，换来的是运行时报「模型不存在」。
 
+路由器创建后会自动接到子 Agent 管理器上：**定义里没写 `model` 的角色**由它选，写死了 `model` 的以定义为准——显式配置不该被启发式覆盖。选出来的模型跨平台时，凭据从 `platforms()` 登记的表里按模型名自动匹配：
+
+```php
+$agent->platforms([
+    'deepseek' => ['api_key' => $deepseekKey],
+    'moonshot' => ['api_key' => $moonshotKey],
+    'openai'   => ['api_key' => $openaiKey],
+])->modelRouter([
+    'cheap'    => 'deepseek-chat',      // explorer 之类的杂活
+    'standard' => 'moonshot-v1-32k',
+    'premium'  => 'gpt-4o',             // coder / reviewer
+]);
+```
+
+`budget_left` / `priority` 这些只有调用方知道的值，用 `setRouteContext()` 补进去（传数组是固定值，传闭包则每次路由前取实时值）：
+
+```php
+$agent->getRuntime()->getSubAgentManager()->setRouteContext(function ($def, $task) use ($budget) {
+    return ['budget_left' => $budget->remainingRatio()];
+});
+```
+
 产物（测试报告、补丁、日志、分析结果）不该全文塞进上下文——一份 5000 行的报告扔进去，剩下的对话就没地方了：
 
 ```php
@@ -2794,6 +2816,7 @@ $sam->register('reviewer', [
     'tools'           => [...],
     'disallowedTools' => ['write_file', 'edit_file'],
     'model'           => 'claude-sonnet-5',      // 该角色单独用的模型
+    'api_key'         => $anthropicKey,          // 该角色单独用的平台凭据（见「跨平台编排」）
     'permissionMode'  => 'manual',
     'maxTurns'        => 15,
     'skills'          => ['php-development'],
@@ -2816,9 +2839,49 @@ $sam->resolveTools($sam->get('greedy'));   // 只剩 read_file —— 父没有�
 
 三步收窄，每一步都只会让工具变少：起点是子 Agent 声明的 `tools`（没声明则用父全集）→ 与父工具集求交 → 去掉 `disallowedTools`。`permissionMode` 同理，只能往严格方向调：`bypass` 的父 Agent 下面可以挂 `manual` 的子 Agent，反过来不行。
 
-`model` 是临时切换再切回来的——AI 实例父子共享，子 Agent 跑完不该把父 Agent 的模型悄悄改掉。
+`model` 与连接信息由一个**独立的 AI 实例**承载（从父实例 clone 而来），父 Agent 的模型与凭据不会被改动，详见下一节。
 
 定义里声明的 `background` / `isolation` 是**下限**：工具入参可以额外开启，但不能关闭。一个被配置成必须 worktree 隔离的子 Agent，不该因为模型没传参就直接改到父工作区。
+
+### 跨平台编排：不同角色跑在不同平台
+
+用 DeepSeek 写代码、Kimi 审代码、GPT 做规划——三家平台、三把 Key、三个地址，写在一个 Agent 里：
+
+```php
+$agent = Agent::create($ai)->agents([
+    'planner'  => ['description' => '任务规划', 'model' => 'gpt-4o',          'api_key' => $openaiKey],
+    'coder'    => ['description' => '写代码',   'model' => 'deepseek-chat',   'api_key' => $deepseekKey],
+    'reviewer' => ['description' => '代码审查', 'model' => 'moonshot-v1-32k', 'api_key' => $moonshotKey],
+]);
+```
+
+角色多了不必逐个贴 Key——用 `platforms()` 按平台登记一次，库按模型名推断平台后自动配对：
+
+```php
+$agent->platforms([
+    'deepseek' => ['api_key' => $deepseekKey],
+    'moonshot' => ['api_key' => $moonshotKey],
+    'openai'   => ['api_key' => $openaiKey],
+])->agents([
+    'coder'    => ['description' => '写代码',   'model' => 'deepseek-chat'],
+    'reviewer' => ['description' => '代码审查', 'model' => 'moonshot-v1-32k'],
+    'planner'  => ['description' => '任务规划', 'model' => 'gpt-4o'],
+]);
+```
+
+表的键可以是平台名（同 `AI::platformOfModel()` 的取值），也可以是**具体模型名**——模型名精确匹配优先，用于同平台不同模型要走不同网关的情况。已经有配好的 `AI` 实例时直接给 `'ai' => $kimiAi`，优先级最高。
+
+可写的连接键：`api_key`、`base_url`、`endpoint`、`endpoint_models`、`protocol`、`platform`、`headers`、`organization`、`project_id`、`extra_body`，也可以整块塞进 `connection`。
+
+三条规则，都是为了避免「静默打错平台」：
+
+1. **写了任何一个连接键，父 Agent 的连接信息就整份不再继承。** 半继承最危险——留下父 Agent 的 `base_url`，Kimi 的模型名会被发到 DeepSeek 的地址上，报回来的是「模型不存在」，没人会往连接信息上想。
+2. **一个连接键都不写时行为与旧版一致**：完全沿用父 Agent 的连接，只换模型名。OpenRouter / 自建网关那种「一把 Key 打所有模型」的用法不受影响。
+3. **`temperature`、`max_tokens` 这类生成参数照常从父 Agent 继承**，它们与「打到哪个平台」无关。
+
+子 Agent 拿到的是独立 AI 实例（父实例 clone 而来，注入的 transport 与流式回调跟着走），所以：跑完父 Agent 的模型与 Key 原样不动，并行铺开时几个角色也不会互相踩。凭据不会进 transcript——`SubAgentDefinition::toArray()` 只列连接的**键名**，不含值。
+
+完整可运行示例见 `examples_multi_platform.php`。
 
 ### 任务依赖图（TaskGraph）
 

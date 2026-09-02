@@ -170,6 +170,17 @@ class Agent
      * 数组里的 `tools` 可以直接写工具名——会从父 Agent 的工具集里挑，
      * 挑不到的不会凭空出现。
      *
+     * 每个角色可以挂在不同平台上——`model` 旁边写上该平台的 Key 即可，
+     * 或者用 `platforms()` 登记一次、按模型名自动匹配：
+     *
+     * ```php
+     * $agent->agents([
+     *     'planner'  => ['description' => '任务规划', 'model' => 'gpt-4o',          'api_key' => $oaKey],
+     *     'coder'    => ['description' => '写代码',   'model' => 'deepseek-chat',   'api_key' => $dsKey],
+     *     'reviewer' => ['description' => '审代码',   'model' => 'moonshot-v1-32k', 'api_key' => $kimiKey],
+     * ]);
+     * ```
+     *
      * @param array<string, array<string, mixed>> $agents 名称 => 配置
      * @return $this
      */
@@ -201,7 +212,61 @@ class Agent
             }
             $sam->register((string) $name, $config);
         }
+        $this->syncModelRouter();
         return $this;
+    }
+
+    /**
+     * 登记各平台的连接配置（跨平台编排）
+     *
+     * 子 Agent 只写模型名时，库按模型名推断平台，再从这里取 Key 与地址——
+     * 不必在每个角色里重复贴 Key，ModelRouter 动态选出来的模型也能自动配对。
+     *
+     * ```php
+     * $agent->platforms([
+     *     'deepseek' => ['api_key' => $dsKey],
+     *     'moonshot' => ['api_key' => $kimiKey],
+     *     'openai'   => ['api_key' => $oaKey],
+     * ])->agents([
+     *     'coder'    => ['description' => '写代码', 'model' => 'deepseek-chat'],
+     *     'reviewer' => ['description' => '审代码', 'model' => 'moonshot-v1-32k'],
+     *     'planner'  => ['description' => '规划',   'model' => 'gpt-4o'],
+     * ]);
+     * ```
+     *
+     * 键是平台名（同 `AI::platformOfModel()`）或具体模型名，模型名精确匹配优先。
+     * 值的可用键见 `SubAgentDefinition::$connectionKeys`。
+     *
+     * @param array<string, array<string, mixed>> $configs 平台名 => 连接配置
+     * @return $this
+     */
+    public function platforms(array $configs)
+    {
+        $sam = $this->runtime->getSubAgentManager();
+        if ($sam === null) {
+            $sam = new \Ai\Agent\SubAgent\SubAgentManager($this->ai);
+            $this->setSubAgentManager($sam);
+        }
+        $sam->setPlatformConfigs($configs);
+        return $this;
+    }
+
+    /**
+     * 把模型路由器接到子 Agent 管理器上
+     *
+     * 两边任一先出现都要能接上：先 `modelRouter()` 后 `agents()`，或反过来。
+     *
+     * @return void
+     */
+    protected function syncModelRouter()
+    {
+        if ($this->modelRouter === null) {
+            return;
+        }
+        $sam = $this->runtime->getSubAgentManager();
+        if ($sam !== null) {
+            $sam->setModelRouter($this->modelRouter);
+        }
     }
 
     /**
@@ -788,6 +853,21 @@ class Agent
      * 模型路由器（惰性创建）
      *
      * 按角色与任务复杂度选模型：explorer 用便宜的，coder / reviewer 用强的。
+     * 创建后会自动接到子 Agent 管理器上——**定义里没写 `model` 的子 Agent** 由它选，
+     * 写死了 `model` 的以定义为准。
+     *
+     * 选出来的模型跨平台时，凭据从 `platforms()` 登记的表里按模型名自动匹配：
+     *
+     * ```php
+     * $agent->platforms([
+     *     'deepseek' => ['api_key' => $dsKey],
+     *     'moonshot' => ['api_key' => $kimiKey],
+     * ])->modelRouter([
+     *     'cheap'    => 'deepseek-chat',
+     *     'standard' => 'moonshot-v1-32k',
+     *     'premium'  => 'gpt-4o',
+     * ]);
+     * ```
      *
      * @param array<string, string> $tiers cheap / standard / premium => 模型名
      * @return \Ai\Agent\Orchestrator\ModelRouter
@@ -797,7 +877,9 @@ class Agent
         if ($this->modelRouter === null) {
             $this->modelRouter = new \Ai\Agent\Orchestrator\ModelRouter($tiers);
         }
-        return $this->modelRouter;
+        $router = $this->modelRouter;
+        $this->syncModelRouter();
+        return $router;
     }
 
     /**
@@ -1580,6 +1662,7 @@ class Agent
     public function setSubAgentManager($sam)
     {
         $this->runtime->setSubAgentManager($sam);
+        $this->syncModelRouter();
         return $this;
     }
 

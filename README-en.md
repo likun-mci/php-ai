@@ -2664,6 +2664,28 @@ $router->route(['agent' => 'coder', 'budget_left' => 0.05]);  // cheap (budget n
 
 **No configured model names, no routing**: it returns an empty string and the caller keeps the current model. Inventing a plausible-looking model name only buys a runtime "model not found".
 
+Once created, the router is wired into the sub-agent manager automatically: it picks the model for **roles whose definition omits `model`**, while a definition that names a `model` wins — an explicit setting should not be overridden by a heuristic. When the chosen model lives on another platform, its credentials are matched by model name from the table registered with `platforms()`:
+
+```php
+$agent->platforms([
+    'deepseek' => ['api_key' => $deepseekKey],
+    'moonshot' => ['api_key' => $moonshotKey],
+    'openai'   => ['api_key' => $openaiKey],
+])->modelRouter([
+    'cheap'    => 'deepseek-chat',      // grunt work such as explorer
+    'standard' => 'moonshot-v1-32k',
+    'premium'  => 'gpt-4o',             // coder / reviewer
+]);
+```
+
+Values only the caller knows — `budget_left`, `priority` — go in through `setRouteContext()` (an array for fixed values, a closure to read them fresh before each routing decision):
+
+```php
+$agent->getRuntime()->getSubAgentManager()->setRouteContext(function ($def, $task) use ($budget) {
+    return ['budget_left' => $budget->remainingRatio()];
+});
+```
+
 Artifacts — test reports, patches, logs, analyses — should not go into the context verbatim; drop a 5000-line report in and there is no room left for the conversation:
 
 ```php
@@ -2773,6 +2795,7 @@ $sam->register('reviewer', [
     'tools'           => [...],
     'disallowedTools' => ['write_file', 'edit_file'],
     'model'           => 'claude-sonnet-5',      // a model just for this role
+    'api_key'         => $anthropicKey,          // credentials just for this role (see "Cross-platform orchestration")
     'permissionMode'  => 'manual',
     'maxTurns'        => 15,
     'skills'          => ['php-development'],
@@ -2795,9 +2818,49 @@ $sam->resolveTools($sam->get('greedy'));   // only read_file survives — what t
 
 Three narrowing steps, each of which can only remove tools: start from the sub-agent's declared `tools` (or the parent's full set if undeclared) → intersect with the parent's tools → subtract `disallowedTools`. `permissionMode` works the same way and can only tighten: a `bypass` parent may host a `manual` child, never the reverse.
 
-`model` is switched temporarily and switched back — the AI instance is shared between parent and child, and a sub-agent finishing its run should not quietly leave the parent on a different model.
+`model` and the connection details are carried by a **dedicated AI instance** (cloned from the parent's), so the parent's model and credentials are never touched. See the next section.
 
 `background` and `isolation` declared on the definition are a **floor**: a tool call may switch them on, never off. A sub-agent configured to require worktree isolation must not end up editing the parent tree just because the model omitted the argument.
+
+### Cross-platform orchestration: each role on its own platform
+
+DeepSeek writes the code, Kimi reviews it, GPT plans the work — three platforms, three keys, three endpoints, all inside one Agent:
+
+```php
+$agent = Agent::create($ai)->agents([
+    'planner'  => ['description' => 'Task planning', 'model' => 'gpt-4o',          'api_key' => $openaiKey],
+    'coder'    => ['description' => 'Writes code',   'model' => 'deepseek-chat',   'api_key' => $deepseekKey],
+    'reviewer' => ['description' => 'Code review',   'model' => 'moonshot-v1-32k', 'api_key' => $moonshotKey],
+]);
+```
+
+With many roles there is no need to repeat the key on each one — register it once per platform with `platforms()`, and the library matches it by inferring the platform from the model name:
+
+```php
+$agent->platforms([
+    'deepseek' => ['api_key' => $deepseekKey],
+    'moonshot' => ['api_key' => $moonshotKey],
+    'openai'   => ['api_key' => $openaiKey],
+])->agents([
+    'coder'    => ['description' => 'Writes code',   'model' => 'deepseek-chat'],
+    'reviewer' => ['description' => 'Code review',   'model' => 'moonshot-v1-32k'],
+    'planner'  => ['description' => 'Task planning', 'model' => 'gpt-4o'],
+]);
+```
+
+Table keys may be a platform name (the same values `AI::platformOfModel()` returns) or a **specific model name** — an exact model-name match wins, which covers the case of one platform's models going through different gateways. If you already have a configured `AI` instance, pass `'ai' => $kimiAi` directly; it takes precedence over everything else.
+
+The connection keys you may write: `api_key`, `base_url`, `endpoint`, `endpoint_models`, `protocol`, `platform`, `headers`, `organization`, `project_id`, `extra_body` — or all of them at once under `connection`.
+
+Three rules, all there to prevent silently hitting the wrong platform:
+
+1. **Write any connection key and the parent's connection details stop being inherited entirely.** Half-inheritance is the dangerous case: keep the parent's `base_url` and Kimi's model name gets posted to DeepSeek's endpoint, which answers "model not found" — nobody thinks to look at the connection details.
+2. **Write no connection key and the behaviour is unchanged from before**: the parent's connection is used as-is and only the model name differs. Gateway setups such as OpenRouter — one key for every model — are unaffected.
+3. **Generation parameters such as `temperature` and `max_tokens` are still inherited** from the parent; they have nothing to do with which platform is being called.
+
+A sub-agent receives its own AI instance (cloned from the parent's, so an injected transport and the streaming callback come along). Therefore the parent's model and key are exactly as they were once the run finishes, and roles running in parallel cannot step on each other. Credentials never reach the transcript — `SubAgentDefinition::toArray()` lists only the connection **key names**, never their values.
+
+A complete runnable example lives in `examples_multi_platform.php`.
 
 ### Task dependency graph (TaskGraph)
 

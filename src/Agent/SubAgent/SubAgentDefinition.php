@@ -30,6 +30,32 @@ namespace Ai\Agent\SubAgent;
  * **权限只减不增**：`tools` 与 `disallowedTools` 都只能在父 Agent 已有的范围内收窄。
  * 子 Agent 配置里写了父 Agent 没有的工具，那个工具也不会凭空出现——
  * 见 `SubAgentManager::resolveTools()`。
+ *
+ * ## 跨平台：每个角色可以挂在不同平台的接口上
+ *
+ * `model` 旁边可以直接写连接信息，让 coder 走 DeepSeek、reviewer 走 Kimi、
+ * planner 走 OpenAI——三家各自的 Key 与地址：
+ *
+ * ```php
+ * $sam->register('coder',    ['model' => 'deepseek-chat',   'api_key' => $dsKey]);
+ * $sam->register('reviewer', ['model' => 'moonshot-v1-32k', 'api_key' => $kimiKey]);
+ * $sam->register('planner',  ['model' => 'gpt-4o',          'api_key' => $oaKey]);
+ * ```
+ *
+ * 可写的连接键见 `$connectionKeys`：`api_key` / `base_url` / `endpoint` /
+ * `endpoint_models` / `protocol` / `platform` / `headers` / `organization` /
+ * `project_id` / `extra_body`，也可以整块塞进 `connection`。
+ *
+ * **只要写了其中任何一个，父 Agent 的连接信息就整份不再继承**——这是有意的：
+ * 继承一半（比如带上父 Agent 的 `base_url`）会把 Kimi 的模型名发到 DeepSeek 的地址上。
+ * 反过来，一个连接键都不写时行为与旧版一致：完全沿用父 Agent 的连接，
+ * 只换模型名——OpenRouter / 自建网关那种「一把 Key 打所有模型」的用法不受影响。
+ *
+ * 已经有现成的 `AI` 实例时，直接给 `ai`，优先级最高：
+ *
+ * ```php
+ * $sam->register('reviewer', ['ai' => $kimiAi, 'description' => '代码审查']);
+ * ```
  */
 class SubAgentDefinition
 {
@@ -50,6 +76,26 @@ class SubAgentDefinition
 
     /** @var string 该子 Agent 使用的模型，空则沿用父 Agent 的模型 */
     protected $model = '';
+
+    /**
+     * 可写在子 Agent 配置里的连接键
+     *
+     * 「连接」= 决定这次请求打到哪个平台、哪个地址、用哪把钥匙的信息。
+     * 与 temperature 那类生成参数分开：生成参数照常从父 Agent 继承，
+     * 连接信息一旦被覆盖就整份改用子 Agent 自己的。
+     *
+     * @var string[]
+     */
+    public static $connectionKeys = [
+        'api_key', 'base_url', 'endpoint', 'endpoint_models',
+        'protocol', 'platform', 'headers', 'organization', 'project_id', 'extra_body',
+    ];
+
+    /** @var array<string, mixed> 该子 Agent 独有的连接配置，空则沿用父 Agent */
+    protected $connection = [];
+
+    /** @var \Ai\AI|null 直接指定的 AI 实例，优先级高于 model / connection */
+    protected $ai = null;
 
     /** @var string 权限模式，空则继承父 Agent */
     protected $permissionMode = '';
@@ -117,6 +163,53 @@ class SubAgentDefinition
         }
         $this->background = !empty($config['background']);
         $this->extra = isset($config['extra']) && is_array($config['extra']) ? $config['extra'] : [];
+
+        // 连接信息：平铺写（'api_key' => ...）与整块写（'connection' => [...]）都收，
+        // 后者优先——整块写通常是从平台配置表里取出来的一份完整连接
+        foreach (self::$connectionKeys as $key) {
+            if (array_key_exists($key, $config)) {
+                $this->connection[$key] = $config[$key];
+            }
+        }
+        if (isset($config['connection']) && is_array($config['connection'])) {
+            $this->connection = array_merge($this->connection, $config['connection']);
+        }
+        if (isset($config['ai']) && $config['ai'] instanceof \Ai\AI) {
+            $this->ai = $config['ai'];
+        }
+    }
+
+    /**
+     * 该子 Agent 独有的连接配置
+     *
+     * 空数组表示「沿用父 Agent 的连接」。非空时父 Agent 的连接信息整份不继承，
+     * 详见类文档。
+     *
+     * @return array<string, mixed>
+     */
+    public function getConnection()
+    {
+        return $this->connection;
+    }
+
+    /**
+     * 有没有指定自己的连接
+     *
+     * @return bool
+     */
+    public function hasConnection()
+    {
+        return $this->connection !== [];
+    }
+
+    /**
+     * 直接指定的 AI 实例，没有则返回 null
+     *
+     * @return \Ai\AI|null
+     */
+    public function getAi()
+    {
+        return $this->ai;
     }
 
     /** @return bool */
@@ -234,6 +327,7 @@ class SubAgentDefinition
      * 导出配置（用于日志与后台任务传参）
      *
      * `tools` 与 `hooks` 是对象，不放进来——这个结构要能 JSON 序列化。
+     * 连接信息只列键名，**不含 api_key 的值**——transcript 会落盘。
      *
      * @return array<string, mixed>
      */
@@ -244,6 +338,9 @@ class SubAgentDefinition
             'description'     => $this->description,
             'prompt'          => $this->systemPrompt,
             'toolNames'       => array_keys($this->tools),
+            // 只列键名：这个结构会进 transcript 与后台任务参数，api_key 不能跟着落盘
+            'connectionKeys'  => array_keys($this->connection),
+            'ownAi'           => $this->ai !== null,
             'disallowedTools' => $this->disallowedTools,
             'model'           => $this->model,
             'permissionMode'  => $this->permissionMode,

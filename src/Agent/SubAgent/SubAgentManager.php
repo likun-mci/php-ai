@@ -197,6 +197,11 @@ class SubAgentManager
                         'description' => '是否后台执行（true 时不阻塞主 Agent，返回 task_id）',
                         'default'     => false,
                     ],
+                    'isolation' => [
+                        'type'        => 'string',
+                        'description' => '隔离模式："worktree" 时在独立 git worktree 中执行，完成后返回 diff',
+                        'enum'        => ['worktree'],
+                    ],
                 ],
                 'required' => ['agent', 'task'],
             ],
@@ -215,6 +220,7 @@ class SubAgentManager
             $agentName = isset($input['agent']) ? (string) $input['agent'] : '';
             $task = isset($input['task']) ? (string) $input['task'] : '';
             $background = !empty($input['background']);
+            $isolation = isset($input['isolation']) ? (string) $input['isolation'] : '';
 
             $def = $self->get($agentName);
             if ($def === null) {
@@ -222,6 +228,12 @@ class SubAgentManager
             }
             if ($task === '') {
                 return 'ERROR: 任务描述不能为空';
+            }
+
+            // Worktree 隔离模式
+            if ($isolation === 'worktree') {
+                $runId = $self->runSyncWithWorktree($agentName, $task);
+                return $self->formatRunResult($runId);
             }
 
             // 后台模式且注入了 runner → 非阻塞执行
@@ -330,6 +342,150 @@ class SubAgentManager
             'updated_at' => time(),
         ];
         return $runId;
+    }
+
+    /**
+     * 在独立 git worktree 中同步运行子 Agent
+     *
+     * 流程：
+     *   1. git worktree add 创建隔离的工作目录
+     *   2. 子 Agent 在 worktree 中执行任务
+     *   3. git diff 捕获改动
+     *   4. git worktree remove 清理
+     *
+     * @param string $agentName
+     * @param string $task
+     * @return string 运行记录 ID
+     */
+    protected function runSyncWithWorktree($agentName, $task)
+    {
+        $def = $this->get($agentName);
+        if ($def === null) {
+            $this->runCounter++;
+            $runId = 'sub_' . $this->runCounter . '_' . dechex(time());
+            $this->runs[$runId] = [
+                'task_id'  => $runId,
+                'agent'    => $agentName,
+                'task'     => $task,
+                'status'   => 'failed',
+                'reason'   => 'unknown_agent',
+                'summary'  => '子 Agent "' . $agentName . '" 不存在',
+                'messages' => [],
+                'iterations' => 0,
+                'created_at' => time(),
+                'updated_at' => time(),
+            ];
+            return $runId;
+        }
+
+        $workdir = $this->workdir;
+        if ($workdir === '' || !is_dir($workdir . '/.git')) {
+            $this->runCounter++;
+            $runId = 'sub_' . $this->runCounter . '_' . dechex(time());
+            $this->runs[$runId] = [
+                'task_id'  => $runId,
+                'agent'    => $agentName,
+                'task'     => $task,
+                'status'   => 'failed',
+                'reason'   => 'no_git_repo',
+                'summary'  => '当前目录不是 git 仓库，无法创建 worktree',
+                'messages' => [],
+                'iterations' => 0,
+                'created_at' => time(),
+                'updated_at' => time(),
+            ];
+            return $runId;
+        }
+
+        // 创建 worktree
+        $worktreeDir = $workdir . '/.claude/worktrees/sub_' . dechex(time()) . '_' . mt_rand(1000, 9999);
+        $this->runCommand('git worktree add ' . escapeshellarg($worktreeDir) . ' HEAD 2>/dev/null', $workdir);
+
+        if (!is_dir($worktreeDir)) {
+            $this->runCounter++;
+            $runId = 'sub_' . $this->runCounter . '_' . dechex(time());
+            $this->runs[$runId] = [
+                'task_id'  => $runId,
+                'agent'    => $agentName,
+                'task'     => $task,
+                'status'   => 'failed',
+                'reason'   => 'worktree_create_failed',
+                'summary'  => '无法创建 git worktree',
+                'messages' => [],
+                'iterations' => 0,
+                'created_at' => time(),
+                'updated_at' => time(),
+            ];
+            return $runId;
+        }
+
+        // 运行子 Agent
+        $subRuntime = new AgentRuntime($this->ai);
+        $subRuntime->setSystem($def->getSystemPrompt());
+        $subRuntime->setMaxIter($def->getMaxIter());
+        $subRuntime->setWorkdir($worktreeDir);
+
+        $parentPm = $this->parentPermission;
+        if ($parentPm) {
+            $subRuntime->setPermission($parentPm);
+        } else {
+            $subRuntime->setPermissionMode('manual');
+        }
+
+        $tools = $def->getTools();
+        if ($tools) {
+            $subRuntime->setTools($tools);
+        }
+
+        $start = microtime(true);
+        $messages = [['role' => 'user', 'content' => $task]];
+        $subResult = $subRuntime->run($messages);
+
+        // 捕获 diff
+        $diff = $this->runCommand('git diff HEAD -- :/ 2>/dev/null', $worktreeDir);
+        $diffStat = $this->runCommand('git diff --stat HEAD -- :/ 2>/dev/null', $worktreeDir);
+
+        // 清理 worktree
+        $this->runCommand('git worktree remove --force ' . escapeshellarg($worktreeDir) . ' 2>/dev/null', $workdir);
+
+        $this->runCounter++;
+        $runId = 'sub_' . $this->runCounter . '_' . dechex(time());
+        $this->runs[$runId] = [
+            'task_id'    => $runId,
+            'agent'      => $agentName,
+            'task'       => $task,
+            'status'     => $subResult->isDone() ? 'completed' : 'stopped',
+            'reason'     => $subResult->getStopReason(),
+            'summary'    => $subResult->getText(),
+            'messages'   => $subResult->getToolCalls() ?: [],
+            'iterations' => $subResult->getIterations(),
+            'duration_ms' => round((microtime(true) - $start) * 1000, 1),
+            'diff'       => $diff !== '' ? $diff : '',
+            'diff_stat'  => $diffStat !== '' ? $diffStat : '',
+            'created_at' => time(),
+            'updated_at' => time(),
+        ];
+        return $runId;
+    }
+
+    /**
+     * 在指定目录下执行 shell 命令并返回 stdout
+     *
+     * @param string $command
+     * @param string $cwd
+     * @return string
+     */
+    protected function runCommand($command, $cwd)
+    {
+        $cwd = (string) $cwd;
+        if ($cwd === '' || !is_dir($cwd)) {
+            return '';
+        }
+        $output = [];
+        $code = -1;
+        $cmd = 'cd ' . escapeshellarg($cwd) . ' && ' . $command;
+        exec($cmd, $output, $code);
+        return implode("\n", $output);
     }
 
     /**

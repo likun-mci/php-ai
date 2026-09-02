@@ -1810,6 +1810,21 @@ $result = $sam->getResult('sub_1_...');
 
 主 Agent 看到的只是 `spawn_agent` 工具返回的结构化摘要（含 `transcript_id`），完整 transcript 通过 `getTranscript()` 单独查询，不会导致主 Agent 上下文膨胀。
 
+#### Worktree 隔离模式
+
+`spawn_agent` 的 `isolation` 参数设为 `worktree` 时，子 Agent 在一个独立的 git worktree 中执行，改动不会碰到主工作区；执行完毕捕获 diff 并清理 worktree：
+
+```php
+$agent->setWorkdir('/var/www/project');   // 必须是 git 仓库根目录
+// 模型调用：spawn_agent(agent="refactorer", task="重构 Auth.php", isolation="worktree")
+
+$result = $sam->getResult('sub_1_...');
+echo $result['diff'];        // 完整 unified diff，主工作区文件未被改动
+echo $result['diff_stat'];   // ' src/Auth.php | 42 +++++-----'
+```
+
+适合让子 Agent 试探性地改代码：拿到 diff 后由主 Agent 或人工决定是否应用。工作目录不是 git 仓库时该次运行返回 `status = failed`、`reason = no_git_repo`，不会退化成直接改主工作区。
+
 ### 预算控制
 
 `BudgetManager` 跟踪 token 用量与估算成本，超过预算自动停止：
@@ -1899,6 +1914,32 @@ $results = $vm->verify('edit_file', ['file_path' => 'src/Auth.php']);
 // $results[0]->isPassed()  => true / false
 // $results[0]->getError()  => 错误信息
 ```
+
+#### 验证器框架（VerifierInterface）
+
+命令式的 `addRule()` 适合「跑一条命令看退出码」。需要解析工具输出、定位到具体文件行号时，实现 `VerifierInterface` 写一个验证器：
+
+```php
+use Ai\Agent\Verification\PhpSyntaxVerifier;
+
+$verifier = new PhpSyntaxVerifier();
+$verifier->supports('write_file');   // true——只处理写文件类工具
+
+$result = $verifier->verify([
+    'tool_name' => 'write_file',
+    'file_path' => 'src/Auth.php',
+]);
+
+if (!$result->isPassed()) {
+    echo $result->getVerifierName();   // 'php_syntax'
+    print_r($result->getErrors());
+    // [['file' => 'src/Auth.php', 'line' => 42, 'message' => 'syntax error, unexpected token "{"']]
+}
+```
+
+`PhpSyntaxVerifier` 对写入的 `.php` 文件跑 `php -l`，并把 `Parse error / Fatal error` 输出解析成带行号的结构化错误。非 PHP 文件、文件不存在、验证器被禁用时直接返回通过，不阻断流程。
+
+`VerificationResult` 同时保留原有的 `isPassed()` / `getCommand()` / `getOutput()` / `getError()`，新增 `getVerifierName()`、`getErrors()`、`addError()`、`toArray()`，旧代码不受影响。
 
 ### 工作区管理（WorkspaceManager）
 
@@ -2126,6 +2167,95 @@ echo $task->getStatus();  // queued / running / completed / failed / cancelled
 ```
 
 `AgentQueue` 内部使用 `TaskManager` 管理任务生命周期，自动创建或复用外部传入的 `TaskManager`。
+
+### 执行计划（PlanManager）
+
+面对复杂任务时，Agent 先把目标拆成有序步骤再动手，而不是「想一步做一步」。计划带状态、依赖与修订历史，可持久化到磁盘，崩溃后继续执行。
+
+```php
+use Ai\Agent\Planning\PlanManager;
+
+$pm = new PlanManager('/var/data/plans');   // 传空字符串则只放内存
+
+$plan = $pm->createPlan('为 Auth 模块补充单元测试', [
+    'steps' => [
+        '阅读 src/Auth.php 理清分支',
+        '编写 tests/AuthTest.php',
+        '运行 phpunit 并修复失败用例',
+    ],
+    'risks' => ['依赖外部 Redis，测试需要 mock'],
+]);
+
+$pm->start($plan->getId());
+$step = $pm->getCurrentStep($plan->getId());   // PlanStep：第 1 步
+$pm->completeStep($plan->getId(), $step->getId(), '已梳理出 4 个分支');
+$pm->advance($plan->getId());                  // 推进到下一步
+
+echo $plan->progress();    // 33（百分比）
+echo $plan->toSummary();   // 注入系统提示词用的简明摘要
+```
+
+步骤状态为 `pending → running → completed / failed / skipped`；计划状态为 `pending → running → completed / failed`。
+
+**按依赖图执行**——步骤可声明依赖，`PlanExecutor` 只执行依赖已满足的步骤：
+
+```php
+use Ai\Agent\Planning\PlanExecutor;
+
+$executor = new PlanExecutor($pm, ['mode' => PlanExecutor::MODE_DEPENDENCY]);
+$result = $executor->executeAll($plan->getId(), function ($step, $plan) {
+    // 在这里让 Agent 真正执行这一步，返回字符串结果或抛异常表示失败
+    return $agent->ask($step->getAction())->getText();
+});
+// $result = ['completed' => 2, 'failed' => 1, 'skipped' => 0, 'status' => 'failed']
+```
+
+**计划审查**——执行过程中偏离预期时，`PlanReview` 给出问题与建议，并可直接改计划：
+
+```php
+use Ai\Agent\Planning\PlanReview;
+
+$review = new PlanReview($pm);
+$r = $review->review($plan->getId());
+// $r = ['status' => 'affected', 'progress' => 33, 'issues' => [...], 'suggestions' => [...], ...]
+
+// 审查后追加/插入/移除步骤
+$review->reviewAndAdjust($plan->getId(), [
+    'append' => ['补充 README 中的测试说明'],
+], '发现文档未同步');
+
+$review->detectDependencyCycle($plan);   // 返回环上的步骤 ID，无环则为空数组
+```
+
+### 自我反思（ReflectionManager）
+
+工具执行完不等于目标达成。`ReflectionManager` 在每轮工具结果回填后判断「目标是否真的完成」，未完成则给出下一步行动建议，形成「执行 → 检查 → 未完成 → 继续」的闭环。
+
+```php
+use Ai\Agent\Reflection\ReflectionManager;
+
+$rm = new ReflectionManager(['maxRounds' => 5]);
+$result = $rm->reflect($messages, '让 phpunit 全部通过');
+
+if ($rm->shouldContinue($result)) {
+    echo $result->getReason();       // '最近一次工具执行报错：Fatal error ...'
+    echo $result->getNextAction();   // '分析上述错误并修复后重新运行测试'
+    echo $result->toPrompt();        // 直接注入下一轮 prompt 的文本
+}
+```
+
+默认使用基于规则的判断（检查工具结果里的错误标记、完成标记、迭代轮次）。需要模型驱动的反思时注入自定义策略：
+
+```php
+$rm->setStrategy(function (array $messages, $goal) use ($ai) {
+    $verdict = $ai->ask("目标：{$goal}\n以上执行是否已完成？回答 DONE 或说明缺什么");
+    return strpos($verdict, 'DONE') !== false
+        ? \Ai\Agent\Reflection\ReflectionResult::completed('模型判定已完成')
+        : \Ai\Agent\Reflection\ReflectionResult::continuing($verdict, '按上述说明继续');
+});
+```
+
+`maxRounds` 是兜底：反思轮次达到上限后强制结束，避免模型在「还差一点」的判断里空转。
 
 ### 用户交互（AskUser）
 

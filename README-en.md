@@ -1798,6 +1798,21 @@ $result = $sam->getResult('sub_1_...');
 
 The main Agent only sees the structured summary returned by the `spawn_agent` tool (with a `transcript_id`). The full transcript is queried separately via `getTranscript()`, so the main Agent's context never grows from sub-agent details.
 
+#### Worktree isolation mode
+
+With `spawn_agent`'s `isolation` parameter set to `worktree`, the sub-agent runs inside a separate git worktree so its changes never touch the main working tree; the diff is captured and the worktree removed when it finishes:
+
+```php
+$agent->setWorkdir('/var/www/project');   // must be the root of a git repository
+// Model call: spawn_agent(agent="refactorer", task="Refactor Auth.php", isolation="worktree")
+
+$result = $sam->getResult('sub_1_...');
+echo $result['diff'];        // full unified diff; files in the main tree are untouched
+echo $result['diff_stat'];   // ' src/Auth.php | 42 +++++-----'
+```
+
+This suits letting a sub-agent try out code changes: the main Agent — or a human — decides whether to apply the resulting diff. When the working directory is not a git repository the run returns `status = failed` with `reason = no_git_repo`, rather than silently falling back to editing the main tree.
+
 ### Budget control
 
 `BudgetManager` tracks token usage and estimated cost, stopping the Agent when the budget is exceeded:
@@ -1887,6 +1902,32 @@ $results = $vm->verify('edit_file', ['file_path' => 'src/Auth.php']);
 // $results[0]->isPassed()  => true / false
 // $results[0]->getError()  => error message
 ```
+
+#### Verifier framework (VerifierInterface)
+
+Command-based `addRule()` fits "run a command, check the exit code". When you need to parse tool output and point at a specific file and line, implement `VerifierInterface`:
+
+```php
+use Ai\Agent\Verification\PhpSyntaxVerifier;
+
+$verifier = new PhpSyntaxVerifier();
+$verifier->supports('write_file');   // true — it only handles file-writing tools
+
+$result = $verifier->verify([
+    'tool_name' => 'write_file',
+    'file_path' => 'src/Auth.php',
+]);
+
+if (!$result->isPassed()) {
+    echo $result->getVerifierName();   // 'php_syntax'
+    print_r($result->getErrors());
+    // [['file' => 'src/Auth.php', 'line' => 42, 'message' => 'syntax error, unexpected token "{"']]
+}
+```
+
+`PhpSyntaxVerifier` runs `php -l` on written `.php` files and parses `Parse error / Fatal error` output into structured errors with line numbers. Non-PHP files, missing files and a disabled verifier all return "passed" so the flow is never blocked.
+
+`VerificationResult` keeps the existing `isPassed()` / `getCommand()` / `getOutput()` / `getError()` and adds `getVerifierName()`, `getErrors()`, `addError()` and `toArray()`, so existing code is unaffected.
 
 ### Workspace management (WorkspaceManager)
 
@@ -2114,6 +2155,95 @@ echo $task->getStatus();  // queued / running / completed / failed / cancelled
 ```
 
 `AgentQueue` uses `TaskManager` internally for task lifecycle management, creating one automatically or reusing an externally provided one.
+
+### Execution plan (PlanManager)
+
+For complex tasks the Agent breaks the goal into ordered steps before acting, instead of thinking one step at a time. A plan carries status, dependencies and revision history, and can be persisted to disk so execution continues after a crash.
+
+```php
+use Ai\Agent\Planning\PlanManager;
+
+$pm = new PlanManager('/var/data/plans');   // pass an empty string to keep plans in memory only
+
+$plan = $pm->createPlan('Add unit tests for the Auth module', [
+    'steps' => [
+        'Read src/Auth.php and map out the branches',
+        'Write tests/AuthTest.php',
+        'Run phpunit and fix failing cases',
+    ],
+    'risks' => ['Depends on an external Redis, tests need a mock'],
+]);
+
+$pm->start($plan->getId());
+$step = $pm->getCurrentStep($plan->getId());   // PlanStep: step 1
+$pm->completeStep($plan->getId(), $step->getId(), 'Mapped out 4 branches');
+$pm->advance($plan->getId());                  // move to the next step
+
+echo $plan->progress();    // 33 (percent)
+echo $plan->toSummary();   // compact summary for injecting into the system prompt
+```
+
+Step status goes `pending → running → completed / failed / skipped`; plan status goes `pending → running → completed / failed`.
+
+**Dependency-graph execution** — steps can declare dependencies, and `PlanExecutor` only runs steps whose dependencies are satisfied:
+
+```php
+use Ai\Agent\Planning\PlanExecutor;
+
+$executor = new PlanExecutor($pm, ['mode' => PlanExecutor::MODE_DEPENDENCY]);
+$result = $executor->executeAll($plan->getId(), function ($step, $plan) {
+    // Let the Agent actually run this step; return a string result or throw to mark it failed
+    return $agent->ask($step->getAction())->getText();
+});
+// $result = ['completed' => 2, 'failed' => 1, 'skipped' => 0, 'status' => 'failed']
+```
+
+**Plan review** — when execution drifts from the plan, `PlanReview` reports issues and suggestions, and can amend the plan directly:
+
+```php
+use Ai\Agent\Planning\PlanReview;
+
+$review = new PlanReview($pm);
+$r = $review->review($plan->getId());
+// $r = ['status' => 'affected', 'progress' => 33, 'issues' => [...], 'suggestions' => [...], ...]
+
+// Append / insert / remove steps after the review
+$review->reviewAndAdjust($plan->getId(), [
+    'append' => ['Update the testing notes in README'],
+], 'Docs were out of sync');
+
+$review->detectDependencyCycle($plan);   // returns the step IDs on the cycle, empty array if acyclic
+```
+
+### Self-reflection (ReflectionManager)
+
+A tool finishing is not the same as the goal being met. `ReflectionManager` decides whether the goal is actually complete after each round of tool results, and suggests a next action when it is not — forming an "execute → check → not done → continue" loop.
+
+```php
+use Ai\Agent\Reflection\ReflectionManager;
+
+$rm = new ReflectionManager(['maxRounds' => 5]);
+$result = $rm->reflect($messages, 'Make the whole phpunit suite pass');
+
+if ($rm->shouldContinue($result)) {
+    echo $result->getReason();       // 'The last tool run reported an error: Fatal error ...'
+    echo $result->getNextAction();   // 'Analyse the error above, fix it and re-run the tests'
+    echo $result->toPrompt();        // text ready to inject into the next round's prompt
+}
+```
+
+By default it uses rule-based judgement (looking for error markers, completion markers and the iteration count). Inject a custom strategy for model-driven reflection:
+
+```php
+$rm->setStrategy(function (array $messages, $goal) use ($ai) {
+    $verdict = $ai->ask("Goal: {$goal}\nIs the work above complete? Answer DONE or state what is missing");
+    return strpos($verdict, 'DONE') !== false
+        ? \Ai\Agent\Reflection\ReflectionResult::completed('Model judged it complete')
+        : \Ai\Agent\Reflection\ReflectionResult::continuing($verdict, 'Continue per the notes above');
+});
+```
+
+`maxRounds` is the backstop: once the reflection rounds hit the limit the loop is forced to stop, so the model cannot spin forever on "almost there".
 
 ### User interaction (AskUser)
 

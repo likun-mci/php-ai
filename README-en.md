@@ -2302,6 +2302,31 @@ if ($messages !== null) {
 
 `recoverFromCrash()` internally calls `AgentRuntime::recover()`, which loads the latest checkpoint, restores the iteration count, and sets the task ID. A crash checkpoint is also saved automatically when an exception occurs.
 
+#### Long-running recovery: more than message history
+
+Recovering a task that ran for hours — or days — takes more than the message history: the Agent needs to know which step the plan reached and what the goal was, or the model is left re-deriving both from the transcript. So checkpoints carry the runtime state alongside:
+
+```php
+$agent->setCheckpointDir('/var/data/checkpoints');
+$agent->setPlanDir('/var/data/plans');
+$plan = $agent->plan('Migrate the database', ['Back up', 'Alter tables', 'Verify']);
+
+$agent->run([['role' => 'user', 'content' => 'Start the migration']]);
+// …and it crashes partway through
+
+// Recover in a new process
+$runtime = $agent->getRuntime();
+$messages = $runtime->recover('task_1');
+echo $runtime->getGoal();                        // 'Migrate the database' — restored
+echo $runtime->getPlan()->progress();            // plan and per-step statuses restored as they were
+print_r($runtime->getLastCheckpoint()->getExtra()['workspace']);
+// ['dir' => '/var/www/project', 'branch' => 'main', 'modified' => ['db/schema.sql']]
+```
+
+What a checkpoint holds: message history, iteration count, the task goal, a plan snapshot (including each step's status), the workspace state at crash time (directory / branch / modified files), and the memory directory.
+
+**The workspace is deliberately not restored for you**: a checkpoint records what the workspace looked like at the moment of the crash, and the files on disk may well have moved on since. Rewinding them to an old snapshot is a destructive act. The snapshot is handed to you as information to compare against; whether to act on it is your call.
+
 ### Task queue (AgentQueue)
 
 Enqueues tasks (Task) with runtimes (AgentRuntime) in FIFO order for sequential processing. Useful for background execution in PHP-FPM environments.
@@ -2467,6 +2492,116 @@ $agent->run([['role' => 'user', 'content' => 'Fix the failing tests']]);
 ```
 
 Without calling `enableReflection()` the loop behaves exactly as before — no extra rounds appear out of nowhere. When `setGoal()` is not set, the goal falls back to the first user message.
+
+### Multi-role team (AgentTeam)
+
+An upgrade from "parent agent spawns a sub-agent" to "a set of roles that each own part of the work". The difference is that members persist: after Developer changes the code, Tester receives the context of that same round, and Reviewer can see what both concluded.
+
+```php
+use Ai\Agent\Team\AgentRole;
+
+$team = $agent->team([
+    AgentRole::developer(),
+    AgentRole::tester(),
+    AgentRole::reviewer(),
+]);
+
+// Assign to one member
+$result = $team->assign('developer', 'Implement the login endpoint');
+echo $result['status'];   // 'completed'
+echo $result['text'];
+
+// Pipeline: each stage's output feeds the next
+$results = $team->pipeline('Add tests for the Auth module', ['developer', 'tester', 'reviewer']);
+
+echo $team->toSummary();
+// [developer] Add tests for the Auth module（completed，4 轮）：Added 3 test cases…
+// [tester] …
+```
+
+Five roles are built in — `manager` / `developer` / `tester` / `security` / `reviewer` — each with a system prompt that spells out the boundary of its job. Tester's prompt, for instance, states plainly that it should report reproduction steps and not edit the implementation itself; without that, multi-role collaboration quickly degenerates into every role editing code.
+
+Custom roles, with tools narrowed per role:
+
+```php
+$team->addMember(new AgentRole('dba', [
+    'description' => 'Database schema and query tuning',
+    'prompt'      => 'You are the DBA. You own schema and indexes; do not touch business code.',
+    'tools'       => ['read_file', 'bash'],   // only these two tools
+    'maxIter'     => 8,
+]));
+```
+
+Members share the team's tool set and permission configuration but **each holds its own AgentRuntime and context** — which is the whole point of multiple roles: Tester's context should not be full of Developer's reasoning.
+
+If a member throws, the run is recorded as `status = failed` and the pipeline continues — Reviewer knowing that Tester crashed is more useful than Reviewer knowing nothing.
+
+### Inter-agent communication (AgentCommunication)
+
+Messages between members are delivered and retained on a bus. Passing plain text loses the type and the sender, leaving the recipient unable to tell an assignment from a report — that is what the `type` field is for.
+
+```php
+use Ai\Agent\Team\AgentMessage;
+
+$team->send(AgentMessage::bug('tester', 'developer', 'AuthTest::testLogin failed: expected true, got false', [
+    'file' => 'tests/AuthTest.php',
+    'line' => 42,
+]));
+
+$team->broadcast('Requirements are frozen; stop changing interface signatures');
+
+$bus = $team->communication();
+$bus->unreadCount('developer');            // unread count
+$bus->peek('developer');                   // look without consuming
+$bus->inbox('developer');                  // take (marks as read)
+$bus->history(AgentMessage::TYPE_BUG);     // full history, filterable by type
+$bus->between('tester', 'developer');      // traffic between two roles
+```
+
+Message types: `task` (assignment), `bug` (defect report), `review` (review comment), `status` (status sync, broadcast by default), `result` (execution result).
+
+**When a task is assigned, unread messages are prepended to the task description automatically** — what the previous stage left for this member should not have to be asked for. The full history stays in `history()` for post-mortems: when multi-role collaboration goes wrong, the final result alone does not tell you which hand-off garbled it.
+
+### Human approval (ApprovalWorkflow)
+
+Code the AI writes does not count until a person says so: it submits the change with its diff, waits for approval to continue, and on rejection goes back with the reason. In enterprise settings this is a hard requirement — no automated change reaches production unsigned.
+
+```php
+$workflow = $agent->enableApproval('/var/data/approvals');
+
+// Agent side: submit after making the change
+$request = $agent->submitForApproval($diff, [
+    'summary' => 'Fix the login 401',
+    'files'   => ['src/Auth.php'],
+]);
+
+// Human side: another process, or a back-office page
+foreach ($workflow->getPendingRequests() as $req) {
+    echo $req->toSummary();      // summary + files + diff
+}
+$workflow->approve($request->getId(), 'Alex');
+// or: $workflow->reject($request->getId(), 'Missing input validation', 'Sam');
+
+// Agent side: read the outcome
+$status = $workflow->getStatus($request->getId());   // approved / rejected / pending_review / expired
+if ($status === \Ai\Agent\Approval\ApprovalRequest::STATUS_REJECTED) {
+    $agent->ask($workflow->getRequest($request->getId())->toRejectionPrompt());
+}
+```
+
+**Approval is inherently cross-process**: the Agent submits, a person approves, and hours may pass in between. So when a directory is given, requests are written to disk and `getStatus()` re-reads them every time — an in-memory copy alone would report `pending` forever, and a crashed Agent could not resume waiting. Without a directory, requests stay in memory, which suits interactive confirmation inside one process.
+
+Other capabilities:
+
+```php
+$workflow->waitFor($id, 300);              // block, returning the current status on timeout rather than hanging forever
+$workflow->onSubmit(function ($req) { … }); // email / chat notification / open a ticket on submission
+$workflow->purgeDecided();                  // drop decided and expired requests
+new ApprovalWorkflow('', ['ttl' => 3600]);  // requests expire after an hour
+new ApprovalWorkflow('', ['autoApprove' => true]);  // local development: approve automatically
+```
+
+A decided or expired request cannot be decided again — an approval outcome is issued once. A request raised three days ago should not still be approvable, so once its `ttl` passes its status simply reads `expired`, with nothing to clean up first.
 
 ### Browser tool (BrowserTool)
 

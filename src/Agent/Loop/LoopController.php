@@ -97,6 +97,48 @@ class LoopController
     }
 
     /**
+     * 收集检查点要额外保存的运行时状态
+     *
+     * 只存消息历史不够：小时级的长任务恢复回来，得知道计划走到第几步、
+     * 工作区是什么分支、目标是什么，否则模型只能从消息里重新推断。
+     *
+     * 存的是快照而非对象引用——检查点要能整体 JSON 序列化落盘。
+     *
+     * @param AgentContext $context
+     * @return array<string, mixed>
+     */
+    protected function checkpointExtra(AgentContext $context)
+    {
+        $extra = [];
+
+        $goal = $context->getGoal();
+        if ($goal !== '') {
+            $extra['goal'] = $goal;
+        }
+
+        $plan = $context->getPlan();
+        if ($plan !== null) {
+            $extra['plan'] = $plan->toArray();
+        }
+
+        $wm = $context->getWorkspaceManager();
+        if ($wm !== null) {
+            $extra['workspace'] = [
+                'dir'      => $wm->getWorkdir(),
+                'branch'   => $wm->getBranch(),
+                'modified' => $wm->getModified(),
+            ];
+        }
+
+        $mm = $context->getMemoryManager();
+        if ($mm !== null && $mm->isEnabled() && $mm->getBaseDir() !== '') {
+            $extra['memory_dir'] = $mm->getBaseDir();
+        }
+
+        return $extra;
+    }
+
+    /**
      * 执行一次反思——判断任务目标是否真的达成
      *
      * 只在模型不再调用工具、准备结束时调用。未设置 ReflectionManager 或
@@ -768,7 +810,7 @@ class LoopController
             if ($cpm && $cpm->isEnabled()) {
                 $cpId = $context->getCheckpointId();
                 if ($cpId !== '') {
-                    $cpm->save($cpId, $iter + 1, $context->getMessages());
+                    $cpm->save($cpId, $iter + 1, $context->getMessages(), $this->checkpointExtra($context));
                 }
             }
         }

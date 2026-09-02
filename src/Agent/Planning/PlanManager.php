@@ -334,6 +334,26 @@ class PlanManager
     }
 
     /**
+     * 把一个已有的 Plan 对象纳入管理（并持久化）
+     *
+     * 从检查点或外部反序列化出来的计划用它接管——`createPlan()` 会生成新 ID，
+     * 那样恢复回来的计划就跟原来的对不上了。
+     *
+     * @param Plan $plan
+     * @return $this
+     */
+    public function adopt(Plan $plan)
+    {
+        $id = $plan->getId();
+        if ($id === '') {
+            return $this;
+        }
+        $this->plans[$id] = $plan;
+        $this->save($plan);
+        return $this;
+    }
+
+    /**
      * 保存计划（持久化到 JSON 文件）
      *
      * @param Plan $plan

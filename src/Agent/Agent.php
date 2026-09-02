@@ -579,6 +579,79 @@ class Agent
     }
 
     /**
+     * 组建一个多角色 Agent 团队
+     *
+     * 团队成员共享 Agent 当前的工具与工作目录，各自持有独立上下文。
+     *
+     * ```php
+     * $team = $agent->team([
+     *     \Ai\Agent\Team\AgentRole::developer(),
+     *     \Ai\Agent\Team\AgentRole::tester(),
+     * ]);
+     * $team->pipeline('给 Auth 模块补测试', ['developer', 'tester']);
+     * ```
+     *
+     * @param array<int, \Ai\Agent\Team\AgentRole|string> $roles
+     * @param array<string, mixed> $options system / workdir / permission
+     * @return \Ai\Agent\Team\AgentTeam
+     */
+    public function team(array $roles = [], array $options = [])
+    {
+        if (!isset($options['tools'])) {
+            $options['tools'] = $this->runtime->getToolRegistry()->all();
+        }
+        if (!isset($options['workdir'])) {
+            $options['workdir'] = $this->runtime->getWorkdir();
+        }
+        $team = new \Ai\Agent\Team\AgentTeam($this->ai, $options);
+        foreach ($roles as $role) {
+            $team->addMember($role);
+        }
+        return $team;
+    }
+
+    /**
+     * 设置人工审批工作流
+     *
+     * 设置后可用 `submitForApproval()` 提交改动等待人工批准。
+     *
+     * @param \Ai\Agent\Approval\ApprovalWorkflow $workflow
+     * @return $this
+     */
+    public function setApprovalWorkflow($workflow)
+    {
+        $this->runtime->setApprovalWorkflow($workflow);
+        return $this;
+    }
+
+    /**
+     * 启用人工审批（自动创建 ApprovalWorkflow）
+     *
+     * @param string $baseDir 审批请求落盘目录，空则只放内存
+     * @param array<string, mixed> $options ttl / notifier / autoApprove
+     * @return \Ai\Agent\Approval\ApprovalWorkflow
+     */
+    public function enableApproval($baseDir = '', array $options = [])
+    {
+        $workflow = new \Ai\Agent\Approval\ApprovalWorkflow((string) $baseDir, $options);
+        $this->runtime->setApprovalWorkflow($workflow);
+        return $workflow;
+    }
+
+    /**
+     * 提交一份改动等待人工审批
+     *
+     * @param string $diff
+     * @param array<string, mixed> $context summary / files
+     * @return \Ai\Agent\Approval\ApprovalRequest|null 未启用审批时返回 null
+     */
+    public function submitForApproval($diff, array $context = [])
+    {
+        $workflow = $this->runtime->getApprovalWorkflow();
+        return $workflow === null ? null : $workflow->submitForReview($diff, $context);
+    }
+
+    /**
      * 设置执行计划管理器
      *
      * @param \Ai\Agent\Planning\PlanManager $pm

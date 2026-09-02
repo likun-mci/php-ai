@@ -130,6 +130,12 @@ class AgentRuntime
     /** @var string 当前任务目标 */
     protected $goal = '';
 
+    /** @var \Ai\Agent\Checkpoint\Checkpoint|null 最近一次 recover() 加载的检查点 */
+    protected $lastCheckpoint = null;
+
+    /** @var \Ai\Agent\Approval\ApprovalWorkflow|null 人工审批工作流 */
+    protected $approvalWorkflow = null;
+
     /** @var CheckpointManager|null */
     protected $checkpointManager = null;
 
@@ -230,6 +236,16 @@ class AgentRuntime
     {
         $this->contextManager = $cm;
         return $this;
+    }
+
+    /**
+     * 当前工作目录
+     *
+     * @return string
+     */
+    public function getWorkdir()
+    {
+        return $this->workdir;
     }
 
     /**
@@ -549,6 +565,26 @@ class AgentRuntime
     public function getUserInteractionManager()
     {
         return $this->interaction;
+    }
+
+    /**
+     * 设置人工审批工作流
+     *
+     * @param \Ai\Agent\Approval\ApprovalWorkflow|null $workflow
+     * @return $this
+     */
+    public function setApprovalWorkflow($workflow)
+    {
+        $this->approvalWorkflow = $workflow;
+        return $this;
+    }
+
+    /**
+     * @return \Ai\Agent\Approval\ApprovalWorkflow|null
+     */
+    public function getApprovalWorkflow()
+    {
+        return $this->approvalWorkflow;
     }
 
     /**
@@ -1143,11 +1179,20 @@ class AgentRuntime
         if ($cpId === null) {
             return;
         }
+        $extra = ['crash_recovery' => true, 'error' => 'crash before save'];
+        if ($this->goal !== '') {
+            $extra['goal'] = $this->goal;
+        }
+        $plan = $context->getPlan();
+        if ($plan !== null) {
+            $extra['plan'] = $plan->toArray();
+        }
+
         $this->checkpointManager->save(
             $cpId,
             $context->getIteration(),
             $context->getMessages(),
-            ['crash_recovery' => true, 'error' => 'crash before save']
+            $extra
         );
     }
 
@@ -1158,7 +1203,12 @@ class AgentRuntime
      *   1. 从 CheckpointManager 加载最新检查点
      *   2. 恢复消息历史
      *   3. 恢复迭代计数
-     *   4. 返回恢复后的消息数组，供 run() 继续执行
+     *   4. 恢复任务目标与执行计划（检查点里存了才有）
+     *   5. 返回恢复后的消息数组，供 run() 继续执行
+     *
+     * 工作区不在这里恢复：检查点存的是"崩溃时工作区长什么样"，
+     * 磁盘上的文件此刻可能已经不同了，照着旧快照改回去是危险操作。
+     * 需要时从 `getLastCheckpoint()->getExtra()['workspace']` 自己取来比对。
      *
      * @param string $taskId 任务 ID 与会话 ID
      * @return array<int, array<string, mixed>>|null 恢复后的消息，无法恢复时返回 null
@@ -1179,8 +1229,49 @@ class AgentRuntime
 
         // 设置任务 ID
         $this->taskId = (string) $taskId;
+        $this->lastCheckpoint = $latest;
+
+        $extra = $latest->getExtra();
+        if (isset($extra['goal']) && is_string($extra['goal']) && $extra['goal'] !== '') {
+            $this->goal = $extra['goal'];
+        }
+        if (isset($extra['plan']) && is_array($extra['plan'])) {
+            $this->restorePlanFrom($extra['plan']);
+        }
 
         return $latest->getMessages();
+    }
+
+    /**
+     * 最近一次 recover() 加载的检查点
+     *
+     * @return \Ai\Agent\Checkpoint\Checkpoint|null
+     */
+    public function getLastCheckpoint()
+    {
+        return $this->lastCheckpoint;
+    }
+
+    /**
+     * 从检查点快照还原执行计划
+     *
+     * 没有 PlanManager 时临时建一个纯内存的——恢复出来的计划总得有地方放。
+     *
+     * @param array<string, mixed> $snapshot Plan::toArray() 的结果
+     * @return void
+     */
+    protected function restorePlanFrom(array $snapshot)
+    {
+        $plan = \Ai\Agent\Planning\Plan::fromArray($snapshot);
+        if ($plan->getId() === '') {
+            return;
+        }
+        if ($this->planManager === null) {
+            $this->planManager = new PlanManager();
+        }
+        $this->planManager->save($plan);
+        $this->planManager->adopt($plan);
+        $this->planId = $plan->getId();
     }
 
     /**

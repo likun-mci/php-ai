@@ -2320,6 +2320,31 @@ if ($messages !== null) {
 
 `recoverFromCrash()` 内部调用 `AgentRuntime::recover()`，自动加载最新检查点、恢复迭代计数、设置任务 ID。异常时也会自动保存崩溃时的检查点，防止数据丢失。
 
+#### 长任务恢复：不只是消息历史
+
+小时级甚至天级的任务恢复回来，光有消息历史不够——得知道计划走到第几步、目标是什么，否则模型只能从消息里重新推断。检查点因此会一并保存运行时状态：
+
+```php
+$agent->setCheckpointDir('/var/data/checkpoints');
+$agent->setPlanDir('/var/data/plans');
+$plan = $agent->plan('迁移数据库', ['备份', '改表', '校验']);
+
+$agent->run([['role' => 'user', 'content' => '开始迁移']]);
+// 中途崩了……
+
+// 新进程恢复
+$runtime = $agent->getRuntime();
+$messages = $runtime->recover('task_1');
+echo $runtime->getGoal();                        // '迁移数据库' —— 已还原
+echo $runtime->getPlan()->progress();            // 计划状态与各步骤状态原样还原
+print_r($runtime->getLastCheckpoint()->getExtra()['workspace']);
+// ['dir' => '/var/www/project', 'branch' => 'main', 'modified' => ['db/schema.sql']]
+```
+
+检查点里存的内容：消息历史、迭代计数、任务目标、执行计划快照（含每一步的状态）、崩溃时的工作区状态（目录 / 分支 / 已修改文件）、记忆目录。
+
+**工作区不会被自动"恢复"**：检查点存的是崩溃那一刻工作区长什么样，而磁盘上的文件此刻可能已经不同了，照着旧快照改回去是危险操作。它作为信息交给你比对，要不要动由你决定。
+
 ### 任务队列（AgentQueue）
 
 将任务（Task）+ 运行时（AgentRuntime）按入队顺序排队执行，适用于 PHP-FPM 下需要后台执行的场景。
@@ -2488,6 +2513,116 @@ $agent->run([['role' => 'user', 'content' => '修一下失败的测试']]);
 
 没调用 `enableReflection()` 时循环行为与升级前完全一致——不会平白多跑几轮。
 `setGoal()` 未设置时，目标退回取首条用户消息。
+
+### 多角色团队（AgentTeam）
+
+从「父 Agent 派生子 Agent」升级为「一组各司其职的角色协作」。区别在于成员是长期存在的：Developer 改完代码，Tester 拿到的是同一轮任务的上下文，Reviewer 能看到前两者的结论。
+
+```php
+use Ai\Agent\Team\AgentRole;
+
+$team = $agent->team([
+    AgentRole::developer(),
+    AgentRole::tester(),
+    AgentRole::reviewer(),
+]);
+
+// 单独分派
+$result = $team->assign('developer', '实现登录接口');
+echo $result['status'];   // 'completed'
+echo $result['text'];
+
+// 流水线：前一环的输出作为后一环的输入
+$results = $team->pipeline('给 Auth 模块补测试', ['developer', 'tester', 'reviewer']);
+
+echo $team->toSummary();
+// [developer] 给 Auth 模块补测试（completed，4 轮）：已补充 3 个测试用例…
+// [tester] …
+```
+
+内置五个角色：`manager` / `developer` / `tester` / `security` / `reviewer`，各自的系统提示词写明了职责边界——比如 Tester 的提示词明确「发现问题时给出复现步骤，不要自己去改实现代码」，否则多角色协作很容易退化成每个角色都在改代码。
+
+自定义角色，并按角色收窄工具：
+
+```php
+$team->addMember(new AgentRole('dba', [
+    'description' => '数据库结构与查询优化',
+    'prompt'      => '你是 DBA，只负责表结构与索引，不改业务代码。',
+    'tools'       => ['read_file', 'bash'],   // 只给这两个工具
+    'maxIter'     => 8,
+]));
+```
+
+成员共享团队统一的工具集与权限配置，但**各自持有独立的 AgentRuntime 与上下文**——这正是多角色的意义：Tester 的上下文里不该塞满 Developer 的思考过程。
+
+某个成员抛异常时记为 `status = failed` 继续往下走，不会中断整条流水线——Reviewer 知道 Tester 挂了，比什么都不知道有用。
+
+### Agent 间通信（AgentCommunication）
+
+成员之间的消息在总线上投递与留存。纯文本传递会丢类型与来源，收到的一方分不清这是任务分派还是结果汇报，`type` 字段就是为此存在的。
+
+```php
+use Ai\Agent\Team\AgentMessage;
+
+$team->send(AgentMessage::bug('tester', 'developer', 'AuthTest::testLogin 失败：期望 true 实际 false', [
+    'file' => 'tests/AuthTest.php',
+    'line' => 42,
+]));
+
+$team->broadcast('需求已冻结，不要再改接口签名');
+
+$bus = $team->communication();
+$bus->unreadCount('developer');            // 未读条数
+$bus->peek('developer');                   // 看但不取走
+$bus->inbox('developer');                  // 取走（标记已读）
+$bus->history(AgentMessage::TYPE_BUG);     // 全量历史，可按类型过滤
+$bus->between('tester', 'developer');      // 两个角色之间的往来
+```
+
+消息类型：`task`（任务分派）/ `bug`（缺陷反馈）/ `review`（审查意见）/ `status`（状态同步，默认广播）/ `result`（执行结果）。
+
+**分派任务时收件箱里的未读消息会自动拼在任务描述前面**——上一环留给他的话，不该等他自己去问。全量历史留在 `history()` 里供事后复盘：多角色协作出问题时，光看最终结果判断不出是哪一环传歪了。
+
+### 人工审批（ApprovalWorkflow）
+
+AI 改完代码不直接算数：先提交审核（附 diff），等人批准才继续，驳回则带着理由退回去改。企业环境里这是硬要求——没有人签字的自动改动进不了生产。
+
+```php
+$workflow = $agent->enableApproval('/var/data/approvals');
+
+// AI 侧：改完提交
+$request = $agent->submitForApproval($diff, [
+    'summary' => '修复登录 401',
+    'files'   => ['src/Auth.php'],
+]);
+
+// 人工侧：另一个进程 / 后台页面
+foreach ($workflow->getPendingRequests() as $req) {
+    echo $req->toSummary();      // 摘要 + 涉及文件 + diff
+}
+$workflow->approve($request->getId(), '张三');
+// 或：$workflow->reject($request->getId(), '缺少输入校验', '李四');
+
+// AI 侧：拿结果
+$status = $workflow->getStatus($request->getId());   // approved / rejected / pending_review / expired
+if ($status === \Ai\Agent\Approval\ApprovalRequest::STATUS_REJECTED) {
+    $agent->ask($workflow->getRequest($request->getId())->toRejectionPrompt());
+}
+```
+
+**审批天然跨进程**：提交的是 Agent，批准的是人，中间可能隔几小时。所以传了目录时请求会落盘，`getStatus()` 每次都从磁盘重读——只看内存副本会一直看到 `pending`，Agent 崩了重启也能接着等。不传目录则只放内存，适合同进程内的交互式确认。
+
+其它能力：
+
+```php
+$workflow->waitFor($id, 300);              // 阻塞等待，超时返回当前状态而不是无限期挂着
+$workflow->onSubmit(function ($req) { … }); // 提交时发邮件 / 飞书 / 建工单
+$workflow->purgeDecided();                  // 清掉已处理与已过期的
+new ApprovalWorkflow('', ['ttl' => 3600]);  // 请求 1 小时后过期
+new ApprovalWorkflow('', ['autoApprove' => true]);  // 本地调试用，自动过审
+```
+
+已处理或已过期的请求不能再批——审批结果只能出一次。一个三天前提的审批不该还能被批准，所以设了 `ttl` 的请求过期后状态直接变成 `expired`，不必等谁来清理。
 
 ### 浏览器工具（BrowserTool）
 

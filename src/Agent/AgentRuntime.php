@@ -20,6 +20,8 @@ use Ai\Agent\Skill\SkillManager;
 use Ai\Agent\Instruction\InstructionManager;
 use Ai\Agent\Mcp\McpManager;
 use Ai\Agent\Memory\MemoryManager;
+use Ai\Agent\Planning\PlanManager;
+use Ai\Agent\Reflection\ReflectionManager;
 use Ai\Agent\Checkpoint\CheckpointManager;
 
 /**
@@ -115,6 +117,18 @@ class AgentRuntime
 
     /** @var MemoryManager|null */
     protected $memoryManager = null;
+
+    /** @var PlanManager|null */
+    protected $planManager = null;
+
+    /** @var string 当前执行计划 ID */
+    protected $planId = '';
+
+    /** @var ReflectionManager|null */
+    protected $reflection = null;
+
+    /** @var string 当前任务目标 */
+    protected $goal = '';
 
     /** @var CheckpointManager|null */
     protected $checkpointManager = null;
@@ -538,6 +552,92 @@ class AgentRuntime
     }
 
     /**
+     * 设置执行计划管理器
+     *
+     * 设置后，当前计划的摘要会在每轮迭代注入系统提示词，让模型知道
+     * 整体步骤走到哪一步了。
+     *
+     * @param PlanManager|null $pm
+     * @return $this
+     */
+    public function setPlanManager($pm)
+    {
+        $this->planManager = $pm;
+        return $this;
+    }
+
+    /**
+     * @return PlanManager|null
+     */
+    public function getPlanManager()
+    {
+        return $this->planManager;
+    }
+
+    /**
+     * 指定当前执行的计划 ID
+     *
+     * @param string $planId
+     * @return $this
+     */
+    public function setPlanId($planId)
+    {
+        $this->planId = (string) $planId;
+        return $this;
+    }
+
+    /**
+     * @return string
+     */
+    public function getPlanId()
+    {
+        return $this->planId;
+    }
+
+    /**
+     * 设置反思管理器
+     *
+     * 设置后，模型在没有工具调用、准备结束时会先反思一次目标是否真的达成，
+     * 未达成则把下一步建议回填给模型继续迭代。未设置时循环行为不变。
+     *
+     * @param ReflectionManager|null $rm
+     * @return $this
+     */
+    public function setReflectionManager($rm)
+    {
+        $this->reflection = $rm;
+        return $this;
+    }
+
+    /**
+     * @return ReflectionManager|null
+     */
+    public function getReflectionManager()
+    {
+        return $this->reflection;
+    }
+
+    /**
+     * 设置当前任务目标（供 Planning / Reflection 使用）
+     *
+     * @param string $goal
+     * @return $this
+     */
+    public function setGoal($goal)
+    {
+        $this->goal = (string) $goal;
+        return $this;
+    }
+
+    /**
+     * @return string
+     */
+    public function getGoal()
+    {
+        return $this->goal;
+    }
+
+    /**
      * 设置验证管理器
      *
      * @param VerificationManager|null $vm
@@ -875,6 +975,10 @@ class AgentRuntime
         $context->setInstructionManager($this->instruction);
         $context->setMcpManager($this->mcpManager);
         $context->setMemoryManager($this->memoryManager);
+        $context->setPlanManager($this->planManager);
+        $context->setPlanId($this->planId);
+        $context->setReflectionManager($this->reflection);
+        $context->setGoal($this->goal);
         $context->setCheckpointManager($this->checkpointManager);
         if ($this->taskId !== null) {
             $context->setCheckpointId($this->taskId);

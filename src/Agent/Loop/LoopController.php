@@ -97,6 +97,67 @@ class LoopController
     }
 
     /**
+     * 执行一次反思——判断任务目标是否真的达成
+     *
+     * 只在模型不再调用工具、准备结束时调用。未设置 ReflectionManager 或
+     * 反思被停用时返回 null，循环行为与升级前完全一致。
+     *
+     * 目标取 `AgentContext::getGoal()`，未显式设置时退回首条用户消息——
+     * 那通常就是用户交代的任务。
+     *
+     * @param AgentContext $context
+     * @param int $iter 当前迭代序号（0 起）
+     * @return \Ai\Agent\Reflection\ReflectionResult|null
+     */
+    protected function reflect(AgentContext $context, $iter)
+    {
+        $rm = $context->getReflectionManager();
+        if ($rm === null || !$rm->isEnabled()) {
+            return null;
+        }
+
+        $goal = $context->getGoal();
+        if ($goal === '') {
+            $goal = $this->firstUserText($context->getMessages());
+        }
+        if (trim($goal) === '') {
+            return null;
+        }
+
+        return $rm->reflect($context->getMessages(), $goal, [
+            'iteration'    => (int) $iter,
+            'isFirstRound' => (int) $iter === 0,
+        ]);
+    }
+
+    /**
+     * 取首条用户消息的文本内容
+     *
+     * @param array<int, array<string, mixed>> $messages
+     * @return string
+     */
+    protected function firstUserText(array $messages)
+    {
+        foreach ($messages as $msg) {
+            if (!isset($msg['role']) || $msg['role'] !== 'user') {
+                continue;
+            }
+            $content = isset($msg['content']) ? $msg['content'] : '';
+            if (is_string($content)) {
+                return $content;
+            }
+            if (is_array($content)) {
+                foreach ($content as $block) {
+                    if (isset($block['type'], $block['text']) && $block['type'] === 'text') {
+                        return (string) $block['text'];
+                    }
+                }
+            }
+        }
+        return '';
+    }
+
+    /**
      * 检测本次工具调用中是否有 ask_user，返回待回答的问题 ID
      *
      * ask_user 工具的 handler 会返回 JSON：{'error': false, 'questions': [{'id': ..., 'question': ..., 'options': [...], ...}]}
@@ -374,13 +435,21 @@ class LoopController
                             $systemPrompt .= "\n\n" . $instPrompt;
                         }
                     }
-                    // 长期记忆注入（分作用域）
+                    // 长期记忆注入：有任务目标时只注入相关记忆，否则注入全部
                     $mm = $context->getMemoryManager();
                     if ($mm && $mm->isEnabled()) {
-                        $memPrompt = $mm->forPrompt();
+                        $goal = $context->getGoal();
+                        $memPrompt = $goal !== ''
+                            ? $mm->forPromptRelevant($goal)
+                            : $mm->forPrompt();
                         if ($memPrompt !== '') {
                             $systemPrompt .= "\n\n" . $memPrompt;
                         }
+                    }
+                    // 执行计划注入（当前步骤 + 整体进度）
+                    $plan = $context->getPlan();
+                    if ($plan !== null) {
+                        $systemPrompt .= "\n\n<plan>\n" . $plan->toSummary() . "\n</plan>";
                     }
                     $modelParams = [
                         'system'   => $systemPrompt,
@@ -436,8 +505,21 @@ class LoopController
                 $context->emit('agent_text', ['text' => $text]);
             }
 
-            // 没有工具调用 → 正常结束
+            // 没有工具调用 → 反思一次，确认目标真的达成后才结束
             if (!$toolCalls) {
+                $reflection = $this->reflect($context, $iter);
+                if ($reflection !== null) {
+                    $context->emit('reflection', [
+                        'success'     => $reflection->isSuccess(),
+                        'reason'      => $reflection->getReason(),
+                        'next_action' => $reflection->getNextAction(),
+                    ]);
+                    if ($reflection->shouldContinue()) {
+                        // 把反思结论作为用户消息回填，驱动下一轮继续执行
+                        $context->appendUser($reflection->toPrompt());
+                        continue;
+                    }
+                }
                 $context->emit('done');
                 $usage = $resp->getUsage();
                 return AgentResult::done($text, [
@@ -633,20 +715,23 @@ class LoopController
                 foreach ($allowedCalls as $call) {
                     $callName = isset($call['name']) ? (string) $call['name'] : '';
                     $callInput = isset($call['input']) && is_array($call['input']) ? $call['input'] : [];
-                    if (!$vm->hasRule($callName)) {
+                    if (!$vm->hasVerification($callName)) {
                         continue;
                     }
                     $verificationResults = $vm->verify($callName, $callInput);
                     foreach ($verificationResults as $vr) {
                         if (!$vr->isPassed()) {
+                            $label = $vr->getVerifierName() !== ''
+                                ? $vr->getVerifierName()
+                                : $vr->getCommand();
                             $context->emit('tool_error', [
                                 'name'    => $callName,
-                                'message' => "验证失败：{$vr->getCommand()} — {$vr->getError()}",
+                                'message' => "验证失败：{$label} — {$vr->getError()}",
                             ]);
                             $failedBlock = [
                                 'type'     => 'tool_result',
                                 'tool_use_id' => isset($call['id']) ? (string) $call['id'] : '',
-                                'content'  => "VERIFICATION FAILED: {$vr->getCommand()}\n{$vr->getError()}",
+                                'content'  => "VERIFICATION FAILED: {$label}\n{$vr->getError()}",
                                 'is_error' => true,
                             ];
                             // 尽量并入该调用已有的 tool_result（同一 tool_use_id），
@@ -656,7 +741,7 @@ class LoopController
                                 if (isset($r['tool_use_id'])
                                     && (string) $r['tool_use_id'] === $failedBlock['tool_use_id']) {
                                     $results[$i]['content'] = (string) $r['content']
-                                        . "\n\nVERIFICATION FAILED: {$vr->getCommand()}\n{$vr->getError()}";
+                                        . "\n\nVERIFICATION FAILED: {$label}\n{$vr->getError()}";
                                     $results[$i]['is_error'] = true;
                                     $merged = true;
                                     break;

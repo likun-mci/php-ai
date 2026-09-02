@@ -1941,6 +1941,56 @@ if (!$result->isPassed()) {
 
 `VerificationResult` 同时保留原有的 `isPassed()` / `getCommand()` / `getOutput()` / `getError()`，新增 `getVerifierName()`、`getErrors()`、`addError()`、`toArray()`，旧代码不受影响。
 
+#### 内置验证器
+
+除 `PhpSyntaxVerifier` 外还有三个开箱即用的验证器，都实现 `VerifierInterface`：
+
+| 验证器 | 名称 | 作用 |
+|--------|------|------|
+| `PhpSyntaxVerifier` | `php_syntax` | 对写入的 `.php` 跑 `php -l`，解析出带行号的语法错误 |
+| `SecurityVerifier` | `security` | 扫描危险函数（`eval` / `exec` / `system` …）与硬编码凭据 |
+| `UnitTestVerifier` | `unit_test` | 改动后跑测试命令，解析失败用例名 |
+| `GitDiffVerifier` | `git_diff` | 统计改动规模，超出上限或碰了受保护路径即拦下 |
+
+```php
+use Ai\Agent\Verification\GitDiffVerifier;
+use Ai\Agent\Verification\SecurityVerifier;
+use Ai\Agent\Verification\UnitTestVerifier;
+
+$agent->addVerifier(new SecurityVerifier());
+$agent->addVerifier(new UnitTestVerifier([
+    'command' => 'composer test',
+    'workdir' => '/var/www/project',
+]));
+$agent->addVerifier(new GitDiffVerifier([
+    'workdir'      => '/var/www/project',
+    'maxFiles'     => 10,     // 一次改超过 10 个文件 → 拦下
+    'maxLines'     => 500,    // 一次改超过 500 行 → 拦下
+    'protectPaths' => ['composer.json', '.github/'],
+]));
+```
+
+或者一次挂全部：
+
+```php
+$agent->useDefaultVerifiers([
+    'test'     => 'composer test',      // 给了才挂 UnitTestVerifier
+    'workdir'  => '/var/www/project',   // 给了才挂 GitDiffVerifier
+    'maxFiles' => 10,
+]);
+```
+
+`SecurityVerifier` 基于 `token_get_all()` 扫描，注释和字符串里的 `eval` 不会误报，
+`$db->exec()` 这类方法调用也不算内置危险函数。确实需要某个函数时用 `allow()` 放行：
+
+```php
+$sec = new SecurityVerifier();
+$sec->allow('exec');   // 比关掉整个验证器精确
+```
+
+`GitDiffVerifier` 的用途是给「放手让 Agent 改代码」加护栏——一次动了 40 个文件、
+几千行，通常不是任务要求的，而是模型跑偏了。目录不是 git 仓库时直接放行，不阻断流程。
+
 ### 工作区管理（WorkspaceManager）
 
 跟踪 Agent 当前工作区的 Git 状态，让模型了解 cwd、分支、已修改文件等。状态按需刷新（默认 5 秒缓存），不会每轮都跑 git 命令。
@@ -2093,6 +2143,50 @@ $mm->clearAll();          // 清空全部作用域
 $mm->forPrompt();         // 生成注入系统提示词的 <memory> 块
 ```
 
+#### 记忆检索（MemoryRetriever）
+
+`forPrompt()` 会把所有作用域的记忆整段注入。记忆攒多了之后这就成了负担：几千字的历史里
+可能只有两行和当前任务有关，其余全在挤占上下文。检索器把记忆按行拆成条目，
+只注入与当前任务最相关的几条：
+
+```php
+$retriever = $mm->retriever();
+
+$hits = $retriever->retrieve('登录接口报 401');
+// [['scope' => 'project', 'line' => 3, 'text' => '登录走 JWT，密钥在 config/jwt.php', 'score' => 62.5], ...]
+
+echo $retriever->forPrompt('登录接口报 401');
+// <memory-relevant query="登录接口报 401">
+// [project] 登录走 JWT，密钥在 config/jwt.php
+// </memory-relevant>
+
+$mm->retrieve('登录 401');              // 等价快捷方法
+$mm->forPromptRelevant('登录 401');     // 等价快捷方法
+$retriever->search('JWT', 'project');   // 纯关键词搜索，不打分
+```
+
+设置了 `setGoal()` 的 Agent 会自动走检索注入；没设目标时退回注入全部记忆，行为与升级前一致。
+
+相关性是纯本地计算，不调模型：英文按词、中文按二元组切分，命中越多、覆盖查询的比例越高分越高。
+这套打分**认字面不认语义**——问「鉴权」匹配不到只写了「登录」的记忆。需要语义检索时换掉打分器：
+
+```php
+$retriever->setScorer(function ($query, $text) use ($ai) {
+    return cosineSimilarity($ai->embed($query), $ai->embed($text)) * 100;
+});
+$retriever->setTopK(3)->setMinScore(20.0);
+```
+
+**压缩与过期**——长跑任务里记忆会无限增长，定期清理比等到超出 `maxInject` 被截断更可控：
+
+```php
+$retriever->compress('session', 20);   // 只保留最近 20 条，返回删除条数
+$retriever->expire('agent', 30);       // 删除 30 天前的条目
+```
+
+`expire()` 只处理带日期前缀的条目（`[2026-09-02] ...`），没有日期的一律保留——
+分不清写入时间就不该替用户决定它过期了。
+
 ### 检查点（CheckpointManager）
 
 每轮迭代结束时自动保存检查点（Checkpoint），Runtime 崩溃后可从最新检查点恢复。每个检查点以 JSON 文件持久化，按任务 ID 分组。
@@ -2227,6 +2321,37 @@ $review->reviewAndAdjust($plan->getId(), [
 $review->detectDependencyCycle($plan);   // 返回环上的步骤 ID，无环则为空数组
 ```
 
+#### 接入 Agent 运行时
+
+`PlanManager` 挂到 Agent 上之后，计划摘要会在每轮迭代注入系统提示词（`<plan>` 块），
+模型据此知道整体走到第几步：
+
+```php
+$agent->setPlanDir('/var/data/plans');            // 可选，不设则只放内存
+$plan = $agent->plan('重构支付模块', [
+    '读懂现有 Pay.php',
+    '拆出 PaymentGateway 接口',
+    '跑测试确认行为不变',
+]);
+
+$agent->run([['role' => 'user', 'content' => '开始重构']]);
+echo $agent->getPlan()->progress();   // 执行到哪一步了
+```
+
+`plan()` 同时把目标写进 `setGoal()`——反思和记忆检索都用这个目标。
+
+计划可以随任务状态一起落盘，崩溃恢复后接着执行：
+
+```php
+$state = new \Ai\Agent\Task\TaskState(['goal' => '重构支付模块']);
+$state->setPlan($plan);
+file_put_contents('/var/data/task.json', $state->toJson());
+
+// 恢复
+$restored = \Ai\Agent\Task\TaskState::fromJson(file_get_contents('/var/data/task.json'));
+$plan = $restored->restorePlan();   // Plan 对象，步骤状态原样还原
+```
+
 ### 自我反思（ReflectionManager）
 
 工具执行完不等于目标达成。`ReflectionManager` 在每轮工具结果回填后判断「目标是否真的完成」，未完成则给出下一步行动建议，形成「执行 → 检查 → 未完成 → 继续」的闭环。
@@ -2256,6 +2381,27 @@ $rm->setStrategy(function (array $messages, $goal) use ($ai) {
 ```
 
 `maxRounds` 是兜底：反思轮次达到上限后强制结束，避免模型在「还差一点」的判断里空转。
+
+#### 接入 Agent 循环
+
+挂到 Agent 上之后，反思发生在「模型不再调用工具、准备收工」的那一刻：目标没达成就把
+下一步建议作为 user 消息回填，驱动模型继续干，而不是就此结束。
+
+```php
+$agent->enableReflection(['maxRounds' => 5]);
+$agent->setGoal('让 composer test 全部通过');
+
+$agent->onEvent(function ($e) {
+    if ($e['type'] === 'reflection') {
+        echo $e['success'] ? "反思：目标已达成\n" : "反思：{$e['reason']}\n";
+    }
+});
+
+$agent->run([['role' => 'user', 'content' => '修一下失败的测试']]);
+```
+
+没调用 `enableReflection()` 时循环行为与升级前完全一致——不会平白多跑几轮。
+`setGoal()` 未设置时，目标退回取首条用户消息。
 
 ### 用户交互（AskUser）
 

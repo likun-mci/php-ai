@@ -511,6 +511,196 @@ class Agent
     }
 
     /**
+     * 挂载一个验证器
+     *
+     * 与 `setVerification()` 的命令式规则可以共存：命令式适合"跑一条命令看退出码"，
+     * 验证器适合需要解析输出、定位到文件行号的场景。未设置过验证管理器时自动创建一个。
+     *
+     * ```php
+     * $agent->addVerifier(new \Ai\Agent\Verification\PhpSyntaxVerifier());
+     * $agent->addVerifier(new \Ai\Agent\Verification\SecurityVerifier());
+     * ```
+     *
+     * @param \Ai\Agent\Verification\VerifierInterface $verifier
+     * @return $this
+     */
+    public function addVerifier($verifier)
+    {
+        $vm = $this->runtime->getVerificationManager();
+        if ($vm === null) {
+            $vm = new \Ai\Agent\Verification\VerificationManager();
+            $this->runtime->setVerificationManager($vm);
+        }
+        $vm->addVerifier($verifier);
+        return $this;
+    }
+
+    /**
+     * 一次性挂载全部内置验证器
+     *
+     * PHP 语法检查 + 安全扫描默认开启；单元测试与 git 差异检查需要显式给出
+     * 命令与目录，因此只在传了对应选项时挂载。
+     *
+     * ```php
+     * $agent->useDefaultVerifiers([
+     *     'test'    => 'composer test',        // 挂 UnitTestVerifier
+     *     'workdir' => '/var/www/project',     // 挂 GitDiffVerifier
+     *     'maxFiles' => 10,
+     * ]);
+     * ```
+     *
+     * @param array<string, mixed> $options test / workdir / maxFiles / maxLines / protectPaths
+     * @return $this
+     */
+    public function useDefaultVerifiers(array $options = [])
+    {
+        $this->addVerifier(new \Ai\Agent\Verification\PhpSyntaxVerifier());
+        $this->addVerifier(new \Ai\Agent\Verification\SecurityVerifier());
+
+        if (isset($options['test']) && (string) $options['test'] !== '') {
+            $this->addVerifier(new \Ai\Agent\Verification\UnitTestVerifier([
+                'command' => (string) $options['test'],
+                'workdir' => isset($options['workdir']) ? (string) $options['workdir'] : '',
+            ]));
+        }
+
+        if (isset($options['workdir']) && (string) $options['workdir'] !== '') {
+            $this->addVerifier(new \Ai\Agent\Verification\GitDiffVerifier([
+                'workdir'      => (string) $options['workdir'],
+                'maxFiles'     => isset($options['maxFiles']) ? (int) $options['maxFiles'] : 0,
+                'maxLines'     => isset($options['maxLines']) ? (int) $options['maxLines'] : 0,
+                'protectPaths' => isset($options['protectPaths']) && is_array($options['protectPaths'])
+                    ? $options['protectPaths']
+                    : [],
+            ]));
+        }
+
+        return $this;
+    }
+
+    /**
+     * 设置执行计划管理器
+     *
+     * @param \Ai\Agent\Planning\PlanManager $pm
+     * @return $this
+     */
+    public function setPlanManager($pm)
+    {
+        $this->runtime->setPlanManager($pm);
+        return $this;
+    }
+
+    /**
+     * 设置计划存储目录（自动创建 PlanManager）
+     *
+     * 传空字符串则只放内存，进程结束即丢失。
+     *
+     * @param string $baseDir
+     * @return $this
+     */
+    public function setPlanDir($baseDir)
+    {
+        $pm = new \Ai\Agent\Planning\PlanManager((string) $baseDir);
+        $this->runtime->setPlanManager($pm);
+        return $this;
+    }
+
+    /**
+     * 为当前 Agent 创建并启用一个执行计划
+     *
+     * 计划摘要会在每轮迭代注入系统提示词，模型据此知道整体步骤走到哪一步。
+     * 未设置过 PlanManager 时自动创建一个纯内存的。
+     *
+     * ```php
+     * $plan = $agent->plan('给 Auth 模块补测试', [
+     *     '阅读 src/Auth.php',
+     *     '写 tests/AuthTest.php',
+     *     '跑测试并修复',
+     * ]);
+     * ```
+     *
+     * @param string $goal
+     * @param string[] $steps 预定义步骤，留空则生成只有目标、没有步骤的空计划
+     * @return \Ai\Agent\Planning\Plan
+     */
+    public function plan($goal, array $steps = [])
+    {
+        $pm = $this->runtime->getPlanManager();
+        if ($pm === null) {
+            $pm = new \Ai\Agent\Planning\PlanManager();
+            $this->runtime->setPlanManager($pm);
+        }
+        $plan = $pm->createPlan((string) $goal, $steps ? ['steps' => $steps] : []);
+        $pm->start($plan->getId());
+        $this->runtime->setPlanId($plan->getId());
+        $this->runtime->setGoal((string) $goal);
+        return $plan;
+    }
+
+    /**
+     * 当前执行计划，未创建时返回 null
+     *
+     * @return \Ai\Agent\Planning\Plan|null
+     */
+    public function getPlan()
+    {
+        $pm = $this->runtime->getPlanManager();
+        $planId = $this->runtime->getPlanId();
+        if ($pm === null || $planId === '') {
+            return null;
+        }
+        return $pm->getPlan($planId);
+    }
+
+    /**
+     * 开启自我反思
+     *
+     * 开启后，模型在没有工具调用、准备结束时会先反思一次目标是否真的达成；
+     * 未达成则把下一步建议回填给模型继续迭代，而不是就此收工。
+     *
+     * ```php
+     * $agent->enableReflection(['maxRounds' => 5]);
+     * $agent->setGoal('让 composer test 全部通过');
+     * ```
+     *
+     * @param array<string, mixed> $options maxRounds / strategy / enabled
+     * @return $this
+     */
+    public function enableReflection(array $options = [])
+    {
+        $rm = new \Ai\Agent\Reflection\ReflectionManager($options);
+        $this->runtime->setReflectionManager($rm);
+        return $this;
+    }
+
+    /**
+     * 设置反思管理器
+     *
+     * @param \Ai\Agent\Reflection\ReflectionManager $rm
+     * @return $this
+     */
+    public function setReflectionManager($rm)
+    {
+        $this->runtime->setReflectionManager($rm);
+        return $this;
+    }
+
+    /**
+     * 设置当前任务目标
+     *
+     * 反思据此判断"目标是否达成"；开启记忆检索后，也用它检索相关记忆。
+     * 不设置时退回用首条用户消息当目标。
+     *
+     * @param string $goal
+     * @return $this
+     */
+    public function setGoal($goal)
+    {
+        $this->runtime->setGoal((string) $goal);
+        return $this;
+    }
+
+    /**
      * 设置技能管理器
      *
      * @param \Ai\Agent\Skill\SkillManager $sm

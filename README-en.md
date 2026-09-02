@@ -1929,6 +1929,54 @@ if (!$result->isPassed()) {
 
 `VerificationResult` keeps the existing `isPassed()` / `getCommand()` / `getOutput()` / `getError()` and adds `getVerifierName()`, `getErrors()`, `addError()` and `toArray()`, so existing code is unaffected.
 
+#### Built-in verifiers
+
+Besides `PhpSyntaxVerifier` there are three more ready-to-use verifiers, all implementing `VerifierInterface`:
+
+| Verifier | Name | What it does |
+|----------|------|--------------|
+| `PhpSyntaxVerifier` | `php_syntax` | Runs `php -l` on written `.php` files and parses syntax errors with line numbers |
+| `SecurityVerifier` | `security` | Scans for dangerous functions (`eval` / `exec` / `system` …) and hardcoded credentials |
+| `UnitTestVerifier` | `unit_test` | Runs the test command after a change and parses failing case names |
+| `GitDiffVerifier` | `git_diff` | Measures the size of the change; blocks when it exceeds the limits or touches a protected path |
+
+```php
+use Ai\Agent\Verification\GitDiffVerifier;
+use Ai\Agent\Verification\SecurityVerifier;
+use Ai\Agent\Verification\UnitTestVerifier;
+
+$agent->addVerifier(new SecurityVerifier());
+$agent->addVerifier(new UnitTestVerifier([
+    'command' => 'composer test',
+    'workdir' => '/var/www/project',
+]));
+$agent->addVerifier(new GitDiffVerifier([
+    'workdir'      => '/var/www/project',
+    'maxFiles'     => 10,     // more than 10 files changed at once → blocked
+    'maxLines'     => 500,    // more than 500 lines changed at once → blocked
+    'protectPaths' => ['composer.json', '.github/'],
+]));
+```
+
+Or mount them all at once:
+
+```php
+$agent->useDefaultVerifiers([
+    'test'     => 'composer test',      // only mounts UnitTestVerifier when given
+    'workdir'  => '/var/www/project',   // only mounts GitDiffVerifier when given
+    'maxFiles' => 10,
+]);
+```
+
+`SecurityVerifier` scans via `token_get_all()`, so an `eval` inside a comment or string is not a false positive, and a method call such as `$db->exec()` is not treated as the built-in dangerous function. When you really do need one of them, allow it explicitly:
+
+```php
+$sec = new SecurityVerifier();
+$sec->allow('exec');   // more precise than disabling the whole verifier
+```
+
+`GitDiffVerifier` exists to put a guard rail around "let the Agent change code freely" — 40 files and a few thousand lines in one go is usually the model drifting, not the task. When the directory is not a git repository it passes straight through rather than blocking the flow.
+
 ### Workspace management (WorkspaceManager)
 
 Tracks the Agent's working directory Git status so the model knows cwd, branch, modified files, and more. The state is refreshed on demand (5-second cache by default) instead of running git commands every turn.
@@ -2081,6 +2129,46 @@ $mm->clearAll();            // clear all scopes
 $mm->forPrompt();           // generate <memory> block for system prompt
 ```
 
+#### Memory retrieval (MemoryRetriever)
+
+`forPrompt()` injects every scope's memory wholesale. Once memories pile up that becomes a burden: out of a few thousand characters of history maybe two lines relate to the current task, and the rest just crowds the context. The retriever splits memory into per-line entries and injects only the few most relevant to the task at hand:
+
+```php
+$retriever = $mm->retriever();
+
+$hits = $retriever->retrieve('login endpoint returns 401');
+// [['scope' => 'project', 'line' => 3, 'text' => 'Login uses JWT, key in config/jwt.php', 'score' => 62.5], ...]
+
+echo $retriever->forPrompt('login endpoint returns 401');
+// <memory-relevant query="login endpoint returns 401">
+// [project] Login uses JWT, key in config/jwt.php
+// </memory-relevant>
+
+$mm->retrieve('login 401');              // equivalent shortcut
+$mm->forPromptRelevant('login 401');     // equivalent shortcut
+$retriever->search('JWT', 'project');    // plain keyword search, no scoring
+```
+
+An Agent with `setGoal()` set uses retrieval-based injection automatically; without a goal it falls back to injecting all memory, exactly as before.
+
+Relevance is computed locally, with no model call: English is split into words, CJK into bigrams, and the more tokens match — and the larger the share of the query they cover — the higher the score. This scoring is **literal, not semantic** — asking about "authentication" will not match a memory that only says "login". Swap in your own scorer for semantic retrieval:
+
+```php
+$retriever->setScorer(function ($query, $text) use ($ai) {
+    return cosineSimilarity($ai->embed($query), $ai->embed($text)) * 100;
+});
+$retriever->setTopK(3)->setMinScore(20.0);
+```
+
+**Compression and expiry** — memory grows without bound on long-running tasks, and pruning it on a schedule is more predictable than letting it be truncated at `maxInject`:
+
+```php
+$retriever->compress('session', 20);   // keep only the 20 most recent entries; returns how many were dropped
+$retriever->expire('agent', 30);       // drop entries older than 30 days
+```
+
+`expire()` only touches entries with a date prefix (`[2026-09-02] ...`) and keeps everything else — if the write time is unknown, it is not for the library to decide the entry has expired.
+
 ### Checkpoint (CheckpointManager)
 
 Automatically saves a checkpoint at the end of each iteration. If the Runtime crashes, it can resume from the latest checkpoint. Each checkpoint is persisted as a JSON file, grouped by task ID.
@@ -2215,6 +2303,36 @@ $review->reviewAndAdjust($plan->getId(), [
 $review->detectDependencyCycle($plan);   // returns the step IDs on the cycle, empty array if acyclic
 ```
 
+#### Wiring it into the Agent runtime
+
+Once a `PlanManager` is attached to the Agent, the plan summary is injected into the system prompt on every iteration (as a `<plan>` block), so the model knows which step it is on:
+
+```php
+$agent->setPlanDir('/var/data/plans');            // optional; in-memory only without it
+$plan = $agent->plan('Refactor the payment module', [
+    'Understand the existing Pay.php',
+    'Extract a PaymentGateway interface',
+    'Run the tests and confirm behaviour is unchanged',
+]);
+
+$agent->run([['role' => 'user', 'content' => 'Start the refactor']]);
+echo $agent->getPlan()->progress();   // how far along it is
+```
+
+`plan()` also writes the goal via `setGoal()` — both reflection and memory retrieval use that goal.
+
+A plan can be persisted alongside the task state, so execution continues after a crash:
+
+```php
+$state = new \Ai\Agent\Task\TaskState(['goal' => 'Refactor the payment module']);
+$state->setPlan($plan);
+file_put_contents('/var/data/task.json', $state->toJson());
+
+// Restore
+$restored = \Ai\Agent\Task\TaskState::fromJson(file_get_contents('/var/data/task.json'));
+$plan = $restored->restorePlan();   // a Plan object with step states intact
+```
+
 ### Self-reflection (ReflectionManager)
 
 A tool finishing is not the same as the goal being met. `ReflectionManager` decides whether the goal is actually complete after each round of tool results, and suggests a next action when it is not — forming an "execute → check → not done → continue" loop.
@@ -2244,6 +2362,25 @@ $rm->setStrategy(function (array $messages, $goal) use ($ai) {
 ```
 
 `maxRounds` is the backstop: once the reflection rounds hit the limit the loop is forced to stop, so the model cannot spin forever on "almost there".
+
+#### Wiring it into the Agent loop
+
+Once attached to the Agent, reflection happens at the moment the model stops calling tools and is about to wrap up: if the goal is not met, the next-step suggestion is appended as a user message to keep the model working rather than ending there.
+
+```php
+$agent->enableReflection(['maxRounds' => 5]);
+$agent->setGoal('Make the whole composer test suite pass');
+
+$agent->onEvent(function ($e) {
+    if ($e['type'] === 'reflection') {
+        echo $e['success'] ? "Reflection: goal met\n" : "Reflection: {$e['reason']}\n";
+    }
+});
+
+$agent->run([['role' => 'user', 'content' => 'Fix the failing tests']]);
+```
+
+Without calling `enableReflection()` the loop behaves exactly as before — no extra rounds appear out of nowhere. When `setGoal()` is not set, the goal falls back to the first user message.
 
 ### User interaction (AskUser)
 

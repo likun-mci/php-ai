@@ -13,6 +13,8 @@ use Ai\Agent\Skill\SkillManager;
 use Ai\Agent\Instruction\InstructionManager;
 use Ai\Agent\Mcp\McpManager;
 use Ai\Agent\Memory\MemoryManager;
+use Ai\Agent\Planning\PlanManager;
+use Ai\Agent\Reflection\ReflectionManager;
 use Ai\Agent\Checkpoint\CheckpointManager;
 
 /**
@@ -116,6 +118,18 @@ class AgentContext
     /** @var CheckpointManager|null */
     protected $checkpointManager = null;
 
+    /** @var PlanManager|null */
+    protected $planManager = null;
+
+    /** @var string 当前执行计划 ID */
+    protected $planId = '';
+
+    /** @var ReflectionManager|null */
+    protected $reflection = null;
+
+    /** @var string 当前任务目标（供 Planning / Reflection 判断是否达成） */
+    protected $goal = '';
+
     /** @var string 当前 checkpoint 关联 ID */
     protected $checkpointId = '';
 
@@ -189,6 +203,100 @@ class AgentContext
     public function getVerificationManager()
     {
         return $this->verification;
+    }
+
+    /* ---------- 执行计划 ---------- */
+
+    /**
+     * @param PlanManager|null $pm
+     * @return $this
+     */
+    public function setPlanManager($pm)
+    {
+        $this->planManager = $pm;
+        return $this;
+    }
+
+    /**
+     * @return PlanManager|null
+     */
+    public function getPlanManager()
+    {
+        return $this->planManager;
+    }
+
+    /**
+     * @param string $planId
+     * @return $this
+     */
+    public function setPlanId($planId)
+    {
+        $this->planId = (string) $planId;
+        return $this;
+    }
+
+    /**
+     * @return string
+     */
+    public function getPlanId()
+    {
+        return $this->planId;
+    }
+
+    /**
+     * 当前执行计划，未设置计划管理器或计划 ID 时返回 null
+     *
+     * @return \Ai\Agent\Planning\Plan|null
+     */
+    public function getPlan()
+    {
+        if ($this->planManager === null || $this->planId === '') {
+            return null;
+        }
+        return $this->planManager->getPlan($this->planId);
+    }
+
+    /* ---------- 自我反思 ---------- */
+
+    /**
+     * @param ReflectionManager|null $rm
+     * @return $this
+     */
+    public function setReflectionManager($rm)
+    {
+        $this->reflection = $rm;
+        return $this;
+    }
+
+    /**
+     * @return ReflectionManager|null
+     */
+    public function getReflectionManager()
+    {
+        return $this->reflection;
+    }
+
+    /**
+     * 设置当前任务目标
+     *
+     * 反思用它判断"目标是否达成"，计划用它作为 goal。为空时反思会退回到
+     * 从首条用户消息推断。
+     *
+     * @param string $goal
+     * @return $this
+     */
+    public function setGoal($goal)
+    {
+        $this->goal = (string) $goal;
+        return $this;
+    }
+
+    /**
+     * @return string
+     */
+    public function getGoal()
+    {
+        return $this->goal;
     }
 
     /* ---------- 工作区管理 ---------- */
@@ -408,6 +516,25 @@ class AgentContext
     public function appendToolResults(array $results)
     {
         $this->messages[] = ['role' => 'user', 'content' => $results];
+        return $this;
+    }
+
+    /**
+     * 追加一条纯文本 user 消息
+     *
+     * 反思结论、下一步建议这类"框架自己说的话"通过它回填，
+     * 与工具结果的回填路径区分开。
+     *
+     * @param string $text
+     * @return $this
+     */
+    public function appendUser($text)
+    {
+        $text = (string) $text;
+        if (trim($text) === '') {
+            return $this;
+        }
+        $this->messages[] = ['role' => 'user', 'content' => $text];
         return $this;
     }
 

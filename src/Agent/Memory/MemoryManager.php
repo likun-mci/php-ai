@@ -60,6 +60,9 @@ class MemoryManager
     /** @var string 基础目录 */
     protected $baseDir = '';
 
+    /** @var MemoryRetriever|null 记忆检索器（惰性创建） */
+    protected $retriever = null;
+
     /**
      * @param string $baseDir 记忆文件存储目录
      * @param array<string, mixed> $options maxInject, enabled
@@ -231,6 +234,60 @@ class MemoryManager
             $this->forget($scope);
         }
         return $this;
+    }
+
+    /**
+     * 记忆检索器（惰性创建）
+     *
+     * @return MemoryRetriever
+     */
+    public function retriever()
+    {
+        if ($this->retriever === null) {
+            $this->retriever = new MemoryRetriever($this);
+        }
+        return $this->retriever;
+    }
+
+    /**
+     * 替换记忆检索器（如需自定义打分策略）
+     *
+     * @param MemoryRetriever|null $retriever
+     * @return $this
+     */
+    public function setRetriever($retriever)
+    {
+        $this->retriever = $retriever;
+        return $this;
+    }
+
+    /**
+     * 检索与查询相关的记忆条目
+     *
+     * @param string $query
+     * @param string[] $scopes 限定作用域，空数组表示全部
+     * @return array<int, array{scope: string, line: int, text: string, score: float}>
+     */
+    public function retrieve($query, array $scopes = [])
+    {
+        return $this->retriever()->retrieve((string) $query, $scopes);
+    }
+
+    /**
+     * 生成注入系统提示词的相关记忆文本
+     *
+     * 与 `forPrompt()` 的区别：只注入与查询相关的条目，而不是全部记忆。
+     * 查询为空时退回 `forPrompt()`。
+     *
+     * @param string $query
+     * @return string
+     */
+    public function forPromptRelevant($query)
+    {
+        if (!$this->enabled) {
+            return '';
+        }
+        return $this->retriever()->forPrompt((string) $query);
     }
 
     /**

@@ -104,7 +104,9 @@
             "php tests/agent_worktree_test.php",
             "php tests/agent_planning_test.php",
             "php tests/agent_reflection_test.php",
-            "php tests/agent_verification2_test.php"
+            "php tests/agent_verification2_test.php",
+            "php tests/agent_memory2_test.php",
+            "php tests/agent_phase41_test.php"
         ],
         "analyse": "phpstan analyse --memory-limit=512M",
         "compat": "phpcs -p --standard=PHPCompatibility --runtime-set testVersion 7.1- --extensions=php --ignore='*/vendor/*' .",

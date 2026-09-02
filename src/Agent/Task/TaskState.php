@@ -49,6 +49,9 @@ class TaskState
     /** @var array<string, array<string, mixed>> */
     protected $subtasks = [];
 
+    /** @var array<string, mixed> 执行计划快照（Plan::toArray()），无计划时为空数组 */
+    protected $plan = [];
+
     /**
      * @param array<string, mixed> $data
      */
@@ -63,6 +66,51 @@ class TaskState
         $this->tests         = isset($data['tests']) && is_array($data['tests']) ? $data['tests'] : [];
         $this->errors        = isset($data['errors']) && is_array($data['errors']) ? $data['errors'] : [];
         $this->subtasks      = isset($data['subtasks']) && is_array($data['subtasks']) ? $data['subtasks'] : [];
+        $this->plan          = isset($data['plan']) && is_array($data['plan']) ? $data['plan'] : [];
+    }
+
+    /**
+     * 保存执行计划快照
+     *
+     * 存的是 `Plan::toArray()` 的结果而不是 Plan 对象——TaskState 要能整体
+     * JSON 序列化落盘，崩溃恢复后再用 `Plan::fromArray()` 还原。
+     *
+     * @param \Ai\Agent\Planning\Plan|array<string, mixed>|null $plan
+     * @return $this
+     */
+    public function setPlan($plan)
+    {
+        if ($plan === null) {
+            $this->plan = [];
+        } elseif (is_array($plan)) {
+            $this->plan = $plan;
+        } else {
+            $this->plan = $plan->toArray();
+        }
+        return $this;
+    }
+
+    /**
+     * 执行计划快照，无计划时为空数组
+     *
+     * @return array<string, mixed>
+     */
+    public function getPlan()
+    {
+        return $this->plan;
+    }
+
+    /**
+     * 还原执行计划对象，无计划时返回 null
+     *
+     * @return \Ai\Agent\Planning\Plan|null
+     */
+    public function restorePlan()
+    {
+        if (!$this->plan) {
+            return null;
+        }
+        return \Ai\Agent\Planning\Plan::fromArray($this->plan);
     }
 
     /**
@@ -277,6 +325,15 @@ class TaskState
         $lines[] = '目标：' . $this->goal;
         $lines[] = '';
 
+        if ($this->plan) {
+            $plan = $this->restorePlan();
+            if ($plan !== null) {
+                $lines[] = '## 执行计划';
+                $lines[] = $plan->toSummary();
+                $lines[] = '';
+            }
+        }
+
         if ($this->completed) {
             $lines[] = '## 已完成';
             foreach ($this->completed as $item) {
@@ -346,6 +403,7 @@ class TaskState
             'tests'         => $this->tests,
             'errors'        => $this->errors,
             'subtasks'      => $this->subtasks,
+            'plan'          => $this->plan,
         ];
     }
 

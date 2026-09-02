@@ -2514,6 +2514,178 @@ $agent->run([['role' => 'user', 'content' => '修一下失败的测试']]);
 没调用 `enableReflection()` 时循环行为与升级前完全一致——不会平白多跑几轮。
 `setGoal()` 未设置时，目标退回取首条用户消息。
 
+### 开发者 API：三样东西就能开工
+
+用户不需要理解 LoopController / ContextManager / PermissionManager / SubAgentManager——提供 AI、workdir、Prompt 三样东西即可：
+
+```php
+use Ai\Agent\Agent;
+
+$agent = Agent::create($ai)
+    ->workdir('/var/www/project')
+    ->codeAgent();
+
+$result = $agent->task('把这个项目的登录系统改造成支持 Google OAuth，并完成测试');
+
+print_r($result->toContract());
+// [
+//   'status'        => 'completed',
+//   'summary'       => '已接入 Google OAuth 并补充测试',
+//   'files_changed' => ['src/Auth.php', 'tests/AuthTest.php'],
+//   'tests'         => ['passed' => true],
+//   'verification'  => ['passed' => true],
+//   'artifacts'     => ['artifact://task_1/test-report.json'],
+//   'cost' => 0.042, 'iterations' => 14, 'duration_ms' => 68210.5,
+// ]
+```
+
+链式配置：
+
+```php
+$agent = Agent::create($ai)
+    ->workdir(__DIR__)
+    ->codeAgent(['test' => 'composer test'])
+    ->tools(['my_tool' => $myTool])              // 追加工具（不覆盖已有的）
+    ->skills('/path/to/skills')                  // 装载技能
+    ->agents(['dba' => [                         // 注册自定义子 Agent
+        'description' => '数据库结构与索引优化',
+        'tools'       => ['read_file', 'bash'],  // 写工具名即可，从父工具集里挑
+    ]]);
+
+$result = $agent->task('修复登录 Bug');          // 编排层自己选策略
+$handle = $agent->dispatch('扫描整个项目');      // 后台执行，立即返回 task_id
+$agent->resume($handle['task_id']);              // 查后台句柄，或从检查点恢复
+```
+
+`AgentResult` 的结构化契约：`getStatus()` / `getSummary()` / `getFilesChanged()` / `getTests()` / `getVerification()` / `getArtifacts()` / `getSubtasks()` / `getCost()` / `getDuration()`，`toContract()` 一次拿全，可直接 JSON 返回给调用方。字段由调用方或 `WorkspaceSnapshot` 填入——`AgentResult` 自己不去扫工作区，那是 Workspace 的职责。
+
+### 工具分组与按需发现
+
+工具多了不该一股脑全发给模型：几十个工具定义塞进每一轮请求，既占 token 又让模型更难选对。
+
+```php
+$agent->toolGroups()->disable(\Ai\Agent\Tool\ToolGroup::DEPLOYMENT);   // 这次任务不许碰部署
+$agent->toolGroups()->only([\Ai\Agent\Tool\ToolGroup::FILESYSTEM]);    // 只开文件操作
+```
+
+内置分组：filesystem / git / database / network / browser / cloud / testing / deployment。**没归过组的工具默认可用**——分组用来收窄，不该因为忘了归类就让工具消失。工具属于多个分组时，任一分组启用即可用。
+
+按需发现则反过来：初始只给一小撮常用工具 + 一个 `search_tools`，模型需要别的能力时自己搜：
+
+```php
+$agent->useToolDiscovery(['read_file', 'grep', 'glob']);
+
+// 模型调用：search_tools(query: "database")
+//   → 找到 sql_query / db_schema，自动启用，之后可直接调用
+```
+
+搜索是纯本地的关键词匹配（工具名 + 描述），不调模型——为了省 token 而多花一次模型调用不划算。
+
+### 分层权限策略
+
+权限来自四个层面，关系是**取交集**而不是取并集，并且 **DENY 优先**：
+
+```text
+最终权限 = Global AND Agent AND Skill AND Task
+```
+
+```php
+$policy = $agent->permissionPolicy();
+$policy->layer('global')
+    ->allow('Bash(git *)')
+    ->deny('Bash(rm -rf *)')
+    ->deny('Write(.env)');
+$policy->layer('task')->allow('Bash(php *)');
+
+$agent->applyPermissionPolicy();
+
+$policy->check('Bash', 'git status');    // 'allow'
+$policy->check('Bash', 'rm -rf /');      // 'deny'
+$policy->check('Bash', 'curl x.com');    // 'ask' —— 没人明确允许
+$policy->explain('Bash', 'rm -rf /');    // ['decision' => 'deny', 'layer' => 'global', 'rule' => 'Bash(rm -rf *)']
+```
+
+顺序不能反过来：如果允许下层放宽上层，那么一个被 Skill 声明允许的 `Bash(rm -rf *)` 就能绕过全局禁令。任务结束时 `clearLayer('task')`，层与层之间不该互相污染。
+
+### 事件回放（EventLog）
+
+前端断线重连时要的是「从我收到的最后一条之后继续发」，**只重发事件，不重新执行 Agent**——重跑会产生新的副作用（再改一遍文件、再跑一遍命令），而客户端要的只是补上漏掉的那几条。
+
+```php
+$log = $agent->eventLog('/var/data/events');   // 创建后自动接上事件回调
+
+// 客户端带着 Last-Event-ID 重连
+$missed = $log->sinceId($lastEventId);
+echo EventLog::toSse($missed);                 // 直接输出 SSE 帧
+
+$log->since(42);                // 按 sequence 补发
+$log->ofTask('task_1');         // 某个任务的全部事件
+$log->ofType('tool_call');      // 按类型过滤
+$log->lastSequence();           // 当前最新序号
+```
+
+事件 ID 找不到时返回全部——宁可重发也不要漏发，客户端自己去重比丢消息强。不传目录则只在内存里；**断线重连场景必须配目录**，重连时进程可能已经换了。
+
+### 调度与并发上限
+
+```php
+$scheduler = $agent->scheduler([
+    'max_tasks'             => 50,
+    'max_concurrent'        => 4,
+    'max_subagents'         => 4,
+    'max_background_agents' => 2,
+    'max_parallel_tools'    => 8,
+    'maxRetries'            => 2,
+]);
+
+$scheduler->submit('task_1', '扫描安全问题', AgentScheduler::PRIORITY_HIGH);
+$scheduler->submit('task_2', '更新文档', AgentScheduler::PRIORITY_LOW);
+
+$next = $scheduler->next();          // 'task_1' —— 高优先级先跑
+$scheduler->start($next);
+$scheduler->finish($next, false);    // 失败 → 自动重新入队（还有重试次数时）
+```
+
+优先级：critical / high / normal / low，同优先级按提交顺序。**一个 PHP 请求不该产生几十个 Agent**——每个子 Agent 都是独立的模型调用与上下文，失控的并发既烧钱又会把内存吃满，所以默认上限都很保守。
+
+挂上 `TaskGraph` 之后只调度依赖已满足的任务。失败自动重试是因为瞬时故障（网络抖动、模型超时）重试一次多半就好了，让人手动重投没有意义。
+
+### 模型路由与产物管理
+
+让 explorer 用最强的模型去 grep 代码是浪费，让 coder 用最便宜的模型去改架构是省小钱花大钱：
+
+```php
+$router = $agent->modelRouter([
+    'cheap'    => 'claude-haiku-4-5-20251001',
+    'standard' => 'claude-sonnet-5',
+    'premium'  => 'claude-opus-5',
+]);
+
+$router->route(['agent' => 'explorer']);                     // cheap
+$router->route(['agent' => 'coder']);                        // premium
+$router->route(['task' => '重构整个认证系统']);               // premium（复杂度高）
+$router->route(['agent' => 'coder', 'budget_left' => 0.05]);  // cheap（预算见底，先把任务跑完）
+```
+
+**不配置模型名就不路由**：返回空串，调用方沿用当前模型。硬塞一个猜的模型名，换来的是运行时报「模型不存在」。
+
+产物（测试报告、补丁、日志、分析结果）不该全文塞进上下文——一份 5000 行的报告扔进去，剩下的对话就没地方了：
+
+```php
+$artifacts = $agent->artifacts('/var/data/artifacts');
+
+$ref = $artifacts->put('task_123', 'test-report.json', $reportJson);
+// 'artifact://task_123/test-report.json'
+
+$artifacts->preview($ref, 500);      // 只给模型看开头
+$artifacts->get($ref);               // 需要细节时再取全文
+$artifacts->listFor('task_123');     // 这个任务产出了什么
+$artifacts->summarize('task_1', 'out.txt', $output, 5);
+// '已保存到 artifact://task_1/out.txt（12.4 KB）：\nFAILURES!\n…'
+```
+
+产物名会做路径穿越防护，`../../../etc/passwd` 这类写法进不来。
+
 ### 编排层（AgentOrchestrator）
 
 `AgentRuntime` 回答的是「怎么跑一轮循环」，编排层回答的是**「这活该怎么干」**——直接调工具、先拆计划、派给子 Agent、并行铺开，还是丢后台。

@@ -69,6 +69,27 @@ class Agent
     /** @var \Ai\Agent\Memory\MemoryConsolidator|null 记忆整理器 */
     protected $consolidator = null;
 
+    /** @var \Ai\Agent\Orchestrator\AgentScheduler|null 任务调度器 */
+    protected $scheduler = null;
+
+    /** @var \Ai\Agent\Orchestrator\ArtifactManager|null 产物管理器 */
+    protected $artifacts = null;
+
+    /** @var \Ai\Agent\Event\EventLog|null 事件日志 */
+    protected $eventLog = null;
+
+    /** @var \Ai\Agent\Orchestrator\ModelRouter|null 模型路由器 */
+    protected $modelRouter = null;
+
+    /** @var \Ai\Agent\Tool\ToolGroup|null 工具分组 */
+    protected $toolGroups = null;
+
+    /** @var \Ai\Agent\Tool\ToolDiscovery|null 工具发现 */
+    protected $toolDiscovery = null;
+
+    /** @var \Ai\Agent\Permission\PermissionPolicy|null 分层权限策略 */
+    protected $permissionPolicy = null;
+
     /**
      * @param AI $ai
      */
@@ -76,6 +97,111 @@ class Agent
     {
         $this->ai = $ai;
         $this->runtime = new AgentRuntime($ai);
+    }
+
+    /**
+     * 创建一个 Agent（链式配置入口）
+     *
+     * ```php
+     * $agent = Agent::create($ai)
+     *     ->workdir('/var/www/project')
+     *     ->codeAgent();
+     *
+     * $result = $agent->task('把登录系统改造成支持 Google OAuth，并完成测试');
+     * ```
+     *
+     * 使用者不需要理解 LoopController / ContextManager / PermissionManager /
+     * SubAgentManager——这些在 `codeAgent()` 里已经装配好了。
+     *
+     * @param AI $ai
+     * @return self
+     */
+    public static function create(AI $ai)
+    {
+        return new self($ai);
+    }
+
+    /**
+     * 设置工作目录（`setWorkdir()` 的链式别名）
+     *
+     * @param string $dir
+     * @return $this
+     */
+    public function workdir($dir)
+    {
+        return $this->setWorkdir($dir);
+    }
+
+    /**
+     * 追加工具（保留已注册的）
+     *
+     * `setTools()` 是覆盖，这个是追加——装配好 codeAgent 之后再加自己的工具时用它。
+     *
+     * @param array<string, mixed> $tools
+     * @return $this
+     */
+    public function tools(array $tools)
+    {
+        $merged = array_merge($this->runtime->getToolRegistry()->all(), $tools);
+        return $this->setTools($merged);
+    }
+
+    /**
+     * 从目录装载技能（`discoverSkills()` 的链式别名）
+     *
+     * @param string|string[] $dirs
+     * @return $this
+     */
+    public function skills($dirs)
+    {
+        $this->discoverSkills($dirs);
+        return $this;
+    }
+
+    /**
+     * 注册一批子 Agent
+     *
+     * ```php
+     * $agent->agents([
+     *     'dba' => ['description' => '数据库结构与查询优化', 'tools' => ['read_file', 'bash']],
+     * ]);
+     * ```
+     *
+     * 数组里的 `tools` 可以直接写工具名——会从父 Agent 的工具集里挑，
+     * 挑不到的不会凭空出现。
+     *
+     * @param array<string, array<string, mixed>> $agents 名称 => 配置
+     * @return $this
+     */
+    public function agents(array $agents)
+    {
+        $sam = $this->runtime->getSubAgentManager();
+        if ($sam === null) {
+            $sam = new \Ai\Agent\SubAgent\SubAgentManager($this->ai);
+            $this->setSubAgentManager($sam);
+        }
+
+        $parentTools = $this->runtime->getToolRegistry()->all();
+        foreach ($agents as $name => $config) {
+            if (!is_array($config)) {
+                continue;
+            }
+            // tools 写成名字数组时按名字从父工具集里取
+            if (isset($config['tools']) && is_array($config['tools'])) {
+                $resolved = [];
+                foreach ($config['tools'] as $key => $value) {
+                    $toolName = is_string($value) ? $value : (string) $key;
+                    if (isset($parentTools[$toolName])) {
+                        $resolved[$toolName] = $parentTools[$toolName];
+                    } elseif (!is_string($value)) {
+                        $resolved[(string) $key] = $value;
+                    }
+                }
+                $config['tools'] = $resolved;
+            }
+            $sam->register((string) $name, $config);
+        }
+        return $this;
     }
 
     /**
@@ -595,6 +721,168 @@ class Agent
         }
 
         return $this;
+    }
+
+    /**
+     * 任务调度器（惰性创建）
+     *
+     * 控制「下一个跑哪个」与「同时最多跑几个」。
+     *
+     * @param array<string, mixed> $limits max_tasks / max_subagents / max_concurrent …
+     * @return \Ai\Agent\Orchestrator\AgentScheduler
+     */
+    public function scheduler(array $limits = [])
+    {
+        if ($this->scheduler === null) {
+            $this->scheduler = new \Ai\Agent\Orchestrator\AgentScheduler($limits);
+        }
+        return $this->scheduler;
+    }
+
+    /**
+     * 产物管理器（惰性创建）
+     *
+     * 测试报告、补丁、日志不该全文塞进上下文——存在外面，上下文里只留引用。
+     *
+     * @param string $baseDir 存储目录，空则纯内存
+     * @return \Ai\Agent\Orchestrator\ArtifactManager
+     */
+    public function artifacts($baseDir = '')
+    {
+        if ($this->artifacts === null) {
+            $this->artifacts = new \Ai\Agent\Orchestrator\ArtifactManager((string) $baseDir);
+        }
+        return $this->artifacts;
+    }
+
+    /**
+     * 事件日志（惰性创建）
+     *
+     * 断线重连时从指定 sequence 续发，**只重发事件，不重跑 Agent**。
+     * 创建后会自动接上事件回调。
+     *
+     * @param string $baseDir 落盘目录，空则纯内存
+     * @return \Ai\Agent\Event\EventLog
+     */
+    public function eventLog($baseDir = '')
+    {
+        if ($this->eventLog !== null) {
+            return $this->eventLog;
+        }
+
+        $log = new \Ai\Agent\Event\EventLog((string) $baseDir);
+        $this->eventLog = $log;
+
+        $recorder = $log->recorder();
+        $previous = $this->eventCallback;
+        $this->onEvent(function (array $event) use ($recorder, $previous) {
+            $recorder($event);
+            if ($previous !== null) {
+                call_user_func($previous, $event);
+            }
+        });
+        return $log;
+    }
+
+    /**
+     * 模型路由器（惰性创建）
+     *
+     * 按角色与任务复杂度选模型：explorer 用便宜的，coder / reviewer 用强的。
+     *
+     * @param array<string, string> $tiers cheap / standard / premium => 模型名
+     * @return \Ai\Agent\Orchestrator\ModelRouter
+     */
+    public function modelRouter(array $tiers = [])
+    {
+        if ($this->modelRouter === null) {
+            $this->modelRouter = new \Ai\Agent\Orchestrator\ModelRouter($tiers);
+        }
+        return $this->modelRouter;
+    }
+
+    /**
+     * 工具分组（惰性创建）
+     *
+     * @return \Ai\Agent\Tool\ToolGroup
+     */
+    public function toolGroups()
+    {
+        if ($this->toolGroups === null) {
+            $this->toolGroups = new \Ai\Agent\Tool\ToolGroup();
+        }
+        return $this->toolGroups;
+    }
+
+    /**
+     * 启用工具按需发现
+     *
+     * 工具很多时，初始只给常用的 + 一个 `search_tools`，模型需要别的能力时
+     * 自己搜出来再启用——避免几十个工具定义占满每一轮请求。
+     *
+     * @param string[] $alwaysAvailable 一开始就给的工具名
+     * @return \Ai\Agent\Tool\ToolDiscovery
+     */
+    public function useToolDiscovery(array $alwaysAvailable = [])
+    {
+        $discovery = new \Ai\Agent\Tool\ToolDiscovery($this->runtime->getToolRegistry(), [
+            'alwaysAvailable' => $alwaysAvailable,
+            'groups'          => $this->toolGroups,
+        ]);
+        $this->toolDiscovery = $discovery;
+        $this->setTools($discovery->initialTools());
+        return $discovery;
+    }
+
+    /**
+     * 分层权限策略（惰性创建）
+     *
+     * 最终权限 = Global AND Agent AND Skill AND Task，DENY 优先。
+     *
+     * @return \Ai\Agent\Permission\PermissionPolicy
+     */
+    public function permissionPolicy()
+    {
+        if ($this->permissionPolicy === null) {
+            $this->permissionPolicy = new \Ai\Agent\Permission\PermissionPolicy();
+        }
+        return $this->permissionPolicy;
+    }
+
+    /**
+     * 把分层权限策略应用到权限管理器
+     *
+     * @return $this
+     */
+    public function applyPermissionPolicy()
+    {
+        $pm = $this->runtime->getPermission();
+        if ($pm === null) {
+            $pm = new \Ai\Agent\Permission\PermissionManager();
+            $this->runtime->setPermission($pm);
+        }
+        $this->permissionPolicy()->applyTo($pm);
+        return $this;
+    }
+
+    /**
+     * 恢复一个任务
+     *
+     * 后台任务查句柄，崩溃任务从检查点恢复消息继续跑。
+     *
+     * @param string $taskId
+     * @return array<string, mixed>|null 后台句柄，或 ['messages' => …] 恢复出的消息
+     */
+    public function resume($taskId)
+    {
+        $taskId = (string) $taskId;
+
+        $handle = $this->orchestrator()->dispatcher()->status($taskId);
+        if ($handle !== null) {
+            return $handle;
+        }
+
+        $messages = $this->runtime->recover($taskId);
+        return $messages === null ? null : ['task_id' => $taskId, 'messages' => $messages];
     }
 
     /**

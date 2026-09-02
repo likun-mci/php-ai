@@ -2493,6 +2493,178 @@ $agent->run([['role' => 'user', 'content' => 'Fix the failing tests']]);
 
 Without calling `enableReflection()` the loop behaves exactly as before — no extra rounds appear out of nowhere. When `setGoal()` is not set, the goal falls back to the first user message.
 
+### Developer API: three things and you are working
+
+You do not need to understand LoopController / ContextManager / PermissionManager / SubAgentManager — supply an AI, a workdir and a prompt:
+
+```php
+use Ai\Agent\Agent;
+
+$agent = Agent::create($ai)
+    ->workdir('/var/www/project')
+    ->codeAgent();
+
+$result = $agent->task('把这个项目的登录系统改造成支持 Google OAuth，并完成测试');
+
+print_r($result->toContract());
+// [
+//   'status'        => 'completed',
+//   'summary'       => '已接入 Google OAuth 并补充测试',
+//   'files_changed' => ['src/Auth.php', 'tests/AuthTest.php'],
+//   'tests'         => ['passed' => true],
+//   'verification'  => ['passed' => true],
+//   'artifacts'     => ['artifact://task_1/test-report.json'],
+//   'cost' => 0.042, 'iterations' => 14, 'duration_ms' => 68210.5,
+// ]
+```
+
+Chained configuration:
+
+```php
+$agent = Agent::create($ai)
+    ->workdir(__DIR__)
+    ->codeAgent(['test' => 'composer test'])
+    ->tools(['my_tool' => $myTool])              // append tools (does not replace existing ones)
+    ->skills('/path/to/skills')                  // load skills
+    ->agents(['dba' => [                         // register a custom sub-agent
+        'description' => '数据库结构与索引优化',
+        'tools'       => ['read_file', 'bash'],  // tool names suffice; they come from the parent set
+    ]]);
+
+$result = $agent->task('修复登录 Bug');          // the orchestration layer picks the strategy
+$handle = $agent->dispatch('扫描整个项目');      // run in the background, returns a task_id immediately
+$agent->resume($handle['task_id']);              // read the background handle, or restore from a checkpoint
+```
+
+`AgentResult`'s structured contract: `getStatus()` / `getSummary()` / `getFilesChanged()` / `getTests()` / `getVerification()` / `getArtifacts()` / `getSubtasks()` / `getCost()` / `getDuration()`, with `toContract()` returning everything at once, ready to serialise to JSON. The fields are filled in by the caller or by `WorkspaceSnapshot` — `AgentResult` does not scan the workspace itself; that is Workspace's job.
+
+### Tool groups and on-demand discovery
+
+With many tools registered, sending them all every round is wasteful: dozens of tool definitions cost tokens and make the model's choice harder.
+
+```php
+$agent->toolGroups()->disable(\Ai\Agent\Tool\ToolGroup::DEPLOYMENT);   // no deployments on this task
+$agent->toolGroups()->only([\Ai\Agent\Tool\ToolGroup::FILESYSTEM]);    // file operations only
+```
+
+Built-in groups: filesystem / git / database / network / browser / cloud / testing / deployment. **Tools that were never grouped stay available** — grouping is for narrowing, and forgetting to classify a tool should not make it vanish. A tool in several groups is available if any of them is enabled.
+
+Discovery works the other way round: start with a handful of common tools plus `search_tools`, and let the model find the rest when it needs them:
+
+```php
+$agent->useToolDiscovery(['read_file', 'grep', 'glob']);
+
+// Model call: search_tools(query: "database")
+//   → finds sql_query / db_schema, enables them, and they become callable
+```
+
+Search is local keyword matching over tool names and descriptions, with no model call — spending a model call to save tokens is a poor trade.
+
+### Layered permission policy
+
+Permissions come from four layers, combined by **intersection** rather than union, with **DENY winning**:
+
+```text
+Effective = Global AND Agent AND Skill AND Task
+```
+
+```php
+$policy = $agent->permissionPolicy();
+$policy->layer('global')
+    ->allow('Bash(git *)')
+    ->deny('Bash(rm -rf *)')
+    ->deny('Write(.env)');
+$policy->layer('task')->allow('Bash(php *)');
+
+$agent->applyPermissionPolicy();
+
+$policy->check('Bash', 'git status');    // 'allow'
+$policy->check('Bash', 'rm -rf /');      // 'deny'
+$policy->check('Bash', 'curl x.com');    // 'ask' — nobody explicitly allowed it
+$policy->explain('Bash', 'rm -rf /');    // ['decision' => 'deny', 'layer' => 'global', 'rule' => 'Bash(rm -rf *)']
+```
+
+The order cannot be reversed: if a lower layer could widen an upper one, a `Bash(rm -rf *)` allowed by a Skill would bypass the global ban. Call `clearLayer('task')` when a task ends — layers must not contaminate each other.
+
+### Event replay (EventLog)
+
+A reconnecting client wants "everything after the last event I received". **Replay events; never re-run the Agent** — a re-run produces fresh side effects (editing files again, running commands again) when all the client needed was the messages it missed.
+
+```php
+$log = $agent->eventLog('/var/data/events');   // hooks itself into the event callback
+
+// The client reconnects with a Last-Event-ID
+$missed = $log->sinceId($lastEventId);
+echo EventLog::toSse($missed);                 // emit SSE frames directly
+
+$log->since(42);                // replay by sequence
+$log->ofTask('task_1');         // every event for one task
+$log->ofType('tool_call');      // filter by type
+$log->lastSequence();           // the current head
+```
+
+When the event ID is not found, everything is returned — better to resend than to drop, since the client can deduplicate but cannot recover a lost message. Without a directory the log lives in memory only; **reconnection scenarios must configure one**, because the process may well have been replaced by then.
+
+### Scheduling and concurrency limits
+
+```php
+$scheduler = $agent->scheduler([
+    'max_tasks'             => 50,
+    'max_concurrent'        => 4,
+    'max_subagents'         => 4,
+    'max_background_agents' => 2,
+    'max_parallel_tools'    => 8,
+    'maxRetries'            => 2,
+]);
+
+$scheduler->submit('task_1', '扫描安全问题', AgentScheduler::PRIORITY_HIGH);
+$scheduler->submit('task_2', '更新文档', AgentScheduler::PRIORITY_LOW);
+
+$next = $scheduler->next();          // 'task_1' — higher priority first
+$scheduler->start($next);
+$scheduler->finish($next, false);    // failure → requeued automatically while retries remain
+```
+
+Priorities: critical / high / normal / low, with submission order breaking ties. **One PHP request should not spawn dozens of agents** — each sub-agent is a separate model call and context, so runaway concurrency burns money and memory alike; the defaults are deliberately conservative.
+
+Attach a `TaskGraph` and only dependency-satisfied tasks get scheduled. Automatic retry exists because transient failures (network blips, model timeouts) usually clear on the second attempt, and making a human resubmit them serves no purpose.
+
+### Model routing and artifacts
+
+Sending the strongest model to grep code is waste; sending the cheapest one to rework an architecture is false economy:
+
+```php
+$router = $agent->modelRouter([
+    'cheap'    => 'claude-haiku-4-5-20251001',
+    'standard' => 'claude-sonnet-5',
+    'premium'  => 'claude-opus-5',
+]);
+
+$router->route(['agent' => 'explorer']);                     // cheap
+$router->route(['agent' => 'coder']);                        // premium
+$router->route(['task' => '重构整个认证系统']);               // premium (high complexity)
+$router->route(['agent' => 'coder', 'budget_left' => 0.05]);  // cheap (budget nearly gone; finishing beats finesse)
+```
+
+**No configured model names, no routing**: it returns an empty string and the caller keeps the current model. Inventing a plausible-looking model name only buys a runtime "model not found".
+
+Artifacts — test reports, patches, logs, analyses — should not go into the context verbatim; drop a 5000-line report in and there is no room left for the conversation:
+
+```php
+$artifacts = $agent->artifacts('/var/data/artifacts');
+
+$ref = $artifacts->put('task_123', 'test-report.json', $reportJson);
+// 'artifact://task_123/test-report.json'
+
+$artifacts->preview($ref, 500);      // show the model only the head
+$artifacts->get($ref);               // fetch the full text when details are needed
+$artifacts->listFor('task_123');     // what this task produced
+$artifacts->summarize('task_1', 'out.txt', $output, 5);
+// '已保存到 artifact://task_1/out.txt（12.4 KB）：\nFAILURES!\n…'
+```
+
+Artifact names are guarded against path traversal, so `../../../etc/passwd` cannot get through.
+
 ### Orchestration layer (AgentOrchestrator)
 
 `AgentRuntime` answers "how do I run one iteration"; the orchestration layer answers **"how should this work be done"** — call tools directly, break it into a plan first, delegate to a sub-agent, fan out in parallel, or push it to the background.

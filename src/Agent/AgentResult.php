@@ -171,4 +171,169 @@ class AgentResult
             'iterations'  => $this->iterations,
         ];
     }
+
+    /* ---------- 结构化结果契约（Phase 5.3） ---------- */
+
+    /**
+     * 完成状态
+     *
+     * 与 `isDone()` 的区别：这里返回的是可直接放进 API 响应的字符串。
+     *
+     * @return string completed / stopped / failed
+     */
+    public function getStatus()
+    {
+        if ($this->isDone()) {
+            return 'completed';
+        }
+        return $this->isError() ? 'failed' : 'stopped';
+    }
+
+    /**
+     * 一句话摘要
+     *
+     * @return string
+     */
+    public function getSummary()
+    {
+        if (isset($this->extra['summary'])) {
+            return (string) $this->extra['summary'];
+        }
+        $text = trim($this->text);
+        if ($text === '') {
+            return '';
+        }
+        $lines = preg_split('/\r?\n/', $text);
+        return $lines === false ? $text : trim($lines[0]);
+    }
+
+    /**
+     * 这次执行改了哪些文件
+     *
+     * 由 `WorkspaceSnapshot::diff()` 或调用方填入——AgentResult 自己不去扫工作区，
+     * 那是 Workspace 的职责。
+     *
+     * @return string[]
+     */
+    public function getFilesChanged()
+    {
+        return isset($this->extra['files_changed']) && is_array($this->extra['files_changed'])
+            ? array_values(array_map('strval', $this->extra['files_changed']))
+            : [];
+    }
+
+    /**
+     * 测试结果
+     *
+     * @return array<string, mixed> 形如 ['passed' => true, 'failed' => 0]
+     */
+    public function getTests()
+    {
+        return isset($this->extra['tests']) && is_array($this->extra['tests']) ? $this->extra['tests'] : [];
+    }
+
+    /**
+     * 验证结果
+     *
+     * @return array<string, mixed>
+     */
+    public function getVerification()
+    {
+        return isset($this->extra['verification']) && is_array($this->extra['verification'])
+            ? $this->extra['verification']
+            : [];
+    }
+
+    /**
+     * 产物引用列表
+     *
+     * @return string[]
+     */
+    public function getArtifacts()
+    {
+        return isset($this->extra['artifacts']) && is_array($this->extra['artifacts'])
+            ? array_values(array_map('strval', $this->extra['artifacts']))
+            : [];
+    }
+
+    /**
+     * 子任务结果
+     *
+     * @return array<int, array<string, mixed>>
+     */
+    public function getSubtasks()
+    {
+        return isset($this->extra['subtasks']) && is_array($this->extra['subtasks'])
+            ? $this->extra['subtasks']
+            : [];
+    }
+
+    /**
+     * 估算成本
+     *
+     * @return float 未知返回 0.0
+     */
+    public function getCost()
+    {
+        if (isset($this->extra['cost'])) {
+            return (float) $this->extra['cost'];
+        }
+        return isset($this->usage['cost']) ? (float) $this->usage['cost'] : 0.0;
+    }
+
+    /**
+     * 执行耗时（毫秒）
+     *
+     * @return float
+     */
+    public function getDuration()
+    {
+        return isset($this->extra['duration_ms']) ? (float) $this->extra['duration_ms'] : 0.0;
+    }
+
+    /**
+     * 补充结构化字段
+     *
+     * ```php
+     * $result->withDetails([
+     *     'files_changed' => ['src/Auth.php'],
+     *     'tests'         => ['passed' => true],
+     *     'duration_ms'   => 12500.4,
+     * ]);
+     * ```
+     *
+     * @param array<string, mixed> $details
+     * @return $this
+     */
+    public function withDetails(array $details)
+    {
+        foreach ($details as $key => $value) {
+            $this->extra[(string) $key] = $value;
+        }
+        return $this;
+    }
+
+    /**
+     * 完整的结构化结果——可直接 JSON 返回给调用方
+     *
+     * @return array<string, mixed>
+     */
+    public function toContract()
+    {
+        return [
+            'status'        => $this->getStatus(),
+            'summary'       => $this->getSummary(),
+            'text'          => $this->text,
+            'stop_reason'   => $this->stopReason,
+            'files_changed' => $this->getFilesChanged(),
+            'tests'         => $this->getTests(),
+            'verification'  => $this->getVerification(),
+            'artifacts'     => $this->getArtifacts(),
+            'subtasks'      => $this->getSubtasks(),
+            'usage'         => $this->usage,
+            'cost'          => $this->getCost(),
+            'iterations'    => $this->iterations,
+            'duration_ms'   => $this->getDuration(),
+        ];
+    }
 }

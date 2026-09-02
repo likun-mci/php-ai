@@ -2052,6 +2052,48 @@ allowed-tools:
 
 `use_skill` 工具被自动注册到 Agent 工具注册表，模型调用后加载完整技能正文，同时收集 `allowed-tools` 中的工具限制（不能突破全局权限）。
 
+#### 按需发现与场景匹配（Skill 2.0）
+
+技能多起来之后，`loadFromDir()` 会把每份正文都读进内存。`discover()` 只解析 frontmatter 登记技能，正文等模型真正 `use_skill` 时再读盘：
+
+```php
+$found = $agent->discoverSkills('/path/to/skills');   // ['wordpress', 'deploy', 'nginx']
+```
+
+frontmatter 多认两个字段：
+
+```markdown
+---
+name: wordpress
+description: WordPress 插件开发
+files:
+  - wp-content
+  - "*.wp.php"
+knowledge: |
+  WordPress 通过 hooks（action / filter）扩展。
+  插件入口在 wp-content/plugins/。
+---
+# WordPress 插件开发
+
+（完整正文，模型 use_skill 后才加载）
+```
+
+- `knowledge` 是几行要点，随技能描述一起注入系统提示词（`<skill-knowledge>` 块），不是完整正文
+- `files` 是触发该技能的文件通配符，用来按场景自动匹配
+
+```php
+// 按文件路径找匹配的技能
+$sm->forFile('/var/www/wp-content/plugins/foo.php');   // ['wordpress' => SkillDefinition]
+
+// 直接激活——省掉模型自己判断该不该 use_skill 这一步
+$agent->activateSkillsForFile('/var/www/wp-content/plugins/foo.php');   // ['wordpress']
+
+// 只加载正文、不激活（不合并 allowed-tools）
+$sm->loadByName('wordpress');
+```
+
+**没配 `files` 的技能永远匹配不到**——按技能名去猜文件路径太容易误伤，宁可要求显式声明。
+
 ### 项目指令（InstructionManager）
 
 加载项目级指令文件（CLAUDE.md / AGENTS.md），这些是项目必须遵守的长期规则，与 Skill 不同：
@@ -2113,6 +2155,50 @@ $mm->addServers([
 // 关闭所有 MCP 服务器
 $mm->shutdown();
 ```
+
+#### 传输协议：stdio / HTTP / SSE / WebSocket
+
+MCP 是 JSON-RPC 2.0 协议，传输方式可以换。本地工具走 stdio 子进程，远程服务走 HTTP，需要长连接走 WebSocket：
+
+| 协议 | 传输方式 | 适用场景 |
+|------|---------|---------|
+| stdio | 子进程 stdin/stdout | 本地工具（文件系统、Git、数据库客户端） |
+| HTTP / SSE | HTTP POST，响应可为 `text/event-stream` | 远程服务、团队共享的 MCP 服务器 |
+| WebSocket | 长连接双向通信 | 需要服务端推送、或一次会话里连续调很多次工具 |
+
+```php
+$mm = new McpManager();
+
+// stdio（默认）
+$mm->registerServer('fs', ['command' => 'npx', 'args' => ['-y', '@modelcontextprotocol/server-fs', '/tmp']]);
+
+// HTTP / SSE
+$mm->registerServer('remote', [
+    'transport' => 'http',
+    'url'       => 'https://mcp.example.com/rpc',
+    'headers'   => ['Authorization: Bearer xxx'],
+]);
+
+// WebSocket
+$mm->registerServer('live', ['transport' => 'websocket', 'url' => 'wss://mcp.example.com/ws']);
+```
+
+**连接管理**——不再是「一次性全起、全关」：
+
+```php
+$mm->connect('remote');            // 单独连一个，失败返回 false 而不抛异常
+$mm->isConnected('remote');        // true
+$mm->discoverTools('remote');      // 动态发现工具列表，未连接时自动先连
+$mm->disconnect('remote');         // 单独断开
+print_r($mm->status());
+// ['fs' => ['connected' => false, 'transport' => 'stdio'],
+//  'remote' => ['connected' => true, 'transport' => 'http']]
+echo $mm->getLastError();          // 最近一次连接失败的原因
+```
+
+连接失败返回 `false` 而不是抛异常——一个 MCP 服务器不可用不该让整个 Agent 停下来，具体原因从 `getLastError()` 取。
+
+HTTP 传输会记住服务端返回的 `Mcp-Session-Id` 并自动带在后续请求上；SSE 响应里穿插的通知会被跳过，只取 id 对得上的那条。`wss://` 需要 openssl 扩展，CDP 与本地 `ws://` 不需要。
 
 ### 作用域记忆（MemoryManager）
 
@@ -2402,6 +2488,142 @@ $agent->run([['role' => 'user', 'content' => '修一下失败的测试']]);
 
 没调用 `enableReflection()` 时循环行为与升级前完全一致——不会平白多跑几轮。
 `setGoal()` 未设置时，目标退回取首条用户消息。
+
+### 浏览器工具（BrowserTool）
+
+让 Agent 操作真实浏览器：打开页面、点击、填表、截图、提取内容。跟 HTTP 抓取的区别是这里跑的是 Chrome——JS 渲染出来的内容、登录后的状态、前端路由，抓 HTML 拿不到的这里都拿得到。
+
+```php
+use Ai\Agent\Tools\BrowserTool;
+
+$agent->addTool(new BrowserTool(['headless' => true]));
+
+// 模型调用：
+//   browser(action: "open", url: "https://example.com")
+//   browser(action: "wait", selector: "#results")
+//   browser(action: "type", selector: "#q", text: "php")
+//   browser(action: "click", selector: "button[type=submit]")
+//   browser(action: "extract", selector: ".result")
+//   browser(action: "screenshot", path: "shot.png", full_page: true)
+//   browser(action: "close")
+```
+
+会话是复用的：一次 `open` 之后，后续 `click` / `type` 都在同一个页面上，登录态和页面状态都还在。
+
+直接用 `BrowserSession`：
+
+```php
+use Ai\Agent\Tools\BrowserSession;
+
+if (!BrowserSession::isAvailable()) {
+    echo '本机没装 Chrome / Chromium';
+}
+
+$session = new BrowserSession(['headless' => true, 'timeout' => 30]);
+$session->launch();
+$session->navigate('https://example.com');
+echo $session->title();
+echo $session->text('h1');
+print_r($session->extractAll('.item', 20));
+$session->waitFor('#ready', 5000);
+$session->evaluate('document.querySelectorAll("a").length');
+$session->screenshot('/tmp/shot.png', true);
+$session->close();
+```
+
+实现走 Chrome DevTools Protocol：`--remote-debugging-port` 起一个常驻 headless 实例，用 CDP 的 HTTP 端点拿页面目标，用 WebSocket 发命令。点击与输入通过页面内 JS 完成（输入后会派发 `input` / `change` 事件，否则 Vue / React 收不到值变化），不是模拟鼠标坐标——坐标点击遇到滚动和浮层就不准了。
+
+**前置条件**：本机装了 Chrome / Chromium，且允许 `proc_open`。没装时工具返回明确的错误信息而不是抛异常——模型看到「没有浏览器」可以换个办法，看到崩溃则只能重试。CDP 走本地 `ws://`，不需要 openssl 扩展。
+
+传入 `PathSafety` 后截图路径受工作区限制：
+
+```php
+$agent->addTool(new BrowserTool([], new \Ai\Agent\Tools\PathSafety('/var/www/project')));
+```
+
+### 代码理解（CodeAnalyzer）
+
+Agent 改代码前得先看懂代码。`Ai\Code` 扫描项目建立类索引与两张关系图——谁调用了谁、谁依赖了谁——之后回答「改这个方法会影响谁」不用再 grep 整个项目。
+
+```php
+use Ai\Code\CodeAnalyzer;
+
+$analyzer = new CodeAnalyzer();
+$analyzer->scan('/var/www/project/src');
+
+print_r($analyzer->stats());
+// ['files' => 189, 'classes' => 189, 'methods' => 2107, 'callEdges' => 3604, 'dependencyEdges' => 422]
+
+$analyzer->findCallers('login');                       // 谁调用了 login
+$analyzer->findDependencies('App\Auth');               // Auth 依赖谁
+$analyzer->findDependents('App\Auth', true);           // 谁（间接）依赖 Auth —— 改动影响面
+$analyzer->findRelatedFiles('src/Auth.php');           // 该一起看的文件
+$analyzer->findSymbol('login');                        // 符号定义在哪个文件第几行
+```
+
+`explain()` 生成一段可直接注入提示词的类说明，比把整个类的源码塞进上下文省得多，而且带上了单看源码看不到的「谁依赖我」：
+
+```php
+echo $analyzer->explain('App\Service\Auth');
+// class App\Service\Auth extends App\Service\BaseAuth implements App\Contract\AuthInterface
+//   file: src/Service/Auth.php:23
+//   public function login($name, $password = ...): bool   # line 41
+//   protected function verify($user, $password): bool     # line 47
+//   依赖: App\Model\User, App\Support\Token
+//   被依赖: App\Http\LoginController
+//   继承链: App\Service\BaseAuth
+//   子类: App\Service\AdminAuth
+```
+
+**单文件分析**——不建索引也能用：
+
+```php
+use Ai\Code\FileAnalyzer;
+
+$analysis = (new FileAnalyzer())->analyze('src/Auth.php');
+echo $analysis->getNamespace();                    // 'App\Service'
+print_r($analysis->getImports());                  // ['User' => 'App\Model\User', ...]
+$class = $analysis->getMainClass();
+echo $class->getParent();                          // 父类完整名（已按 import 解析）
+print_r($class->getMethods());                     // 方法名 => FunctionAnalysis
+echo $class->getMethod('login')->getSignature();   // 'public function login($name, $password = ...): bool'
+```
+
+**两张图**——`CallGraph` 与 `DependencyGraph` 也能单独用：
+
+```php
+$analyzer->callGraph()->impactOf('App\Auth::login');      // 直接间接会调到 login 的函数
+$analyzer->callGraph()->unreferenced();                   // 没有调用方的函数（候选死代码）
+$analyzer->dependencyGraph()->detectCycles();             // 循环依赖
+$analyzer->dependencyGraph()->mostDepended(10);           // 被依赖最多的类 —— 改它风险最高
+$analyzer->dependencyGraph()->layers();                   // 按依赖深度分层
+$analyzer->classAnalyzer()->allMethods('App\Auth', $analyzer->index());  // 含继承与 trait 的方法表
+```
+
+**精度说明**：解析基于 `token_get_all()`，不依赖任何第三方 parser。能认命名空间、import（含成组导入与别名）、继承实现、方法签名（参数类型、可空、可变参数、返回类型）、属性可见性、类常量、函数体内的调用。
+
+认不了的：变量的实际类型。`$obj->save()` 拿不到 `$obj` 是什么类，图里记的是 `->save`，查 `save` 的调用方时所有类的同名方法会一起命中。**结果是「可能的调用方」，用来缩小排查范围可以，当作重构的唯一依据不行。** 动态调用（`$class::$method()`）与 `eval` 里的代码同理，静态扫描看不见。
+
+### 项目索引（RepositoryIndexer）
+
+首次进入一个项目时扫一遍结构，认出框架、入口、控制器 / 模型 / 服务 / 配置在哪，存成 `project.index.json`。之后 Agent 直接读索引，不用每次都把项目结构重新摸一遍。
+
+```php
+use Ai\Agent\Code\RepositoryIndexer;
+
+$indexer = new RepositoryIndexer();
+$index = $indexer->ensureIndex('/var/www/project');   // 有且没过期就复用，否则重建
+
+echo $index->getFramework();        // 'Laravel'
+echo $index->getEntry();            // 'public/index.php'
+print_r($index->getFiles('controllers'));
+print_r($index->getNamespaces());   // ['App\' => 'app/']
+echo $index->toSummary();           // 注入提示词的 <project> 块
+```
+
+框架识别先看 composer 依赖，再看目录特征，覆盖 Laravel / Symfony / CodeIgniter / ThinkPHP / Yii / CakePHP / Laminas / Slim / WordPress。**认不出来时返回空串而不是猜**——猜错会让模型按错误的约定去找文件，比不知道更糟。
+
+索引过期的判据是 ttl（默认 1 天）或 composer.json 变新，不逐个文件比 mtime——大项目上那样太慢。文件分类是按路径与文件名的启发式判断（`app/Http/Controllers/Auth.php` → controllers），不读文件内容。
 
 ### 用户交互（AskUser）
 

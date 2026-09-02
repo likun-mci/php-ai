@@ -2038,6 +2038,48 @@ allowed-tools:
 
 The `use_skill` tool is automatically registered in the Agent's tool registry. When the model calls it, the full skill content is loaded and any `allowed-tools` restrictions are collected (these cannot break through global permissions).
 
+#### On-demand discovery and context matching (Skill 2.0)
+
+Once you have many skills, `loadFromDir()` reads every body into memory. `discover()` registers skills from their frontmatter alone and defers the body until the model actually calls `use_skill`:
+
+```php
+$found = $agent->discoverSkills('/path/to/skills');   // ['wordpress', 'deploy', 'nginx']
+```
+
+Two more frontmatter fields are recognised:
+
+```markdown
+---
+name: wordpress
+description: WordPress plugin development
+files:
+  - wp-content
+  - "*.wp.php"
+knowledge: |
+  WordPress is extended through hooks (actions / filters).
+  Plugins live in wp-content/plugins/.
+---
+# WordPress plugin development
+
+(full body, loaded only after the model calls use_skill)
+```
+
+- `knowledge` is a few key lines, injected into the system prompt alongside the skill descriptions (a `<skill-knowledge>` block) — not the full body
+- `files` are the glob patterns that make a skill relevant, used for context matching
+
+```php
+// Find the skills that apply to a file
+$sm->forFile('/var/www/wp-content/plugins/foo.php');   // ['wordpress' => SkillDefinition]
+
+// Activate them directly — skipping the step where the model decides whether to use_skill
+$agent->activateSkillsForFile('/var/www/wp-content/plugins/foo.php');   // ['wordpress']
+
+// Load the body without activating (no allowed-tools merged)
+$sm->loadByName('wordpress');
+```
+
+**A skill without `files` never matches** — guessing file paths from a skill's name misfires too easily, so the declaration has to be explicit.
+
 ### Project instructions (InstructionManager)
 
 Loads project-level instruction files (CLAUDE.md / AGENTS.md). These are long-term rules the project must follow, distinct from Skills:
@@ -2099,6 +2141,50 @@ $mm->addServers([
 // Shut down all MCP servers
 $mm->shutdown();
 ```
+
+#### Transports: stdio / HTTP / SSE / WebSocket
+
+MCP is a JSON-RPC 2.0 protocol, and the transport underneath is swappable. Local tools run over a stdio subprocess, remote services over HTTP, and long-lived sessions over WebSocket:
+
+| Protocol | Transport | Suits |
+|----------|-----------|-------|
+| stdio | subprocess stdin/stdout | local tools (filesystem, Git, database clients) |
+| HTTP / SSE | HTTP POST, response may be `text/event-stream` | remote services, MCP servers shared across a team |
+| WebSocket | long-lived bidirectional connection | server push, or many tool calls in one session |
+
+```php
+$mm = new McpManager();
+
+// stdio (default)
+$mm->registerServer('fs', ['command' => 'npx', 'args' => ['-y', '@modelcontextprotocol/server-fs', '/tmp']]);
+
+// HTTP / SSE
+$mm->registerServer('remote', [
+    'transport' => 'http',
+    'url'       => 'https://mcp.example.com/rpc',
+    'headers'   => ['Authorization: Bearer xxx'],
+]);
+
+// WebSocket
+$mm->registerServer('live', ['transport' => 'websocket', 'url' => 'wss://mcp.example.com/ws']);
+```
+
+**Connection management** — no longer all-up-front, all-at-once:
+
+```php
+$mm->connect('remote');            // connect one; returns false on failure instead of throwing
+$mm->isConnected('remote');        // true
+$mm->discoverTools('remote');      // discover tools, connecting first if needed
+$mm->disconnect('remote');         // disconnect one
+print_r($mm->status());
+// ['fs' => ['connected' => false, 'transport' => 'stdio'],
+//  'remote' => ['connected' => true, 'transport' => 'http']]
+echo $mm->getLastError();          // why the last connection attempt failed
+```
+
+A failed connection returns `false` rather than throwing — one unavailable MCP server should not stop the whole Agent; read `getLastError()` for the reason.
+
+The HTTP transport remembers the server's `Mcp-Session-Id` and sends it on subsequent requests; notifications interleaved in an SSE response are skipped and only the message whose id matches is returned. `wss://` requires the openssl extension; CDP and plain local `ws://` do not.
 
 ### Scoped memory (MemoryManager)
 
@@ -2381,6 +2467,142 @@ $agent->run([['role' => 'user', 'content' => 'Fix the failing tests']]);
 ```
 
 Without calling `enableReflection()` the loop behaves exactly as before — no extra rounds appear out of nowhere. When `setGoal()` is not set, the goal falls back to the first user message.
+
+### Browser tool (BrowserTool)
+
+Lets the Agent drive a real browser: open pages, click, fill forms, screenshot, extract content. Unlike HTTP fetching this runs Chrome — JS-rendered content, post-login state and client-side routing are all reachable here, and none of them are in the raw HTML.
+
+```php
+use Ai\Agent\Tools\BrowserTool;
+
+$agent->addTool(new BrowserTool(['headless' => true]));
+
+// Model calls:
+//   browser(action: "open", url: "https://example.com")
+//   browser(action: "wait", selector: "#results")
+//   browser(action: "type", selector: "#q", text: "php")
+//   browser(action: "click", selector: "button[type=submit]")
+//   browser(action: "extract", selector: ".result")
+//   browser(action: "screenshot", path: "shot.png", full_page: true)
+//   browser(action: "close")
+```
+
+The session is reused: after one `open`, later `click` / `type` calls act on the same page, so login state and page state survive between calls.
+
+Using `BrowserSession` directly:
+
+```php
+use Ai\Agent\Tools\BrowserSession;
+
+if (!BrowserSession::isAvailable()) {
+    echo 'No Chrome / Chromium installed on this machine';
+}
+
+$session = new BrowserSession(['headless' => true, 'timeout' => 30]);
+$session->launch();
+$session->navigate('https://example.com');
+echo $session->title();
+echo $session->text('h1');
+print_r($session->extractAll('.item', 20));
+$session->waitFor('#ready', 5000);
+$session->evaluate('document.querySelectorAll("a").length');
+$session->screenshot('/tmp/shot.png', true);
+$session->close();
+```
+
+It is built on the Chrome DevTools Protocol: a headless instance is started with `--remote-debugging-port`, page targets come from CDP's HTTP endpoints, and commands go over WebSocket. Clicks and typing run as in-page JS (typing dispatches `input` / `change` events, without which Vue / React never see the value change) rather than synthesised mouse coordinates — coordinate clicking goes wrong as soon as there is scrolling or an overlay.
+
+**Prerequisites**: Chrome / Chromium installed locally and `proc_open` permitted. When it is missing the tool returns a clear error instead of throwing — a model told "there is no browser" can choose another route, whereas a crash leaves it only retrying. CDP talks over local `ws://`, so no openssl extension is needed.
+
+Pass a `PathSafety` to confine screenshot paths to the workspace:
+
+```php
+$agent->addTool(new BrowserTool([], new \Ai\Agent\Tools\PathSafety('/var/www/project')));
+```
+
+### Code understanding (CodeAnalyzer)
+
+Before the Agent changes code it has to understand it. `Ai\Code` scans a project to build a class index plus two relationship graphs — who calls whom, who depends on whom — so "what does changing this method affect" no longer means grepping the whole project.
+
+```php
+use Ai\Code\CodeAnalyzer;
+
+$analyzer = new CodeAnalyzer();
+$analyzer->scan('/var/www/project/src');
+
+print_r($analyzer->stats());
+// ['files' => 189, 'classes' => 189, 'methods' => 2107, 'callEdges' => 3604, 'dependencyEdges' => 422]
+
+$analyzer->findCallers('login');                       // who calls login
+$analyzer->findDependencies('App\Auth');               // what Auth depends on
+$analyzer->findDependents('App\Auth', true);           // who depends on Auth (transitively) — the blast radius
+$analyzer->findRelatedFiles('src/Auth.php');           // files worth reading alongside it
+$analyzer->findSymbol('login');                        // which file and line defines it
+```
+
+`explain()` produces a class description ready to drop into a prompt — far cheaper than pasting the whole class, and it carries the "who depends on me" part that the source alone does not show:
+
+```php
+echo $analyzer->explain('App\Service\Auth');
+// class App\Service\Auth extends App\Service\BaseAuth implements App\Contract\AuthInterface
+//   file: src/Service/Auth.php:23
+//   public function login($name, $password = ...): bool   # line 41
+//   protected function verify($user, $password): bool     # line 47
+//   依赖: App\Model\User, App\Support\Token
+//   被依赖: App\Http\LoginController
+//   继承链: App\Service\BaseAuth
+//   子类: App\Service\AdminAuth
+```
+
+**Single-file analysis** — works without building an index:
+
+```php
+use Ai\Code\FileAnalyzer;
+
+$analysis = (new FileAnalyzer())->analyze('src/Auth.php');
+echo $analysis->getNamespace();                    // 'App\Service'
+print_r($analysis->getImports());                  // ['User' => 'App\Model\User', ...]
+$class = $analysis->getMainClass();
+echo $class->getParent();                          // fully qualified parent (resolved through imports)
+print_r($class->getMethods());                     // method name => FunctionAnalysis
+echo $class->getMethod('login')->getSignature();   // 'public function login($name, $password = ...): bool'
+```
+
+**The two graphs** — `CallGraph` and `DependencyGraph` can also be used on their own:
+
+```php
+$analyzer->callGraph()->impactOf('App\Auth::login');      // functions that reach login directly or indirectly
+$analyzer->callGraph()->unreferenced();                   // functions with no callers (dead-code candidates)
+$analyzer->dependencyGraph()->detectCycles();             // circular dependencies
+$analyzer->dependencyGraph()->mostDepended(10);           // most depended-upon classes — riskiest to change
+$analyzer->dependencyGraph()->layers();                   // classes layered by dependency depth
+$analyzer->classAnalyzer()->allMethods('App\Auth', $analyzer->index());  // methods including inherited and trait ones
+```
+
+**On accuracy**: parsing is built on `token_get_all()` with no third-party parser. It resolves namespaces, imports (including group imports and aliases), inheritance and interfaces, method signatures (parameter types, nullability, variadics, return types), property visibility, class constants, and calls made inside function bodies.
+
+What it cannot resolve is the runtime type of a variable. `$obj->save()` gives no clue what class `$obj` is, so the graph records `->save`, and asking for callers of `save` matches same-named methods on every class. **Treat the result as "possible callers" — good for narrowing a search, not sound enough to be the sole basis for a refactor.** The same goes for dynamic calls (`$class::$method()`) and code inside `eval`: static scanning cannot see them.
+
+### Project index (RepositoryIndexer)
+
+On first entering a project, scan its structure once — framework, entry point, where the controllers / models / services / configs live — and store it as `project.index.json`. After that the Agent reads the index instead of rediscovering the layout every time.
+
+```php
+use Ai\Agent\Code\RepositoryIndexer;
+
+$indexer = new RepositoryIndexer();
+$index = $indexer->ensureIndex('/var/www/project');   // reuse if fresh, rebuild otherwise
+
+echo $index->getFramework();        // 'Laravel'
+echo $index->getEntry();            // 'public/index.php'
+print_r($index->getFiles('controllers'));
+print_r($index->getNamespaces());   // ['App\' => 'app/']
+echo $index->toSummary();           // the <project> block for the prompt
+```
+
+Framework detection looks at composer dependencies first, then directory signatures, covering Laravel / Symfony / CodeIgniter / ThinkPHP / Yii / CakePHP / Laminas / Slim / WordPress. **When it cannot tell, it returns an empty string rather than guessing** — a wrong guess sends the model looking for files under the wrong conventions, which is worse than not knowing.
+
+Staleness is judged by TTL (one day by default) or a newer composer.json, not by comparing every file's mtime — that is far too slow on a large project. File classification is a heuristic over paths and filenames (`app/Http/Controllers/Auth.php` → controllers); file contents are not read.
 
 ### User interaction (AskUser)
 

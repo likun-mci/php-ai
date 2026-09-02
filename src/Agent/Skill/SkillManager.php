@@ -161,29 +161,207 @@ class SkillManager
             if (!is_file($mdFile)) {
                 continue;
             }
-            $raw = @file_get_contents($mdFile);
-            if ($raw === false) {
-                continue;
+            $skill = $this->buildFromFile($mdFile, $entry, true);
+            if ($skill !== null) {
+                $this->skills[$skill->getName()] = $skill;
             }
-            $meta = self::parseFrontmatter($raw);
-            $content = $meta['content'];
-            $fm = $meta['meta'];
-
-            $name = isset($fm['name']) ? (string) $fm['name'] : $entry;
-            $desc = isset($fm['description']) ? (string) $fm['description'] : '';
-            $allowed = isset($fm['allowed-tools']) && is_array($fm['allowed-tools'])
-                ? array_values(array_map('strval', $fm['allowed-tools']))
-                : [];
-
-            $this->skills[(string) $name] = new SkillDefinition([
-                'name'         => $name,
-                'description'  => $desc,
-                'content'      => $content,
-                'allowedTools' => $allowed,
-                'path'         => $mdFile,
-            ]);
         }
         return $this;
+    }
+
+    /**
+     * 发现目录下的技能，但不读正文
+     *
+     * 与 `loadFromDir()` 的区别：只解析 frontmatter，正文留到模型真正
+     * `use_skill` 时再读盘。技能多、正文长时省的是内存不是 Context——
+     * 两种方式注入系统提示词的内容是一样的。
+     *
+     * @param string $dir
+     * @return string[] 发现的技能名
+     */
+    public function discover($dir)
+    {
+        $dir = rtrim(str_replace('\\', '/', (string) $dir), '/');
+        if ($dir === '' || !is_dir($dir)) {
+            return [];
+        }
+        $entries = @scandir($dir);
+        if ($entries === false) {
+            return [];
+        }
+
+        $found = [];
+        foreach ($entries as $entry) {
+            if ($entry === '.' || $entry === '..') {
+                continue;
+            }
+            $mdFile = $dir . '/' . $entry . '/SKILL.md';
+            if (!is_dir($dir . '/' . $entry) || !is_file($mdFile)) {
+                continue;
+            }
+            $skill = $this->buildFromFile($mdFile, $entry, false);
+            if ($skill !== null) {
+                $this->skills[$skill->getName()] = $skill;
+                $found[] = $skill->getName();
+            }
+        }
+        return $found;
+    }
+
+    /**
+     * 按名加载技能正文（不激活）
+     *
+     * 与 `useSkill()` 的区别：这个只把正文读进来，不把技能标成已激活、
+     * 也不合并它的 allowed-tools。想让模型"用上"某技能时用 `useSkill()`。
+     *
+     * @param string $name
+     * @return string 正文；技能不存在或读不到返回空串
+     */
+    public function loadByName($name)
+    {
+        $skill = $this->get((string) $name);
+        if ($skill === null) {
+            return '';
+        }
+        if (!$skill->isLoaded()) {
+            $this->loadContent($skill);
+        }
+        return $skill->getContent();
+    }
+
+    /**
+     * 找出适用于某个文件的技能
+     *
+     * 匹配依据是 frontmatter 里的 `files` 通配符。没配 `files` 的技能
+     * 永远匹配不到——按技能名去猜文件路径太容易误伤。
+     *
+     * @param string $path
+     * @return array<string, SkillDefinition>
+     */
+    public function forFile($path)
+    {
+        $matched = [];
+        foreach ($this->skills as $name => $skill) {
+            if ($skill->matchesFile($path)) {
+                $matched[$name] = $skill;
+            }
+        }
+        return $matched;
+    }
+
+    /**
+     * 按文件路径自动激活匹配的技能
+     *
+     * Agent 打开某个文件时调一次，相关技能的正文就进了上下文，
+     * 省掉模型自己判断"该不该 use_skill"这一步。
+     *
+     * @param string $path
+     * @return string[] 被激活的技能名
+     */
+    public function activateForFile($path)
+    {
+        $activated = [];
+        foreach ($this->forFile($path) as $name => $skill) {
+            if ($skill->isActive()) {
+                continue;
+            }
+            $this->useSkill($name);
+            $activated[] = $name;
+        }
+        return $activated;
+    }
+
+    /**
+     * 技能知识块——注入系统提示词
+     *
+     * 只包含 frontmatter 里的 `knowledge` 字段（几行要点），不是完整正文。
+     * 正文仍然要模型主动 `use_skill` 才加载。
+     *
+     * @param bool $activeOnly true 时只输出已激活技能的知识
+     * @return string
+     */
+    public function knowledgeForPrompt($activeOnly = false)
+    {
+        if (!$this->enabled) {
+            return '';
+        }
+        $parts = [];
+        foreach ($this->skills as $skill) {
+            if ($activeOnly && !$skill->isActive()) {
+                continue;
+            }
+            $knowledge = trim($skill->getKnowledge());
+            if ($knowledge !== '') {
+                $parts[] = '## ' . $skill->getName() . "\n" . $knowledge;
+            }
+        }
+        if (!$parts) {
+            return '';
+        }
+        return "<skill-knowledge>\n" . implode("\n\n", $parts) . "\n</skill-knowledge>";
+    }
+
+    /**
+     * 从 SKILL.md 造一个技能定义
+     *
+     * @param string $mdFile
+     * @param string $fallbackName 目录名，frontmatter 没写 name 时用它
+     * @param bool $withContent 是否连正文一起读进来
+     * @return SkillDefinition|null
+     */
+    protected function buildFromFile($mdFile, $fallbackName, $withContent)
+    {
+        $raw = @file_get_contents($mdFile);
+        if ($raw === false) {
+            return null;
+        }
+        $parsed = self::parseFrontmatter($raw);
+        $fm = $parsed['meta'];
+
+        $name = isset($fm['name']) ? (string) $fm['name'] : (string) $fallbackName;
+        $allowed = isset($fm['allowed-tools']) && is_array($fm['allowed-tools'])
+            ? array_values(array_map('strval', $fm['allowed-tools']))
+            : [];
+        $patterns = [];
+        foreach (['files', 'paths'] as $key) {
+            if (isset($fm[$key])) {
+                $patterns = array_merge(
+                    $patterns,
+                    is_array($fm[$key]) ? array_map('strval', $fm[$key]) : [(string) $fm[$key]]
+                );
+            }
+        }
+
+        return new SkillDefinition([
+            'name'         => $name,
+            'description'  => isset($fm['description']) ? (string) $fm['description'] : '',
+            'content'      => $withContent ? $parsed['content'] : '',
+            'knowledge'    => isset($fm['knowledge']) ? (string) $fm['knowledge'] : '',
+            'allowedTools' => $allowed,
+            'filePatterns' => $patterns,
+            'path'         => $mdFile,
+        ]);
+    }
+
+    /**
+     * 从磁盘补上技能正文
+     *
+     * @param SkillDefinition $skill
+     * @return bool
+     */
+    protected function loadContent(SkillDefinition $skill)
+    {
+        $path = $skill->getPath();
+        if ($path === '' || !is_file($path)) {
+            return false;
+        }
+        $raw = @file_get_contents($path);
+        if ($raw === false) {
+            return false;
+        }
+        $parsed = self::parseFrontmatter($raw);
+        $skill->setContent($parsed['content']);
+        return true;
     }
 
     /**
@@ -208,9 +386,22 @@ class SkillManager
 
         $currentKey = '';
         $listItems = [];
+        $blockKey = '';
+        $blockLines = [];
 
         foreach (explode("\n", $fmBlock) as $line) {
             $line = rtrim($line, "\r");
+
+            // 块标量正文：`knowledge: |` 之后的缩进行，原样保留
+            if ($blockKey !== '') {
+                if ($line === '' || preg_match('/^\s/', $line)) {
+                    $blockLines[] = preg_replace('/^ {1,2}/', '', $line);
+                    continue;
+                }
+                $meta[$blockKey] = trim(implode("\n", $blockLines));
+                $blockKey = '';
+                $blockLines = [];
+            }
 
             // 缩进列表项：- item
             if (preg_match('/^\s+-\s+(.+)$/', $line, $mm)) {
@@ -220,7 +411,7 @@ class SkillManager
                 continue;
             }
 
-            // 普通键：key: value 或 key:
+            // 普通键：key: value 或 key: 或 key: |
             if (preg_match('/^([a-zA-Z0-9_-]+):\s*(.*)$/', $line, $mm)) {
                 // 收尾上一个键的列表
                 if ($currentKey !== '' && $listItems) {
@@ -229,6 +420,12 @@ class SkillManager
                 $currentKey = $mm[1];
                 $listItems = [];
                 $value = trim($mm[2], '"\'' );
+                if ($value === '|' || $value === '>' || $value === '|-' || $value === '>-') {
+                    $blockKey = $currentKey;
+                    $blockLines = [];
+                    $currentKey = '';
+                    continue;
+                }
                 if ($value !== '') {
                     $meta[$currentKey] = $value;
                     $currentKey = '';  // 标量已存，后续列表项不再归它
@@ -236,9 +433,12 @@ class SkillManager
             }
         }
 
-        // 收尾最后一组列表
+        // 收尾最后一组列表 / 块标量
         if ($currentKey !== '' && $listItems) {
             $meta[$currentKey] = $listItems;
+        }
+        if ($blockKey !== '') {
+            $meta[$blockKey] = trim(implode("\n", $blockLines));
         }
 
         return ['meta' => $meta, 'content' => trim($content)];
@@ -274,12 +474,8 @@ class SkillManager
             return '';
         }
         // 从文件读取时内容可能尚未加载
-        if (!$skill->isLoaded() && $skill->getPath() !== '' && is_file($skill->getPath())) {
-            $raw = @file_get_contents($skill->getPath());
-            if ($raw !== false) {
-                $meta = self::parseFrontmatter($raw);
-                $skill->setContent($meta['content']);
-            }
+        if (!$skill->isLoaded()) {
+            $this->loadContent($skill);
         }
         $skill->setActive(true);
 

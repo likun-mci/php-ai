@@ -25,7 +25,7 @@ use Ai\Agent\Tool\ToolResult;
  */
 class McpManager
 {
-    /** @var array<string, array{command: string, args: string[], options: array<string, mixed>}> */
+    /** @var array<string, array<string, mixed>> 服务器名 => 配置（stdio 的 command/args/options 或远程的 transport/url） */
     protected $serverConfigs = [];
 
     /** @var array<string, McpClient> */
@@ -33,6 +33,9 @@ class McpManager
 
     /** @var bool */
     protected $initialized = false;
+
+    /** @var string 最近一次连接 / 发现失败的原因 */
+    protected $lastError = '';
 
     /**
      * 添加一个 MCP 服务器配置
@@ -54,6 +57,179 @@ class McpManager
     }
 
     /**
+     * 按配置注册一个服务器（支持多种传输协议）
+     *
+     * `addServer()` 只能配 stdio 子进程；这个方法接受完整配置，
+     * 远程 HTTP / SSE / WebSocket 服务器用它。
+     *
+     * ```php
+     * $mcp->registerServer('fs', ['command' => 'npx', 'args' => ['-y', 'server-fs', '/tmp']]);
+     * $mcp->registerServer('remote', ['transport' => 'http', 'url' => 'https://mcp.example.com/rpc']);
+     * $mcp->registerServer('live', ['transport' => 'websocket', 'url' => 'wss://mcp.example.com/ws']);
+     * ```
+     *
+     * @param string $name
+     * @param array<string, mixed> $config transport / command / args / url / headers / timeout
+     * @return $this
+     */
+    public function registerServer($name, array $config)
+    {
+        $this->serverConfigs[(string) $name] = $config;
+        return $this;
+    }
+
+    /**
+     * 连接指定服务器
+     *
+     * 已连接时直接返回 true，不会重连。
+     *
+     * @param string $name
+     * @return bool 连接并握手成功返回 true
+     */
+    public function connect($name)
+    {
+        $name = (string) $name;
+        if (isset($this->servers[$name])) {
+            return true;
+        }
+        if (!isset($this->serverConfigs[$name])) {
+            return false;
+        }
+
+        try {
+            $client = $this->makeClient($this->serverConfigs[$name]);
+            $client->initialize();
+            $this->servers[$name] = $client;
+            return true;
+        } catch (\Throwable $e) {
+            $this->lastError = $name . ': ' . $e->getMessage();
+            return false;
+        }
+    }
+
+    /**
+     * 断开指定服务器
+     *
+     * @param string $name
+     * @return $this
+     */
+    public function disconnect($name)
+    {
+        $name = (string) $name;
+        if (isset($this->servers[$name])) {
+            try {
+                $this->servers[$name]->shutdown();
+            } catch (\Throwable $e) {
+                // 忽略关闭错误
+            }
+            unset($this->servers[$name]);
+        }
+        return $this;
+    }
+
+    /**
+     * 指定服务器是否已连接
+     *
+     * @param string $name
+     * @return bool
+     */
+    public function isConnected($name)
+    {
+        $name = (string) $name;
+        return isset($this->servers[$name]) && $this->servers[$name]->isInitialized();
+    }
+
+    /**
+     * 动态发现某个服务器的工具列表
+     *
+     * 未连接时先连；连不上返回空数组，不抛异常——一个 MCP 服务器不可用
+     * 不该让整个 Agent 停下来。
+     *
+     * @param string $name
+     * @return array<int, array{name: string, description?: string, inputSchema?: array<string, mixed>}>
+     */
+    public function discoverTools($name)
+    {
+        $name = (string) $name;
+        if (!isset($this->servers[$name]) && !$this->connect($name)) {
+            return [];
+        }
+        try {
+            return $this->servers[$name]->listTools();
+        } catch (\Throwable $e) {
+            $this->lastError = $name . ': ' . $e->getMessage();
+            return [];
+        }
+    }
+
+    /**
+     * 已登记的服务器名（不论是否已连接）
+     *
+     * @return string[]
+     */
+    public function serverNames()
+    {
+        return array_keys($this->serverConfigs);
+    }
+
+    /**
+     * 每个服务器的连接状态
+     *
+     * @return array<string, array{connected: bool, transport: string}>
+     */
+    public function status()
+    {
+        $status = [];
+        foreach ($this->serverConfigs as $name => $config) {
+            $connected = isset($this->servers[$name]);
+            $status[(string) $name] = [
+                'connected' => $connected,
+                'transport' => $connected
+                    ? $this->servers[$name]->getTransportName()
+                    : (isset($config['transport']) && is_string($config['transport'])
+                        ? $config['transport']
+                        : 'stdio'),
+            ];
+        }
+        return $status;
+    }
+
+    /**
+     * 最近一次连接 / 发现失败的原因
+     *
+     * @return string
+     */
+    public function getLastError()
+    {
+        return $this->lastError;
+    }
+
+    /**
+     * 按配置造客户端
+     *
+     * 兼容 `addServer()` 写进来的 `['command' =>, 'args' =>, 'options' =>]` 形态。
+     *
+     * @param array<string, mixed> $config
+     * @return McpClient
+     */
+    protected function makeClient(array $config)
+    {
+        if (isset($config['options']) && is_array($config['options'])) {
+            $flat = $config['options'];
+            $flat['command'] = isset($config['command']) ? $config['command'] : '';
+            $flat['args'] = isset($config['args']) && is_array($config['args']) ? $config['args'] : [];
+            if (isset($config['transport'])) {
+                $flat['transport'] = $config['transport'];
+            }
+            if (isset($config['url'])) {
+                $flat['url'] = $config['url'];
+            }
+            return McpClient::fromConfig($flat);
+        }
+        return McpClient::fromConfig($config);
+    }
+
+    /**
      * 从配置数组批量添加服务器
      *
      * 支持的格式：
@@ -72,6 +248,14 @@ class McpManager
     public function addServers(array $servers)
     {
         foreach ($servers as $name => $config) {
+            if (!is_array($config)) {
+                continue;
+            }
+            // 远程传输不需要 command，按完整配置登记
+            if (isset($config['transport']) || isset($config['url'])) {
+                $this->registerServer((string) $name, $config);
+                continue;
+            }
             $command = isset($config['command']) ? (string) $config['command'] : '';
             if ($command === '') {
                 continue;
@@ -98,15 +282,12 @@ class McpManager
         $errors = [];
         foreach ($this->serverConfigs as $name => $config) {
             try {
-                $client = new McpClient(
-                    $config['command'],
-                    $config['args'],
-                    $config['options']
-                );
+                $client = $this->makeClient($config);
                 $client->initialize();
                 $this->servers[(string) $name] = $client;
             } catch (\Throwable $e) {
                 $errors[] = "{$name}: " . $e->getMessage();
+                $this->lastError = "{$name}: " . $e->getMessage();
             }
         }
 

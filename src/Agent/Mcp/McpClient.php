@@ -2,21 +2,31 @@
 namespace Ai\Agent\Mcp;
 
 /**
- * McpClient——MCP 服务器 stdio JSON-RPC 客户端
+ * McpClient——MCP 服务器 JSON-RPC 客户端
  *
- * 通过子进程的 stdio 管道与 MCP 服务器通信。
- * 每个 McpClient 对应一个独立的 MCP 服务器进程。
+ * 负责 MCP 协议本身：握手、列工具、调工具、关闭。字节怎么送出去由
+ * `McpTransportInterface` 决定——本地进程走 stdio，远程服务走 HTTP / SSE，
+ * 需要长连接走 WebSocket。
  *
- * MCP 协议版本：JSON-RPC 2.0 over stdio
  * 生命周期：initialize → tools/list → tools/call → shutdown
  *
- * 用法：
  * ```php
+ * // stdio（默认）：把 MCP 服务器作为子进程拉起来
  * $client = new McpClient('npx', ['-y', '@modelcontextprotocol/server-fs', '/path']);
  * $client->initialize();
  * $tools = $client->listTools();
  * $result = $client->callTool('read_file', ['path' => '/tmp/test.txt']);
  * $client->shutdown();
+ *
+ * // HTTP / SSE：连远程 MCP 服务
+ * $client = McpClient::fromConfig([
+ *     'transport' => 'http',
+ *     'url'       => 'https://mcp.example.com/rpc',
+ *     'headers'   => ['Authorization: Bearer xxx'],
+ * ]);
+ *
+ * // WebSocket
+ * $client = McpClient::fromConfig(['transport' => 'websocket', 'url' => 'wss://mcp.example.com/ws']);
  * ```
  */
 class McpClient
@@ -27,14 +37,8 @@ class McpClient
     /** @var string[] 参数 */
     protected $args = [];
 
-    /** @var resource|null proc_open 进程句柄 */
-    protected $process = null;
-
-    /** @var resource|null stdout 管道 */
-    protected $stdout = null;
-
-    /** @var resource|null stdin 管道 */
-    protected $stdin = null;
+    /** @var McpTransportInterface 传输层 */
+    protected $transport;
 
     /** @var int 请求 ID 自增 */
     protected $requestId = 0;
@@ -67,6 +71,79 @@ class McpClient
         if (isset($options['timeout'])) {
             $this->timeout = (int) $options['timeout'];
         }
+        $this->transport = isset($options['transport']) && $options['transport'] instanceof McpTransportInterface
+            ? $options['transport']
+            : new McpStdioTransport($this->command, $this->args, $options);
+    }
+
+    /**
+     * 按配置造一个客户端
+     *
+     * `transport` 可以是 `stdio` / `http` / `sse` / `websocket`，也可以直接传一个
+     * 实现了 `McpTransportInterface` 的对象。
+     *
+     * ```php
+     * McpClient::fromConfig(['command' => 'npx', 'args' => ['-y', 'server-fs']]);
+     * McpClient::fromConfig(['transport' => 'http', 'url' => 'https://example.com/mcp']);
+     * McpClient::fromConfig(['transport' => 'websocket', 'url' => 'wss://example.com/mcp']);
+     * ```
+     *
+     * @param array<string, mixed> $config transport / command / args / url / headers / timeout / label
+     * @return self
+     */
+    public static function fromConfig(array $config)
+    {
+        $options = $config;
+        $transport = isset($config['transport']) ? $config['transport'] : 'stdio';
+
+        if (!$transport instanceof McpTransportInterface) {
+            $url = isset($config['url']) ? (string) $config['url'] : '';
+            switch (strtolower((string) $transport)) {
+                case 'http':
+                case 'sse':
+                    $transport = new McpHttpTransport($url, $config);
+                    break;
+                case 'websocket':
+                case 'ws':
+                    $transport = new McpWebSocketTransport($url, $config);
+                    break;
+                default:
+                    $transport = null;   // stdio：交给构造函数按 command / args 建
+            }
+        }
+
+        if ($transport !== null) {
+            $options['transport'] = $transport;
+            if (!isset($options['label'])) {
+                $options['label'] = isset($config['url']) ? (string) $config['url'] : $transport->name();
+            }
+        }
+
+        return new self(
+            isset($config['command']) ? (string) $config['command'] : '',
+            isset($config['args']) && is_array($config['args']) ? $config['args'] : [],
+            $options
+        );
+    }
+
+    /**
+     * 当前传输层
+     *
+     * @return McpTransportInterface
+     */
+    public function getTransport()
+    {
+        return $this->transport;
+    }
+
+    /**
+     * 传输方式名称
+     *
+     * @return string
+     */
+    public function getTransportName()
+    {
+        return $this->transport->name();
     }
 
     /** @return string */
@@ -78,7 +155,7 @@ class McpClient
     /** @return bool */
     public function isRunning()
     {
-        return $this->process !== null;
+        return $this->transport->isOpen();
     }
 
     /** @return bool */
@@ -95,36 +172,12 @@ class McpClient
      */
     public function start()
     {
-        if ($this->process !== null) {
+        if ($this->transport->isOpen()) {
             return;
         }
-
-        $cmd = $this->command;
-        if ($this->args) {
-            foreach ($this->args as $arg) {
-                $cmd .= ' ' . escapeshellarg((string) $arg);
-            }
-        }
-
-        $descriptors = [
-            0 => ['pipe', 'r'],  // stdin
-            1 => ['pipe', 'w'],  // stdout
-            2 => ['pipe', 'w'],  // stderr
-        ];
-
-        $proc = @proc_open($cmd, $descriptors, $pipes);
-        if ($proc === false) {
-            throw new \RuntimeException("无法启动 MCP 服务器：{$this->command}");
-        }
-        $this->process = $proc;
-
-        $this->stdin = $pipes[0];
-        $this->stdout = $pipes[1];
+        $this->transport->open();
         $this->requestId = 0;
         $this->initialized = false;
-
-        // 设置流为非阻塞
-        stream_set_blocking($this->stdout, false);
     }
 
     /**
@@ -258,7 +311,8 @@ class McpClient
      */
     public function shutdown()
     {
-        if ($this->process === null) {
+        if (!$this->transport->isOpen()) {
+            $this->initialized = false;
             return;
         }
 
@@ -268,37 +322,7 @@ class McpClient
             // 忽略关闭时的错误
         }
 
-        // 关闭管道
-        if ($this->stdin) {
-            @fclose($this->stdin);
-            $this->stdin = null;
-        }
-        if ($this->stdout) {
-            @fclose($this->stdout);
-            $this->stdout = null;
-        }
-
-        // 终止进程
-        if (is_resource($this->process)) {
-            $status = @proc_get_status($this->process);
-            if ($status !== false) {
-                // 发送 SIGTERM
-                if (function_exists('proc_terminate')) {
-                    @proc_terminate($this->process, 15); // SIGTERM
-                }
-                // 等待退出
-                for ($i = 0; $i < 10; $i++) {
-                    $status = @proc_get_status($this->process);
-                    if (!is_array($status) || empty($status['running'])) {
-                        break;
-                    }
-                    usleep(100000); // 100ms
-                }
-            }
-            @proc_close($this->process);
-            $this->process = null;
-        }
-
+        $this->transport->close();
         $this->initialized = false;
     }
 
@@ -315,20 +339,23 @@ class McpClient
         $this->requestId++;
         $id = $this->requestId;
 
-        $request = json_encode([
+        $response = $this->transport->request([
             'jsonrpc' => '2.0',
             'id'      => $id,
-            'method'  => $method,
+            'method'  => (string) $method,
             'params'  => (object) $params,
-        ], JSON_UNESCAPED_UNICODE);
+        ], $this->timeout);
 
-        if ($request === false) {
-            throw new \RuntimeException('MCP 请求序列化失败');
+        if (!is_array($response)) {
+            throw new \RuntimeException("MCP 无响应：{$method}");
         }
 
-        $this->write($request);
-
-        return $this->readResponse($id);
+        $filtered = $this->filterResponse($response, $id);
+        if ($filtered === null) {
+            // 传输层已按 ID 匹配过，走到这里说明服务端回了一条对不上的消息
+            throw new \RuntimeException("MCP 响应 ID 不匹配：{$method}");
+        }
+        return $filtered;
     }
 
     /**
@@ -340,131 +367,11 @@ class McpClient
      */
     protected function sendNotification($method, array $params = [])
     {
-        $request = json_encode([
+        $this->transport->notify([
             'jsonrpc' => '2.0',
-            'method'  => $method,
+            'method'  => (string) $method,
             'params'  => (object) $params,
-        ], JSON_UNESCAPED_UNICODE);
-
-        if ($request === false) {
-            return;
-        }
-
-        $this->write($request);
-    }
-
-    /**
-     * 写入 stdin
-     *
-     * MCP over stdio 使用 Content-Length 头 + JSON 体
-     *
-     * @param string $data
-     * @return void
-     * @throws \RuntimeException
-     */
-    protected function write($data)
-    {
-        if (!$this->stdin) {
-            throw new \RuntimeException('MCP stdin 未打开');
-        }
-
-        $message = "Content-Length: " . strlen($data) . "\r\n\r\n" . $data;
-        $written = @fwrite($this->stdin, $message);
-        @fflush($this->stdin);
-
-        if ($written === false) {
-            throw new \RuntimeException('MCP 写入失败');
-        }
-    }
-
-    /**
-     * 读取响应
-     *
-     * 解析 MCP Content-Length 头 + JSON 体格式
-     *
-     * @param int $expectedId
-     * @return array<string, mixed>
-     * @throws \RuntimeException
-     */
-    protected function readResponse($expectedId)
-    {
-        $buffer = '';
-        $start = time();
-
-        while (true) {
-            // 检查超时
-            if ((time() - $start) > $this->timeout) {
-                throw new \RuntimeException("MCP 响应超时（{$this->timeout}s）");
-            }
-
-            // 读取 stdout
-            if ($this->stdout) {
-                $chunk = @fread($this->stdout, 65536);
-                if ($chunk !== false && $chunk !== '') {
-                    $buffer .= $chunk;
-
-                    $decoded = $this->tryParseMessage($buffer, $expectedId);
-                    if ($decoded !== null) {
-                        return $decoded;
-                    }
-                }
-            }
-
-            usleep(50000); // 50ms
-        }
-    }
-
-    /**
-     * 尝试从 buffer 中解析 MCP 消息
-     *
-     * 标准格式：Content-Length: N\r\n\r\n{json}
-     * 兼容格式：裸 JSON 换行分隔
-     *
-     * @param string $buffer
-     * @param int $expectedId
-     * @return array<string, mixed>|null 解析成功且 ID 匹配时返回解码后的数组
-     */
-    protected function tryParseMessage(&$buffer, $expectedId)
-    {
-        // 尝试标准 Content-Length 格式
-        if (preg_match('/Content-Length: (\d+)\r?\n\r?\n/', $buffer, $headerMatch, PREG_OFFSET_CAPTURE)) {
-            $contentLength = (int) $headerMatch[1][0];
-            $headerEnd = $headerMatch[0][0];
-            $bodyStartPos = $headerMatch[0][1] + strlen($headerEnd);
-
-            if (strlen($buffer) >= $bodyStartPos + $contentLength) {
-                $json = substr($buffer, $bodyStartPos, $contentLength);
-                $decoded = json_decode($json, true);
-                // 移除已处理的部分
-                $buffer = substr($buffer, $bodyStartPos + $contentLength);
-                if (is_array($decoded)) {
-                    return $this->filterResponse($decoded, $expectedId);
-                }
-            }
-            return null; // 还没收够字节
-        }
-
-        // 尝试裸 JSON 换行分隔（兼容简化实现）
-        $lines = explode("\n", $buffer);
-        if (count($lines) > 1) {
-            $lastIdx = count($lines) - 1;
-            $buffer = $lines[$lastIdx]; // 保留未完成的行
-            for ($i = 0; $i < $lastIdx; $i++) {
-                $line = trim($lines[$i]);
-                if ($line === '') {
-                    continue;
-                }
-                $decoded = json_decode($line, true);
-                if (is_array($decoded)) {
-                    $result = $this->filterResponse($decoded, $expectedId);
-                    if ($result !== null) {
-                        return $result;
-                    }
-                }
-            }
-        }
-
-        return null;
+        ]);
     }
 
     /**

@@ -40,6 +40,12 @@ class SkillDefinition
     /** @var string 来源路径 */
     protected $path = '';
 
+    /** @var string 简短知识（frontmatter 的 knowledge 字段），匹配到场景时随描述一起注入 */
+    protected $knowledge = '';
+
+    /** @var string[] 触发该技能的文件通配符（frontmatter 的 files 字段） */
+    protected $filePatterns = [];
+
     /** @var bool 完整内容是否已加载 */
     protected $loaded = false;
 
@@ -58,6 +64,10 @@ class SkillDefinition
             ? array_values($data['allowedTools'])
             : [];
         $this->path         = isset($data['path']) ? (string) $data['path'] : '';
+        $this->knowledge    = isset($data['knowledge']) ? (string) $data['knowledge'] : '';
+        $this->filePatterns = isset($data['filePatterns']) && is_array($data['filePatterns'])
+            ? array_values(array_map('strval', $data['filePatterns']))
+            : [];
         $this->loaded       = $this->content !== '';
         $this->active       = !empty($data['active']);
     }
@@ -139,5 +149,85 @@ class SkillDefinition
             $line .= ': ' . $this->description;
         }
         return $line;
+    }
+
+    /**
+     * 简短知识——比完整正文短得多，可以在匹配到场景时直接注入
+     *
+     * @return string
+     */
+    public function getKnowledge()
+    {
+        return $this->knowledge;
+    }
+
+    /**
+     * @param string $knowledge
+     * @return $this
+     */
+    public function setKnowledge($knowledge)
+    {
+        $this->knowledge = (string) $knowledge;
+        return $this;
+    }
+
+    /**
+     * 触发该技能的文件通配符
+     *
+     * @return string[]
+     */
+    public function getFilePatterns()
+    {
+        return $this->filePatterns;
+    }
+
+    /**
+     * 该技能是否适用于指定文件
+     *
+     * 通配符按 `fnmatch()` 匹配，同时对纯路径片段做包含匹配——
+     * `wp-content` 这样的写法比 `*wp-content*` 更符合直觉。
+     *
+     * @param string $path
+     * @return bool 没有配置通配符时返回 false
+     */
+    public function matchesFile($path)
+    {
+        $path = str_replace('\\', '/', (string) $path);
+        if ($path === '' || !$this->filePatterns) {
+            return false;
+        }
+        foreach ($this->filePatterns as $pattern) {
+            $pattern = str_replace('\\', '/', $pattern);
+            if ($pattern === '') {
+                continue;
+            }
+            if (strpos($pattern, '*') === false && strpos($pattern, '?') === false) {
+                if (strpos($path, $pattern) !== false) {
+                    return true;
+                }
+                continue;
+            }
+            if (fnmatch($pattern, $path) || fnmatch($pattern, basename($path))) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * @return array<string, mixed>
+     */
+    public function toArray()
+    {
+        return [
+            'name'         => $this->name,
+            'description'  => $this->description,
+            'knowledge'    => $this->knowledge,
+            'allowedTools' => $this->allowedTools,
+            'filePatterns' => $this->filePatterns,
+            'path'         => $this->path,
+            'loaded'       => $this->loaded,
+            'active'       => $this->active,
+        ];
     }
 }

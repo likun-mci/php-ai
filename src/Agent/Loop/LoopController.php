@@ -426,6 +426,11 @@ class LoopController
                         if ($skillPrompt !== '') {
                             $systemPrompt .= "\n\n<skills>\n{$skillPrompt}\n</skills>";
                         }
+                        // 技能知识（frontmatter 的 knowledge 字段，几行要点，不是完整正文）
+                        $knowledge = $sm->knowledgeForPrompt();
+                        if ($knowledge !== '') {
+                            $systemPrompt .= "\n\n" . $knowledge;
+                        }
                     }
                     // 项目指令注入（CLAUDE.md / AGENTS.md）
                     $im = $context->getInstructionManager();

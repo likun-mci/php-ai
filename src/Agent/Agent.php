@@ -733,6 +733,45 @@ class Agent
     }
 
     /**
+     * 发现目录下的技能（不预读正文）
+     *
+     * 与 `loadSkills()` 的区别：只解析 frontmatter 登记技能，正文等模型
+     * `use_skill` 时再读盘。技能多、正文长时用它。
+     *
+     * @param string|string[] $dirs
+     * @return string[] 发现的技能名
+     */
+    public function discoverSkills($dirs)
+    {
+        $sm = $this->runtime->getSkillManager();
+        if ($sm === null) {
+            $sm = new \Ai\Agent\Skill\SkillManager();
+            $this->runtime->setSkillManager($sm);
+        }
+        $found = [];
+        foreach (is_array($dirs) ? $dirs : [(string) $dirs] as $dir) {
+            foreach ($sm->discover((string) $dir) as $name) {
+                $found[] = $name;
+            }
+        }
+        return $found;
+    }
+
+    /**
+     * 按文件路径自动激活匹配的技能
+     *
+     * 匹配依据是 SKILL.md frontmatter 里的 `files` 通配符。
+     *
+     * @param string $path
+     * @return string[] 被激活的技能名
+     */
+    public function activateSkillsForFile($path)
+    {
+        $sm = $this->runtime->getSkillManager();
+        return $sm === null ? [] : $sm->activateForFile((string) $path);
+    }
+
+    /**
      * 设置指令管理器
      *
      * @param \Ai\Agent\Instruction\InstructionManager $im

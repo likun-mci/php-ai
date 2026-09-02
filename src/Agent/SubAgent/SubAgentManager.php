@@ -63,6 +63,18 @@ class SubAgentManager
     /** @var int 运行自增序号 */
     protected $runCounter = 0;
 
+    /** @var array<string, mixed> 父 Agent 的工具集——子 Agent 的工具只能是它的子集 */
+    protected $parentTools = [];
+
+    /** @var \Ai\Agent\Skill\SkillManager|null 父 Agent 的技能管理器 */
+    protected $parentSkills = null;
+
+    /** @var \Ai\Agent\Mcp\McpManager|null 父 Agent 的 MCP 管理器 */
+    protected $parentMcp = null;
+
+    /** @var string transcript 落盘目录，空则只留在内存 */
+    protected $transcriptDir = '';
+
     /**
      * @param AI $ai 共享的 AI 实例（子 Agent 复用同一个 AI 配置）
      */
@@ -93,6 +105,320 @@ class SubAgentManager
     {
         $this->workdir = (string) $workdir;
         return $this;
+    }
+
+    /**
+     * 设置 transcript 落盘目录
+     *
+     * 不设置时 transcript 只在内存里，进程结束即丢——后台任务与崩溃恢复
+     * 都需要它能被另一个进程读到，所以长任务场景必须配。
+     *
+     * @param string $dir
+     * @return $this
+     */
+    public function setTranscriptDir($dir)
+    {
+        $this->transcriptDir = rtrim(str_replace('\\', '/', (string) $dir), '/');
+        if ($this->transcriptDir !== '' && !is_dir($this->transcriptDir)) {
+            @mkdir($this->transcriptDir, 0777, true);
+        }
+        return $this;
+    }
+
+    /**
+     * @return string
+     */
+    public function getTranscriptDir()
+    {
+        return $this->transcriptDir;
+    }
+
+    /**
+     * 续跑一个子 Agent 任务
+     *
+     * 拿回上一次的 transcript，把新指令接在后面继续跑。子 Agent 跑到一半
+     * 被截断（达到迭代上限、权限被拒）时用它接着干，而不是从头再来一遍。
+     *
+     * @param string $runId 上一次的运行 ID
+     * @param string $task 追加的指令，空则用原任务
+     * @return string 新的运行 ID；原记录不存在返回空串
+     */
+    public function resume($runId, $task = '')
+    {
+        $record = $this->getTranscript($runId);
+        if ($record === null) {
+            return '';
+        }
+
+        $agentName = isset($record['agent']) ? (string) $record['agent'] : '';
+        $def = $this->get($agentName);
+        if ($def === null) {
+            return '';
+        }
+
+        $previous = isset($record['summary']) ? (string) $record['summary'] : '';
+        $original = isset($record['task']) ? (string) $record['task'] : '';
+        $followUp = trim((string) $task) !== '' ? (string) $task : $original;
+
+        $prompt = $original !== '' ? "原任务：{$original}\n" : '';
+        if ($previous !== '') {
+            $prompt .= "上一轮的结论：\n{$previous}\n\n";
+        }
+        $prompt .= "继续执行：{$followUp}";
+
+        $newRunId = $this->runSync($agentName, $prompt);
+        if (isset($this->runs[$newRunId])) {
+            $this->runs[$newRunId]['resumed_from'] = (string) $runId;
+            $this->persistRun($newRunId);
+        }
+        return $newRunId;
+    }
+
+    /**
+     * transcript 落盘
+     *
+     * @param string $runId
+     * @return void
+     */
+    protected function persistRun($runId)
+    {
+        if ($this->transcriptDir === '' || !isset($this->runs[$runId])) {
+            return;
+        }
+        $safe = preg_replace('/[^A-Za-z0-9_\-]/', '', (string) $runId);
+        if ($safe === '') {
+            return;
+        }
+        $json = json_encode($this->runs[$runId], JSON_UNESCAPED_UNICODE);
+        if ($json !== false) {
+            @file_put_contents($this->transcriptDir . '/' . $safe . '.json', $json, LOCK_EX);
+        }
+    }
+
+    /**
+     * 从磁盘读回一条 transcript
+     *
+     * @param string $runId
+     * @return array<string, mixed>|null
+     */
+    public function loadTranscript($runId)
+    {
+        if ($this->transcriptDir === '') {
+            return null;
+        }
+        $safe = preg_replace('/[^A-Za-z0-9_\-]/', '', (string) $runId);
+        $file = $this->transcriptDir . '/' . $safe . '.json';
+        if ($safe === '' || !is_file($file)) {
+            return null;
+        }
+        $json = @file_get_contents($file);
+        if ($json === false) {
+            return null;
+        }
+        $data = json_decode($json, true);
+        return is_array($data) ? $data : null;
+    }
+
+    /**
+     * 设置父 Agent 的工具集
+     *
+     * 子 Agent 的工具只能从这里面挑。子 Agent 配置里写了父 Agent 没有的工具，
+     * 那个工具不会凭空出现——权限只减不增。
+     *
+     * @param array<string, mixed> $tools
+     * @return $this
+     */
+    public function setParentTools(array $tools)
+    {
+        $this->parentTools = $tools;
+        return $this;
+    }
+
+    /**
+     * @return array<string, mixed>
+     */
+    public function getParentTools()
+    {
+        return $this->parentTools;
+    }
+
+    /**
+     * 设置父 Agent 的技能管理器（子 Agent 按 skills 配置挑子集）
+     *
+     * @param \Ai\Agent\Skill\SkillManager|null $sm
+     * @return $this
+     */
+    public function setParentSkills($sm)
+    {
+        $this->parentSkills = $sm;
+        return $this;
+    }
+
+    /**
+     * 设置父 Agent 的 MCP 管理器
+     *
+     * @param \Ai\Agent\Mcp\McpManager|null $mm
+     * @return $this
+     */
+    public function setParentMcp($mm)
+    {
+        $this->parentMcp = $mm;
+        return $this;
+    }
+
+    /**
+     * 解析子 Agent 实际可用的工具
+     *
+     * 三步收窄，每一步都只会让工具变少：
+     *   1. 起点是子 Agent 自己声明的 tools；没声明就用父 Agent 的全集
+     *   2. 与父 Agent 的工具集求交——父没有的一律去掉
+     *   3. 去掉 disallowedTools
+     *
+     * @param SubAgentDefinition $def
+     * @return array<string, mixed>
+     */
+    public function resolveTools(SubAgentDefinition $def)
+    {
+        $declared = $def->getTools();
+        $tools = $declared ? $declared : $this->parentTools;
+
+        // 与父工具集求交：父 Agent 没有的工具，子 Agent 声明了也拿不到
+        if ($this->parentTools) {
+            $intersected = [];
+            foreach ($tools as $name => $tool) {
+                $key = (string) $name;
+                if (isset($this->parentTools[$key])) {
+                    // 统一用父 Agent 那一份实例，避免子 Agent 传进来一个同名但行为不同的工具
+                    $intersected[$key] = $this->parentTools[$key];
+                }
+            }
+            $tools = $intersected;
+        }
+
+        foreach ($def->getDisallowedTools() as $disallowed) {
+            unset($tools[$disallowed]);
+        }
+        return $tools;
+    }
+
+    /**
+     * 按定义组装一个子 Agent 运行时
+     *
+     * 权限、工具、模型、技能、MCP、钩子、记忆都在这里落位。
+     * 核心不变式：**子 Agent 的能力永远是父 Agent 的子集**。
+     *
+     * @param SubAgentDefinition $def
+     * @param string $workdir 覆盖工作目录（worktree 隔离时用）
+     * @return AgentRuntime
+     */
+    public function buildRuntime(SubAgentDefinition $def, $workdir = '')
+    {
+        $runtime = new AgentRuntime($this->ai);
+        $runtime->setSystem($def->getSystemPrompt());
+        $runtime->setMaxIter($def->getMaxIter());
+        $runtime->setWorkdir($workdir !== '' ? (string) $workdir : $this->workdir);
+
+        // 权限继承：子 Agent 不能超越父 Agent 的权限范围
+        if ($this->parentPermission) {
+            $runtime->setPermission($this->parentPermission);
+            // permissionMode 只能往严格的方向调；宽松方向的请求忽略
+            $mode = $def->getPermissionMode();
+            if ($mode !== '' && $this->isStricterMode($mode, $this->parentPermission->getMode())) {
+                $runtime->setPermissionMode($mode);
+            }
+        } else {
+            // 父权限未设置时走 manual——子 Agent 同样受权限系统约束
+            $runtime->setPermissionMode($def->getPermissionMode() !== '' ? $def->getPermissionMode() : 'manual');
+        }
+
+        $tools = $this->resolveTools($def);
+        if ($tools) {
+            $runtime->setTools($tools);
+        }
+
+        // 技能：从父 Agent 的技能里挑子集
+        $skills = $def->getSkills();
+        if ($skills && $this->parentSkills !== null) {
+            $sm = new \Ai\Agent\Skill\SkillManager();
+            foreach ($skills as $skillName) {
+                $skill = $this->parentSkills->get($skillName);
+                if ($skill !== null) {
+                    $sm->register($skill->getName(), [
+                        'description'  => $skill->getDescription(),
+                        'content'      => $skill->getContent(),
+                        'allowedTools' => $skill->getAllowedTools(),
+                        'path'         => $skill->getPath(),
+                    ]);
+                }
+            }
+            $runtime->setSkillManager($sm);
+        }
+
+        // MCP：父 Agent 已登记的服务器里挑子集
+        if ($def->getMcpServers() && $this->parentMcp !== null) {
+            $runtime->setMcpManager($this->parentMcp);
+        }
+
+        if ($def->getHooks() !== null) {
+            $runtime->setHooks($def->getHooks());
+        }
+
+        $memoryDir = $def->getMemoryDir();
+        if ($memoryDir !== '') {
+            $runtime->setMemoryManager(new \Ai\Agent\Memory\MemoryManager($memoryDir));
+        }
+
+        return $runtime;
+    }
+
+    /**
+     * 带模型切换执行一段逻辑
+     *
+     * AI 实例是父子共享的，子 Agent 想用别的模型只能临时切换再切回来——
+     * 否则子 Agent 跑完，父 Agent 的模型就被悄悄改掉了。
+     *
+     * @param SubAgentDefinition $def
+     * @param callable $callback
+     * @return mixed $callback 的返回值
+     */
+    protected function withModel(SubAgentDefinition $def, callable $callback)
+    {
+        $model = $def->getModel();
+        if ($model === '') {
+            return call_user_func($callback);
+        }
+
+        $previous = $this->ai->model();
+        try {
+            $this->ai->setModel($model);
+            return call_user_func($callback);
+        } finally {
+            if ($previous !== null) {
+                $this->ai->setModel($previous);
+            }
+        }
+    }
+
+    /**
+     * 判断一个权限模式是不是比另一个更严格
+     *
+     * 子 Agent 只能把权限收紧，不能放宽——`bypass` 的父 Agent 下面可以挂 `manual`
+     * 的子 Agent，反过来不行。
+     *
+     * @param string $mode
+     * @param string $parentMode
+     * @return bool
+     */
+    protected function isStricterMode($mode, $parentMode)
+    {
+        // 由严到松
+        $order = ['manual', 'plan', 'accept_edits', 'auto', 'dont_ask', 'bypass'];
+        $a = array_search((string) $mode, $order, true);
+        $b = array_search((string) $parentMode, $order, true);
+        if ($a === false || $b === false) {
+            return false;
+        }
+        return $a <= $b;
     }
 
     /**
@@ -230,6 +556,15 @@ class SubAgentManager
                 return 'ERROR: 任务描述不能为空';
             }
 
+            // 定义里声明的 background / isolation 是默认值，工具入参可以额外开启，但不能关闭——
+            // 一个被配置成必须隔离的子 Agent，不该因为模型没传参就直接改到父工作区
+            if ($def->isBackground()) {
+                $background = true;
+            }
+            if ($def->isWorktreeIsolated()) {
+                $isolation = 'worktree';
+            }
+
             // Worktree 隔离模式
             if ($isolation === 'worktree') {
                 $runId = $self->runSyncWithWorktree($agentName, $task);
@@ -303,28 +638,13 @@ class SubAgentManager
 
         // 创建子 Agent 的独立运行时
         // 核心原则：子 Agent 权限 ⊆ 父 Agent 权限
-        $subRuntime = new AgentRuntime($this->ai);
-        $subRuntime->setSystem($def->getSystemPrompt());
-        $subRuntime->setMaxIter($def->getMaxIter());
-        $subRuntime->setWorkdir($this->workdir);
-
-        // 权限继承：子 Agent 不能超越父 Agent 的权限范围
-        $parentPm = $this->parentPermission;
-        if ($parentPm) {
-            $subRuntime->setPermission($parentPm);
-        } else {
-            // 父权限未设置时走 manual 模式——子 Agent 同样受权限系统约束
-            $subRuntime->setPermissionMode('manual');
-        }
-
-        $tools = $def->getTools();
-        if ($tools) {
-            $subRuntime->setTools($tools);
-        }
+        $subRuntime = $this->buildRuntime($def);
 
         $start = microtime(true);
         $messages = [['role' => 'user', 'content' => $task]];
-        $subResult = $subRuntime->run($messages);
+        $subResult = $this->withModel($def, function () use ($subRuntime, $messages) {
+            return $subRuntime->run($messages);
+        });
 
         $this->runCounter++;
         $runId = 'sub_' . $this->runCounter . '_' . dechex(time());
@@ -341,6 +661,7 @@ class SubAgentManager
             'created_at' => time(),
             'updated_at' => time(),
         ];
+        $this->persistRun($runId);
         return $runId;
     }
 
@@ -419,27 +740,14 @@ class SubAgentManager
             return $runId;
         }
 
-        // 运行子 Agent
-        $subRuntime = new AgentRuntime($this->ai);
-        $subRuntime->setSystem($def->getSystemPrompt());
-        $subRuntime->setMaxIter($def->getMaxIter());
-        $subRuntime->setWorkdir($worktreeDir);
-
-        $parentPm = $this->parentPermission;
-        if ($parentPm) {
-            $subRuntime->setPermission($parentPm);
-        } else {
-            $subRuntime->setPermissionMode('manual');
-        }
-
-        $tools = $def->getTools();
-        if ($tools) {
-            $subRuntime->setTools($tools);
-        }
+        // 运行子 Agent（工作目录指向 worktree，父工作区不受影响）
+        $subRuntime = $this->buildRuntime($def, $worktreeDir);
 
         $start = microtime(true);
         $messages = [['role' => 'user', 'content' => $task]];
-        $subResult = $subRuntime->run($messages);
+        $subResult = $this->withModel($def, function () use ($subRuntime, $messages) {
+            return $subRuntime->run($messages);
+        });
 
         // 捕获 diff
         $diff = $this->runCommand('git diff HEAD -- :/ 2>/dev/null', $worktreeDir);
@@ -465,6 +773,7 @@ class SubAgentManager
             'created_at' => time(),
             'updated_at' => time(),
         ];
+        $this->persistRun($runId);
         return $runId;
     }
 
@@ -563,7 +872,15 @@ class SubAgentManager
      */
     public function getTranscript($runId)
     {
-        return isset($this->runs[$runId]) ? $this->runs[$runId] : null;
+        if (isset($this->runs[$runId])) {
+            return $this->runs[$runId];
+        }
+        // 内存里没有就找磁盘——后台任务的 transcript 是另一个进程写的
+        $loaded = $this->loadTranscript($runId);
+        if ($loaded !== null) {
+            $this->runs[(string) $runId] = $loaded;
+        }
+        return $loaded;
     }
 
     /**

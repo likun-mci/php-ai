@@ -166,6 +166,11 @@ class AgentRuntime
     public function setTools(array $tools)
     {
         $this->toolRegistry->clear()->registerAll($tools);
+        // 工具集变了要同步给子 Agent 管理器——它按父工具集求交决定子 Agent 能用什么，
+        // 顺序上先设管理器后设工具是常见写法，这里补上就不必要求调用方记顺序
+        if ($this->subAgentManager !== null) {
+            $this->subAgentManager->setParentTools($this->toolRegistry->all());
+        }
         return $this;
     }
 
@@ -227,6 +232,16 @@ class AgentRuntime
     }
 
     /**
+     * 当前权限管理器
+     *
+     * @return \Ai\Agent\Permission\PermissionManager|null
+     */
+    public function getPermission()
+    {
+        return $this->permission;
+    }
+
+    /**
      * 设置上下文管理器
      *
      * @param ContextManager $cm
@@ -236,6 +251,18 @@ class AgentRuntime
     {
         $this->contextManager = $cm;
         return $this;
+    }
+
+    /**
+     * 当前 AI 实例
+     *
+     * 编排层需要它来创建子 Agent 运行时；业务代码一般用不到。
+     *
+     * @return AI
+     */
+    public function getAI()
+    {
+        return $this->ai;
     }
 
     /**
@@ -382,6 +409,11 @@ class AgentRuntime
         if ($this->workdir) {
             $sam->setWorkdir($this->workdir);
         }
+        // 把父 Agent 的工具、技能、MCP 交给它——子 Agent 的能力从这里面收窄而来，
+        // 不给的话 resolveTools() 就没有可求交的基准，权限约束会形同虚设
+        $sam->setParentTools($this->toolRegistry->all());
+        $sam->setParentSkills($this->skillManager);
+        $sam->setParentMcp($this->mcpManager);
         return $this;
     }
 
@@ -565,6 +597,16 @@ class AgentRuntime
     public function getUserInteractionManager()
     {
         return $this->interaction;
+    }
+
+    /**
+     * 子 Agent 管理器
+     *
+     * @return SubAgentManager|null
+     */
+    public function getSubAgentManager()
+    {
+        return $this->subAgentManager;
     }
 
     /**

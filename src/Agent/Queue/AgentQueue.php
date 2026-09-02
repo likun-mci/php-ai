@@ -54,12 +54,55 @@ class AgentQueue
     /** @var bool 自动将 done/failed 任务从队列移除 */
     protected $autoDequeue = false;
 
+    /** @var \Ai\Agent\Task\TaskGraph|null 任务依赖图，挂了之后只调度就绪任务 */
+    protected $graph = null;
+
     /**
      * @param TaskManager|null $tm 任务管理器（可选，需要时自动创建）
      */
     public function __construct($tm = null)
     {
         $this->taskManager = $tm !== null ? $tm : new TaskManager();
+    }
+
+    /**
+     * 挂上任务依赖图
+     *
+     * 挂了之后队列只调度「依赖已满足」的任务：`processNext()` 会跳过还在等上游的，
+     * 直接取下一个就绪的。不挂则维持先进先出。
+     *
+     * @param \Ai\Agent\Task\TaskGraph|null $graph
+     * @return $this
+     */
+    public function setGraph($graph)
+    {
+        $this->graph = $graph instanceof \Ai\Agent\Task\TaskGraph ? $graph : null;
+        return $this;
+    }
+
+    /**
+     * @return \Ai\Agent\Task\TaskGraph|null
+     */
+    public function getGraph()
+    {
+        return $this->graph;
+    }
+
+    /**
+     * 声明任务依赖（自动创建依赖图）
+     *
+     * @param string $taskId
+     * @param string $dependsOn
+     * @param string $type hard|soft
+     * @return bool 成环或自依赖时返回 false
+     */
+    public function dependsOn($taskId, $dependsOn, $type = \Ai\Agent\Task\TaskDependency::TYPE_HARD)
+    {
+        if ($this->graph === null) {
+            $this->graph = new \Ai\Agent\Task\TaskGraph();
+            $this->graph->syncFrom($this->taskManager);
+        }
+        return $this->graph->dependsOn($taskId, $dependsOn, $type);
     }
 
     /**
@@ -112,10 +155,12 @@ class AgentQueue
      */
     public function processNext()
     {
-        $taskId = array_shift($this->queue);
+        // 走 nextTaskId() 而不是直接 array_shift：挂了依赖图时队首任务可能还没就绪
+        $taskId = $this->nextTaskId();
         if ($taskId === null) {
             return null;
         }
+        $this->removeFromQueue($taskId);
         return $this->process($taskId);
     }
 
@@ -140,6 +185,15 @@ class AgentQueue
 
         $result = $this->taskManager->start($taskId, $runtime, $messages);
         $this->results[$taskId] = $result;
+
+        // 把新状态同步进依赖图：失败会连带把下游标成 blocked，
+        // 下一轮调度就不会再去取那些注定跑不起来的任务
+        if ($this->graph !== null) {
+            $updated = $this->taskManager->get($taskId);
+            if ($updated !== null) {
+                $this->graph->setStatus($taskId, $updated->getStatus());
+            }
+        }
 
         return $result;
     }
@@ -244,16 +298,43 @@ class AgentQueue
      */
     protected function nextTaskId()
     {
-        $taskId = isset($this->queue[0]) ? $this->queue[0] : null;
-        if ($taskId === null) {
-            return null;
+        $count = count($this->queue);
+        for ($i = 0; $i < $count; $i++) {
+            $taskId = isset($this->queue[$i]) ? $this->queue[$i] : null;
+            if ($taskId === null) {
+                break;
+            }
+
+            // 跳过已取消/已完成的
+            $task = $this->taskManager->get($taskId);
+            if ($task !== null && !$task->isQueued()) {
+                array_splice($this->queue, $i, 1);
+                $i--;
+                $count--;
+                continue;
+            }
+
+            // 挂了依赖图的话，依赖没满足的任务先跳过——它排在队首也跑不起来，
+            // 硬跑只会失败一次再回来重排
+            if ($this->graph !== null && !$this->graph->isSatisfied($taskId)) {
+                continue;
+            }
+            return $taskId;
         }
-        // 跳过已取消/已完成的
-        $task = $this->taskManager->get($taskId);
-        if ($task !== null && !$task->isQueued()) {
-            array_shift($this->queue);
-            return $this->nextTaskId();
+        return null;
+    }
+
+    /**
+     * 从队列里摘掉指定任务
+     *
+     * @param string $taskId
+     * @return void
+     */
+    protected function removeFromQueue($taskId)
+    {
+        $index = array_search((string) $taskId, $this->queue, true);
+        if ($index !== false) {
+            array_splice($this->queue, (int) $index, 1);
         }
-        return $taskId;
     }
 }

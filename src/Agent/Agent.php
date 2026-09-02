@@ -54,6 +54,12 @@ class Agent
     /** @var string */
     protected $lastText = '';
 
+    /** @var \Ai\Agent\Orchestrator\AgentOrchestrator|null 编排器（惰性创建） */
+    protected $orchestrator = null;
+
+    /** @var callable|null 事件回调，编排器创建时一并接上 */
+    protected $eventCallback = null;
+
     /**
      * @param AI $ai
      */
@@ -74,7 +80,7 @@ class Agent
     }
 
     /**
-     * @param array<string, array{description?: string, input_schema?: array<mixed>, handler?: callable}> $tools
+     * @param array<string, mixed> $tools 工具名 => 数组定义或 AgentToolInterface 实例
      * @return $this
      */
     public function setTools(array $tools)
@@ -88,7 +94,11 @@ class Agent
      */
     public function onEvent(callable $emit)
     {
+        $this->eventCallback = $emit;
         $this->runtime->onEvent($emit);
+        if ($this->orchestrator !== null) {
+            $this->orchestrator->onEvent($emit);
+        }
         return $this;
     }
 
@@ -574,6 +584,157 @@ class Agent
                     : [],
             ]));
         }
+
+        return $this;
+    }
+
+    /**
+     * 编排器（惰性创建）
+     *
+     * 拿到它就能自己看决策、换策略选择器：
+     *
+     * ```php
+     * $agent->orchestrator()->selector()->setAutoDelegate(false);
+     * $decision = $agent->orchestrator()->decide('重构认证系统');
+     * ```
+     *
+     * @return \Ai\Agent\Orchestrator\AgentOrchestrator
+     */
+    public function orchestrator()
+    {
+        if ($this->orchestrator === null) {
+            $this->orchestrator = new \Ai\Agent\Orchestrator\AgentOrchestrator($this->runtime, [
+                'subAgents'   => $this->runtime->getSubAgentManager(),
+                'planManager' => $this->runtime->getPlanManager(),
+            ]);
+            if ($this->eventCallback !== null) {
+                $this->orchestrator->onEvent($this->eventCallback);
+            }
+        }
+        return $this->orchestrator;
+    }
+
+    /**
+     * 交给编排层处理一个任务——由 Agent 自己决定怎么干
+     *
+     * 与 `run()` 的区别：`run()` 直接进循环，`task()` 会先判断该直接干、
+     * 该先拆计划、该派子 Agent 还是该并行铺开。
+     *
+     * ```php
+     * $result = $agent->task('重构整个用户认证系统');
+     * echo $agent->orchestrator()->lastDecision()->toSummary();   // 看它为什么这么选
+     * ```
+     *
+     * @param string $task
+     * @param array<string, mixed> $context
+     * @return AgentResult
+     */
+    public function task($task, array $context = [])
+    {
+        return $this->orchestrator()->handle((string) $task, $context);
+    }
+
+    /**
+     * 后台派发一个任务，立即返回句柄
+     *
+     * 真异步程度取决于环境：注入了 runner（协程 / 队列）→ 真异步；
+     * `pcntl_fork` 可用 → fork 子进程；都不行 → 同步跑完再返回。
+     * 返回的 `mode` 字段如实标明走的是哪一档，不会假装异步。
+     *
+     * ```php
+     * $handle = $agent->dispatch('扫描整个项目的安全问题');
+     * $handle['task_id'];   // 'task_1_ab12cd34'
+     * $handle['mode'];      // 'runner' | 'fork' | 'sync'
+     * ```
+     *
+     * @param string $task
+     * @return array<string, mixed>
+     */
+    public function dispatch($task)
+    {
+        $orchestrator = $this->orchestrator();
+        $decision = \Ai\Agent\Orchestrator\StrategyDecision::background('调用方显式要求后台执行');
+        $result = $orchestrator->execute((string) $task, $decision);
+
+        $meta = $result->getExtra();
+        return isset($meta['handle']) && is_array($meta['handle'])
+            ? $meta['handle']
+            : ['task_id' => '', 'status' => 'failed', 'mode' => 'sync', 'background' => false];
+    }
+
+    /**
+     * 查询后台任务
+     *
+     * @param string $taskId
+     * @return array<string, mixed>|null
+     */
+    public function taskStatus($taskId)
+    {
+        return $this->orchestrator()->dispatcher()->status((string) $taskId);
+    }
+
+    /**
+     * 一键装配成代码 Agent
+     *
+     * 把「让 Agent 干活于一个 PHP 项目」需要的东西一次配齐：内置工具、
+     * 六个专职子 Agent、默认验证器、执行计划、反思。之后一句 `task()` 就能开工。
+     *
+     * ```php
+     * $agent = (new Agent($ai))->setWorkdir('/var/www/project')->codeAgent();
+     * $result = $agent->task('修复登录 Bug 并运行测试');
+     * ```
+     *
+     * @param array<string, mixed> $options test（测试命令）/ agents（只装哪几个子 Agent）/
+     *                                      permissionMode / maxFiles / maxLines
+     * @return $this
+     */
+    public function codeAgent(array $options = [])
+    {
+        $workdir = $this->runtime->getWorkdir();
+        if ($workdir === '') {
+            $workdir = getcwd() === false ? '.' : (string) getcwd();
+            $this->setWorkdir($workdir);
+        }
+
+        // 内置工具（读写改 + 搜索 + Bash）+ 代码结构索引
+        $tools = \Ai\Agent\Tools\ClaudeCodeTools::all(['workdir' => $workdir]);
+        if (empty($options['noIndex'])) {
+            $tools['code_index'] = new \Ai\Agent\Tools\CodeIndexTool($workdir);
+        }
+        $this->setTools($tools);
+
+        if (isset($options['permissionMode'])) {
+            $this->setPermissionMode((string) $options['permissionMode']);
+        }
+
+        // 六个专职子 Agent，各自工具集已收窄
+        $sam = new \Ai\Agent\SubAgent\SubAgentManager($this->ai);
+        $sam->setWorkdir($workdir);
+        $sam->setParentTools($tools);
+        \Ai\Agent\SubAgent\BuiltinAgents::register(
+            $sam,
+            isset($options['agents']) && is_array($options['agents']) ? $options['agents'] : []
+        );
+        $this->setSubAgentManager($sam);
+
+        // 验证器：语法 + 安全常开，测试命令给了才挂
+        $this->useDefaultVerifiers([
+            'test'     => isset($options['test']) ? (string) $options['test'] : '',
+            'workdir'  => $workdir,
+            'maxFiles' => isset($options['maxFiles']) ? (int) $options['maxFiles'] : 0,
+            'maxLines' => isset($options['maxLines']) ? (int) $options['maxLines'] : 0,
+        ]);
+
+        // 计划与反思：让它能拆步骤、能在"以为做完了"的时候再检查一遍
+        if ($this->runtime->getPlanManager() === null) {
+            $this->setPlanManager(new \Ai\Agent\Planning\PlanManager());
+        }
+        if ($this->runtime->getReflectionManager() === null) {
+            $this->enableReflection();
+        }
+
+        // 项目指令（CLAUDE.md / AGENTS.md）
+        $this->loadInstructions($workdir);
 
         return $this;
     }

@@ -2514,6 +2514,259 @@ $agent->run([['role' => 'user', 'content' => '修一下失败的测试']]);
 没调用 `enableReflection()` 时循环行为与升级前完全一致——不会平白多跑几轮。
 `setGoal()` 未设置时，目标退回取首条用户消息。
 
+### 编排层（AgentOrchestrator）
+
+`AgentRuntime` 回答的是「怎么跑一轮循环」，编排层回答的是**「这活该怎么干」**——直接调工具、先拆计划、派给子 Agent、并行铺开，还是丢后台。
+
+```php
+$agent = (new Agent($ai))->setWorkdir('/var/www/project')->codeAgent();
+
+$result = $agent->task('分析项目中的认证、支付、SEO');
+// 自动识别成三路并行 → 派 explorer 分头调查 → 汇总摘要
+
+echo $agent->orchestrator()->lastDecision()->toSummary();
+// 策略：parallel —— 识别到 3 个互不相关的子任务
+```
+
+`codeAgent()` 一次装齐：内置工具、六个专职子 Agent、默认验证器、执行计划、反思、项目指令。之后一句 `task()` 就能开工。
+
+七种策略：
+
+| 策略 | 何时选中 | 典型任务 |
+|---|---|---|
+| `direct` | 范围明确 | 「读一下 README」 |
+| `plan` | 范围大、含重构/迁移类动词、或带编号步骤 | 「重构整个用户认证系统」 |
+| `delegate` | 与某个子 Agent 的职责匹配 | 「审查 Auth.php 的安全问题」→ reviewer |
+| `parallel` | 识别到并列的多个子任务 | 「分析认证、支付、SEO」 |
+| `background` | 描述里明确要求后台 | 「后台扫描整个项目」 |
+| `ask_user` | 任务描述为空或无法判断 | —— |
+| `verify` | 只是要确认既有改动 | 「跑一下测试确认没问题」 |
+
+**决策一定会进事件流**（`strategy_decision` 事件，带 `reason`）。Agent 自主选策略之后，使用者必须能回答「它为什么这么干」，否则出了问题只能靠猜：
+
+```php
+$agent->onEvent(function ($e) {
+    if ($e['type'] === 'strategy_decision') {
+        echo "{$e['strategy']}：{$e['reason']}\n";
+    }
+});
+```
+
+决策与执行是分开的，可以先看再决定要不要照做：
+
+```php
+$decision = $agent->orchestrator()->decide('重构认证系统');
+if ($decision->is(\Ai\Agent\Orchestrator\ExecutionStrategy::PLAN)) {
+    $result = $agent->orchestrator()->execute('重构认证系统', $decision);
+}
+```
+
+默认选择器是**基于规则**的，不额外调模型——多花一次模型调用去决定「要不要多花模型调用」不划算，而且规则版的决策可复现、出问题能查。拿不准时一律退回 `direct`：保守执行的代价是多跑几轮工具，错误委派的代价是一个子 Agent 带着错误上下文跑十几轮。
+
+需要模型驱动时换掉它：
+
+```php
+$agent->orchestrator()->selector()->setResolver(function ($task, $context) use ($ai) {
+    // 返回 StrategyDecision；返回 null 则退回规则判断
+});
+
+// 或直接关掉某类自动行为
+$agent->orchestrator()->selector()->setAutoDelegate(false)->setAutoPlan(false);
+```
+
+**不挂子 Agent 与计划管理器时，所有策略都退回 `direct`**，跑出来跟直接调 `run()` 一样——编排层是加法，不改变既有行为。
+
+### 内置子 Agent（BuiltinAgents）
+
+六个开箱即用的专职角色。它们的价值主要不在提示词，而在**工具集是收窄的**：explorer 拿不到写文件的工具，所以它不可能在「调查代码」的过程中顺手改掉什么。这比在提示词里写「请不要修改代码」可靠得多。
+
+| 角色 | 用途 | 工具 |
+|---|---|---|
+| `explorer` | 代码搜索、阅读、调查、依赖分析 | read_file / grep / glob |
+| `planner` | 执行计划生成与任务拆解 | read_file / grep / glob |
+| `coder` | 代码修改 | read_file / write_file / edit_file / grep / glob / bash |
+| `tester` | 运行测试、分析失败 | read_file / grep / glob / bash |
+| `reviewer` | 代码审查、安全审查 | read_file / grep / glob / bash |
+| `debugger` | 错误分析、问题定位 | read_file / grep / glob / bash |
+
+```php
+use Ai\Agent\SubAgent\BuiltinAgents;
+
+BuiltinAgents::registerAll($sam);                    // 六个全装
+BuiltinAgents::register($sam, ['explorer', 'tester']); // 只装两个
+BuiltinAgents::isReadOnly('explorer');               // true
+```
+
+### 子 Agent 完整配置
+
+```php
+$sam->register('reviewer', [
+    'description'     => '代码审查与安全审查',   // 也是自动委派的匹配依据
+    'prompt'          => '你是代码审查者……',
+    'tools'           => [...],
+    'disallowedTools' => ['write_file', 'edit_file'],
+    'model'           => 'claude-sonnet-5',      // 该角色单独用的模型
+    'permissionMode'  => 'manual',
+    'maxTurns'        => 15,
+    'skills'          => ['php-development'],
+    'mcpServers'      => ['fs'],
+    'hooks'           => $hooks,
+    'memory'          => '/var/data/memory/reviewer',
+    'background'      => false,
+    'isolation'       => 'worktree',
+]);
+```
+
+**子 Agent 的能力永远是父 Agent 的子集。** 这条是硬约束，不是建议：
+
+```php
+$sam->setParentTools($parentTools);   // 父 Agent 只有 read_file / grep / glob
+
+$sam->register('greedy', ['tools' => ['read_file' => …, 'write_file' => …, 'bash' => …]]);
+$sam->resolveTools($sam->get('greedy'));   // 只剩 read_file —— 父没有的拿不到
+```
+
+三步收窄，每一步都只会让工具变少：起点是子 Agent 声明的 `tools`（没声明则用父全集）→ 与父工具集求交 → 去掉 `disallowedTools`。`permissionMode` 同理，只能往严格方向调：`bypass` 的父 Agent 下面可以挂 `manual` 的子 Agent，反过来不行。
+
+`model` 是临时切换再切回来的——AI 实例父子共享，子 Agent 跑完不该把父 Agent 的模型悄悄改掉。
+
+定义里声明的 `background` / `isolation` 是**下限**：工具入参可以额外开启，但不能关闭。一个被配置成必须 worktree 隔离的子 Agent，不该因为模型没传参就直接改到父工作区。
+
+### 任务依赖图（TaskGraph）
+
+父子关系（`parentTaskId`）表达的是从属，依赖表达的是**顺序**——两个兄弟任务可以同属一个父任务，却一个必须等另一个跑完。这两件事必须分开表达，否则「B 与 C 并行、D 等 C」这种结构根本写不出来。
+
+```php
+use Ai\Agent\Task\TaskGraph;
+
+$graph = new TaskGraph();
+$graph->addTask('a')->addTask('b')->addTask('c')->addTask('d');
+$graph->dependsOn('b', 'a');
+$graph->dependsOn('c', 'a');
+$graph->dependsOn('d', 'c');
+
+$graph->ready();              // ['a']
+$graph->markCompleted('a');
+$graph->ready();              // ['b', 'c'] —— 可并行
+$graph->markCompleted('c');
+$graph->ready();              // ['b', 'd']
+
+$graph->layers();             // 按依赖深度分层，同层可并行
+$graph->dependentsOf('c');    // ['d'] —— 改 c 会影响谁
+```
+
+**失败会向下游传播成 `blocked`**：让一个注定跑不起来的任务留在队列里等，只会浪费一次调度。
+
+```php
+$graph->markFailed('x');
+$graph->getStatus('y');       // 'blocked'（y 硬依赖 x）
+$graph->blocked();            // ['y', 'z'] —— 传递阻塞
+```
+
+软依赖只约束顺序，上游失败也照跑：
+
+```php
+$graph->dependsOn('q', 'p', \Ai\Agent\Task\TaskDependency::TYPE_SOFT);
+```
+
+**会成环的依赖直接被拒绝**（`dependsOn()` 返回 `false`）——环意味着谁都跑不起来，建图时报错比运行时死锁好查得多。自依赖同理。
+
+与 `TaskManager` 打通：
+
+```php
+$graph->syncFrom($taskManager);   // 同步任务与状态，图结构不变
+```
+
+### 后台与并行执行
+
+PHP 没有内置事件循环，「后台执行」在不同部署环境里能做到的程度差别很大。本库把三档路径收在一处，并且**如实告知走的是哪一档**——悄悄退化成同步执行、却让调用方以为是异步的，比直接说做不到危险得多。
+
+```php
+$handle = $agent->dispatch('扫描整个项目的安全问题');
+// ['task_id' => 'task_1_ab12cd34', 'status' => 'running', 'mode' => 'fork', 'background' => true]
+
+$agent->taskStatus($handle['task_id']);
+```
+
+| 档位 | 条件 | 行为 |
+|---|---|---|
+| `runner` | 注入了 runner（Swoole / Workerman 协程、队列 Worker） | 真异步，立即返回 |
+| `fork` | `pcntl_fork` 可用且未被 `disable_functions` 禁用 | fork 子进程，父进程立即返回 |
+| `sync` | 都不可用 | 同步跑完再返回，但仍返回 task_id，状态机一致 |
+
+```php
+use Ai\Agent\Orchestrator\BackgroundDispatcher;
+
+$dispatcher = new BackgroundDispatcher([
+    'resultDir' => '/var/data/bg',      // fork 档必须配：子进程改的内存父进程看不到
+    'runner'    => function (array $payload) { /* 投递到队列 */ return null; },
+]);
+$agent->orchestrator()->setDispatcher($dispatcher);
+```
+
+fork 档的结果只能靠落盘传回来，所以 `resultDir` 不配就取不到结果。runner 如果同步返回了结果，句柄会如实标成 `completed` 而不是假装还在跑。
+
+**并行子 Agent** 同样是三档降级（`runner` / `fork` / `sequential`）：
+
+```php
+use Ai\Agent\Orchestrator\ParallelAgentExecutor;
+
+$executor = new ParallelAgentExecutor($sam, ['maxConcurrency' => 4]);
+$results = $executor->run([
+    ['agent' => 'explorer', 'task' => '分析认证模块'],
+    ['agent' => 'explorer', 'task' => '分析支付模块'],
+    ['agent' => 'explorer', 'task' => '分析 SEO 相关代码'],
+]);
+echo $executor->mode();   // 'runner' | 'fork' | 'sequential'
+```
+
+顺序降级档的结果与并行档完全一致，只是不省时间。注入的 runner 返回条数对不上时会退回顺序执行——宁可慢，也不能把结果与任务错位对应。
+
+`maxConcurrency` 默认 4：一个 PHP 请求不该产生几十个 Agent。
+
+### 结果聚合（ResultAggregator）
+
+并行派出去三个 explorer，回来三份几千字的报告。**主 Agent 默认只该收到摘要**，完整内容留在各自的 transcript 里按需查——否则并行省下的时间，全赔在被污染的上下文里了。
+
+```php
+$summary = $agent->orchestrator()->aggregator()->aggregate($results);
+
+$summary['summary'];          // 合并摘要（给主 Agent 的就是这个）
+$summary['findings'];         // 各路结论（已按长度截断）
+$summary['files'];            // 提到的文件，去重
+$summary['errors'];           // 未完成的那几路，带原因
+$summary['recommendations'];  // 抽出来的建议
+$summary['transcripts'];      // task_id 列表，要看细节按这个查
+$summary['stats'];            // ['total' => 3, 'completed' => 2, 'failed' => 1]
+```
+
+默认是规则聚合（截断 + 归类 + 去重），不调模型。需要更好的摘要时注入模型摘要器——但那要多花一次调用，默认不替使用者做这个决定：
+
+```php
+$aggregator->setSummarizer(function (array $results) use ($ai) {
+    return $ai->ask('把以下多路调查结果合并成一段摘要：' . json_encode($results));
+});
+```
+
+摘要器抛异常时会退回规则拼接，不会因为摘要挂了把结果整个丢掉。
+
+### 子 Agent transcript 落盘与续跑
+
+```php
+$sam->setTranscriptDir('/var/data/transcripts');
+
+$runId = $sam->runSync('explorer', '调查登录流程');
+// 另一个进程也读得到
+$sam2->setTranscriptDir('/var/data/transcripts');
+$sam2->getTranscript($runId);
+
+// 子 Agent 跑到一半被截断（迭代上限、权限被拒）时接着干，而不是从头再来
+$newRunId = $sam->resume($runId, '继续看看权限校验');
+$sam->getTranscript($newRunId)['resumed_from'];   // 原 runId
+```
+
+不配 `transcriptDir` 时 transcript 只在内存里，进程结束即丢——后台任务与崩溃恢复都需要它能被另一个进程读到，所以长任务场景必须配。
+
 ### 多角色团队（AgentTeam）
 
 从「父 Agent 派生子 Agent」升级为「一组各司其职的角色协作」。区别在于成员是长期存在的：Developer 改完代码，Tester 拿到的是同一轮任务的上下文，Reviewer 能看到前两者的结论。
@@ -2738,6 +2991,29 @@ $analyzer->classAnalyzer()->allMethods('App\Auth', $analyzer->index());  // 含�
 **精度说明**：解析基于 `token_get_all()`，不依赖任何第三方 parser。能认命名空间、import（含成组导入与别名）、继承实现、方法签名（参数类型、可空、可变参数、返回类型）、属性可见性、类常量、函数体内的调用。
 
 认不了的：变量的实际类型。`$obj->save()` 拿不到 `$obj` 是什么类，图里记的是 `->save`，查 `save` 的调用方时所有类的同名方法会一起命中。**结果是「可能的调用方」，用来缩小排查范围可以，当作重构的唯一依据不行。** 动态调用（`$class::$method()`）与 `eval` 里的代码同理，静态扫描看不见。
+
+### 代码索引工具（CodeIndexTool）
+
+把 `Ai\Code\CodeAnalyzer` 的能力交给 Agent：**一次扫描，反复查询**。explorer 调查一个类时不必每次都 grep 全项目，也不必把整个类的源码读进上下文。
+
+```php
+$agent->addTool(new \Ai\Agent\Tools\CodeIndexTool('/var/www/project/src'));
+
+// 模型调用：
+//   code_index(action: "explain", target: "App\Auth")        类结构 + 继承链 + 谁依赖它
+//   code_index(action: "callers", target: "login")           谁调用了它
+//   code_index(action: "dependents", target: "App\Auth")     改动影响面
+//   code_index(action: "related", target: "src/Auth.php")    该一起看的文件
+//   code_index(action: "symbol", target: "login")            定义在哪一行
+//   code_index(action: "stats")                              索引规模
+//   code_index(action: "refresh")                            改过文件后重建索引
+```
+
+`codeAgent()` 会自动装上它，explorer / planner / reviewer / debugger 四个内置角色也都带着它——它们的活就是「先看懂再说」。
+
+索引是惰性建立的（首次调用时扫描），之后常驻内存。**改过文件要 `refresh`**，否则查到的还是旧结构。
+
+工具返回里会带上精度提醒：`$obj->save()` 拿不到接收者的真实类型，查 `callers` 时同名方法会一起命中。这是静态扫描的固有限制，结果是「可能的调用方」。
 
 ### 项目索引（RepositoryIndexer）
 

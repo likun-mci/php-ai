@@ -2493,6 +2493,259 @@ $agent->run([['role' => 'user', 'content' => 'Fix the failing tests']]);
 
 Without calling `enableReflection()` the loop behaves exactly as before — no extra rounds appear out of nowhere. When `setGoal()` is not set, the goal falls back to the first user message.
 
+### Orchestration layer (AgentOrchestrator)
+
+`AgentRuntime` answers "how do I run one iteration"; the orchestration layer answers **"how should this work be done"** — call tools directly, break it into a plan first, delegate to a sub-agent, fan out in parallel, or push it to the background.
+
+```php
+$agent = (new Agent($ai))->setWorkdir('/var/www/project')->codeAgent();
+
+$result = $agent->task('分析项目中的认证、支付、SEO');
+// Recognised as three parallel tracks → explorers investigate separately → summary aggregated
+
+echo $agent->orchestrator()->lastDecision()->toSummary();
+// 策略：parallel —— 识别到 3 个互不相关的子任务
+```
+
+`codeAgent()` wires everything up in one call: built-in tools, the six specialist sub-agents, default verifiers, planning, reflection and project instructions. After that, one `task()` gets to work.
+
+The seven strategies:
+
+| Strategy | Chosen when | Typical task |
+|---|---|---|
+| `direct` | scope is clear | "read the README" |
+| `plan` | broad scope, refactor/migrate verbs, or numbered steps | "refactor the whole auth system" |
+| `delegate` | matches a sub-agent's job | "review Auth.php for security issues" → reviewer |
+| `parallel` | several independent subtasks detected | "analyse auth, payments and SEO" |
+| `background` | the description asks for it | "scan the whole project in the background" |
+| `ask_user` | empty or undecidable description | — |
+| `verify` | only confirming an existing change | "run the tests and confirm" |
+
+**Every decision goes into the event stream** (a `strategy_decision` event carrying `reason`). Once the Agent picks its own strategy, you must be able to answer "why did it do that" — otherwise a bad run leaves you guessing:
+
+```php
+$agent->onEvent(function ($e) {
+    if ($e['type'] === 'strategy_decision') {
+        echo "{$e['strategy']}：{$e['reason']}\n";
+    }
+});
+```
+
+Deciding and executing are separate, so you can inspect before committing:
+
+```php
+$decision = $agent->orchestrator()->decide('重构认证系统');
+if ($decision->is(\Ai\Agent\Orchestrator\ExecutionStrategy::PLAN)) {
+    $result = $agent->orchestrator()->execute('重构认证系统', $decision);
+}
+```
+
+The default selector is **rule-based** and makes no extra model call — spending a model call to decide whether to spend model calls is a poor trade, and rule-based decisions are reproducible and debuggable. When unsure it falls back to `direct`: the cost of being conservative is a few extra tool rounds, while the cost of a wrong delegation is a sub-agent running fifteen turns on the wrong context.
+
+Swap in a model-driven selector when you want one:
+
+```php
+$agent->orchestrator()->selector()->setResolver(function ($task, $context) use ($ai) {
+    // return a StrategyDecision; return null to fall back to the rules
+});
+
+// or simply turn off a class of automatic behaviour
+$agent->orchestrator()->selector()->setAutoDelegate(false)->setAutoPlan(false);
+```
+
+**Without a sub-agent manager and plan manager every strategy falls back to `direct`**, behaving exactly like calling `run()` — the orchestration layer only adds, it never changes existing behaviour.
+
+### Built-in sub-agents (BuiltinAgents)
+
+Six ready-to-use specialist roles. Their value lies less in the prompts than in the **narrowed tool sets**: explorer has no file-writing tool, so it cannot change anything while "investigating the code". That is far more reliable than a prompt asking it not to.
+
+| Role | Purpose | Tools |
+|---|---|---|
+| `explorer` | search, read, investigate, dependency analysis | read_file / grep / glob |
+| `planner` | produce execution plans, break work down | read_file / grep / glob |
+| `coder` | modify code | read_file / write_file / edit_file / grep / glob / bash |
+| `tester` | run tests, analyse failures | read_file / grep / glob / bash |
+| `reviewer` | code review, security review | read_file / grep / glob / bash |
+| `debugger` | error analysis, root-cause location | read_file / grep / glob / bash |
+
+```php
+use Ai\Agent\SubAgent\BuiltinAgents;
+
+BuiltinAgents::registerAll($sam);                      // register all six
+BuiltinAgents::register($sam, ['explorer', 'tester']); // register two
+BuiltinAgents::isReadOnly('explorer');                 // true
+```
+
+### Full sub-agent configuration
+
+```php
+$sam->register('reviewer', [
+    'description'     => 'Code review and security review',   // also drives automatic delegation
+    'prompt'          => 'You are the reviewer…',
+    'tools'           => [...],
+    'disallowedTools' => ['write_file', 'edit_file'],
+    'model'           => 'claude-sonnet-5',      // a model just for this role
+    'permissionMode'  => 'manual',
+    'maxTurns'        => 15,
+    'skills'          => ['php-development'],
+    'mcpServers'      => ['fs'],
+    'hooks'           => $hooks,
+    'memory'          => '/var/data/memory/reviewer',
+    'background'      => false,
+    'isolation'       => 'worktree',
+]);
+```
+
+**A sub-agent's capabilities are always a subset of its parent's.** This is enforced, not advised:
+
+```php
+$sam->setParentTools($parentTools);   // parent only has read_file / grep / glob
+
+$sam->register('greedy', ['tools' => ['read_file' => …, 'write_file' => …, 'bash' => …]]);
+$sam->resolveTools($sam->get('greedy'));   // only read_file survives — what the parent lacks cannot appear
+```
+
+Three narrowing steps, each of which can only remove tools: start from the sub-agent's declared `tools` (or the parent's full set if undeclared) → intersect with the parent's tools → subtract `disallowedTools`. `permissionMode` works the same way and can only tighten: a `bypass` parent may host a `manual` child, never the reverse.
+
+`model` is switched temporarily and switched back — the AI instance is shared between parent and child, and a sub-agent finishing its run should not quietly leave the parent on a different model.
+
+`background` and `isolation` declared on the definition are a **floor**: a tool call may switch them on, never off. A sub-agent configured to require worktree isolation must not end up editing the parent tree just because the model omitted the argument.
+
+### Task dependency graph (TaskGraph)
+
+A parent link (`parentTaskId`) expresses containment; a dependency expresses **order** — two sibling tasks can share a parent while one still has to wait for the other. Keeping them separate is what makes "B and C in parallel, D after C" expressible at all.
+
+```php
+use Ai\Agent\Task\TaskGraph;
+
+$graph = new TaskGraph();
+$graph->addTask('a')->addTask('b')->addTask('c')->addTask('d');
+$graph->dependsOn('b', 'a');
+$graph->dependsOn('c', 'a');
+$graph->dependsOn('d', 'c');
+
+$graph->ready();              // ['a']
+$graph->markCompleted('a');
+$graph->ready();              // ['b', 'c'] — can run in parallel
+$graph->markCompleted('c');
+$graph->ready();              // ['b', 'd']
+
+$graph->layers();             // layered by dependency depth; one layer can run together
+$graph->dependentsOf('c');    // ['d'] — who is affected by changing c
+```
+
+**Failure propagates downstream as `blocked`**: leaving a task that can never run queued up only wastes a scheduling pass.
+
+```php
+$graph->markFailed('x');
+$graph->getStatus('y');       // 'blocked' (y hard-depends on x)
+$graph->blocked();            // ['y', 'z'] — blocking is transitive
+```
+
+A soft dependency only constrains order and still runs if its upstream failed:
+
+```php
+$graph->dependsOn('q', 'p', \Ai\Agent\Task\TaskDependency::TYPE_SOFT);
+```
+
+**A dependency that would create a cycle is rejected outright** (`dependsOn()` returns `false`) — a cycle means nothing can ever run, and failing while building the graph is far easier to diagnose than deadlocking at runtime. Self-dependency is rejected the same way.
+
+Syncing with `TaskManager`:
+
+```php
+$graph->syncFrom($taskManager);   // syncs tasks and statuses; graph structure untouched
+```
+
+### Background and parallel execution
+
+PHP has no built-in event loop, and how much "background execution" is actually achievable varies wildly between deployments. The library keeps all three tiers in one place and **states honestly which one it took** — silently degrading to synchronous execution while letting the caller believe it was async is more dangerous than saying it cannot be done.
+
+```php
+$handle = $agent->dispatch('扫描整个项目的安全问题');
+// ['task_id' => 'task_1_ab12cd34', 'status' => 'running', 'mode' => 'fork', 'background' => true]
+
+$agent->taskStatus($handle['task_id']);
+```
+
+| Tier | Condition | Behaviour |
+|---|---|---|
+| `runner` | a runner is injected (Swoole / Workerman coroutine, queue worker) | truly async, returns immediately |
+| `fork` | `pcntl_fork` available and not in `disable_functions` | forks a child; the parent returns immediately |
+| `sync` | neither available | runs to completion first, but still returns a task_id so the state machine is unchanged |
+
+```php
+use Ai\Agent\Orchestrator\BackgroundDispatcher;
+
+$dispatcher = new BackgroundDispatcher([
+    'resultDir' => '/var/data/bg',      // required for the fork tier: the parent cannot see the child's memory
+    'runner'    => function (array $payload) { /* push to a queue */ return null; },
+]);
+$agent->orchestrator()->setDispatcher($dispatcher);
+```
+
+Results from the fork tier can only travel back through disk, so without `resultDir` there is no result to fetch. If a runner returns a result synchronously, the handle is marked `completed` rather than pretending the work is still running.
+
+**Parallel sub-agents** degrade across the same three tiers (`runner` / `fork` / `sequential`):
+
+```php
+use Ai\Agent\Orchestrator\ParallelAgentExecutor;
+
+$executor = new ParallelAgentExecutor($sam, ['maxConcurrency' => 4]);
+$results = $executor->run([
+    ['agent' => 'explorer', 'task' => '分析认证模块'],
+    ['agent' => 'explorer', 'task' => '分析支付模块'],
+    ['agent' => 'explorer', 'task' => '分析 SEO 相关代码'],
+]);
+echo $executor->mode();   // 'runner' | 'fork' | 'sequential'
+```
+
+The sequential tier produces exactly the same results, it just saves no time. If an injected runner returns a different number of results than there were jobs, execution falls back to sequential — better slow than pairing results with the wrong tasks.
+
+`maxConcurrency` defaults to 4: one PHP request should not spawn dozens of agents.
+
+### Result aggregation (ResultAggregator)
+
+Fan out to three explorers and three multi-thousand-word reports come back. **The main Agent should receive only a summary by default**, with the full text left in each transcript to be fetched on demand — otherwise the time parallelism saved is paid straight back in a polluted context.
+
+```php
+$summary = $agent->orchestrator()->aggregator()->aggregate($results);
+
+$summary['summary'];          // merged summary (this is what the main Agent gets)
+$summary['findings'];         // per-track conclusions, truncated
+$summary['files'];            // files mentioned, deduplicated
+$summary['errors'];           // the tracks that did not finish, with reasons
+$summary['recommendations'];  // extracted recommendations
+$summary['transcripts'];      // task_id list — look here for the details
+$summary['stats'];            // ['total' => 3, 'completed' => 2, 'failed' => 1]
+```
+
+The default is rule-based aggregation (truncate, classify, deduplicate) with no model call. Inject a model summariser when you want a better summary — that costs an extra call, which is not a decision the library should make for you:
+
+```php
+$aggregator->setSummarizer(function (array $results) use ($ai) {
+    return $ai->ask('Merge these parallel investigation results into one summary: ' . json_encode($results));
+});
+```
+
+If the summariser throws, aggregation falls back to rule-based assembly rather than losing the results because the summary failed.
+
+### Sub-agent transcript persistence and resume
+
+```php
+$sam->setTranscriptDir('/var/data/transcripts');
+
+$runId = $sam->runSync('explorer', '调查登录流程');
+// visible from another process too
+$sam2->setTranscriptDir('/var/data/transcripts');
+$sam2->getTranscript($runId);
+
+// Continue a sub-agent that was cut off (iteration limit, permission denied) instead of starting over
+$newRunId = $sam->resume($runId, '继续看看权限校验');
+$sam->getTranscript($newRunId)['resumed_from'];   // the original runId
+```
+
+Without `transcriptDir` the transcript lives only in memory and disappears with the process — background tasks and crash recovery both need it readable from another process, so long-running setups must configure it.
+
 ### Multi-role team (AgentTeam)
 
 An upgrade from "parent agent spawns a sub-agent" to "a set of roles that each own part of the work". The difference is that members persist: after Developer changes the code, Tester receives the context of that same round, and Reviewer can see what both concluded.
@@ -2717,6 +2970,29 @@ $analyzer->classAnalyzer()->allMethods('App\Auth', $analyzer->index());  // meth
 **On accuracy**: parsing is built on `token_get_all()` with no third-party parser. It resolves namespaces, imports (including group imports and aliases), inheritance and interfaces, method signatures (parameter types, nullability, variadics, return types), property visibility, class constants, and calls made inside function bodies.
 
 What it cannot resolve is the runtime type of a variable. `$obj->save()` gives no clue what class `$obj` is, so the graph records `->save`, and asking for callers of `save` matches same-named methods on every class. **Treat the result as "possible callers" — good for narrowing a search, not sound enough to be the sole basis for a refactor.** The same goes for dynamic calls (`$class::$method()`) and code inside `eval`: static scanning cannot see them.
+
+### Code index tool (CodeIndexTool)
+
+Hands `Ai\Code\CodeAnalyzer` to the Agent: **scan once, query repeatedly**. An explorer investigating a class no longer greps the whole project each time, nor pulls the entire class source into its context.
+
+```php
+$agent->addTool(new \Ai\Agent\Tools\CodeIndexTool('/var/www/project/src'));
+
+// Model calls:
+//   code_index(action: "explain", target: "App\Auth")        structure + inheritance + dependents
+//   code_index(action: "callers", target: "login")           who calls it
+//   code_index(action: "dependents", target: "App\Auth")     blast radius of a change
+//   code_index(action: "related", target: "src/Auth.php")    files worth reading together
+//   code_index(action: "symbol", target: "login")            which line defines it
+//   code_index(action: "stats")                              index size
+//   code_index(action: "refresh")                            rebuild after editing files
+```
+
+`codeAgent()` installs it automatically, and the explorer / planner / reviewer / debugger built-in roles all carry it — understanding the code first is exactly their job.
+
+The index is built lazily (on the first call) and then kept in memory. **Call `refresh` after editing files**, or queries will keep reporting the old structure.
+
+Tool output carries the accuracy caveat: `$obj->save()` gives no receiver type, so `callers` matches same-named methods across classes. That is inherent to static scanning — the result means "possible callers".
 
 ### Project index (RepositoryIndexer)
 

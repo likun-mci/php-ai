@@ -638,6 +638,23 @@ class Agent
     }
 
     /**
+     * 设置检查点存储目录（自动创建 CheckpointManager）
+     *
+     * 每轮迭代结束后自动保存检查点，崩溃后可从最新检查点恢复。
+     * 检查点按任务 ID 分组，保留最近 maxCheckpoints 个（默认 5）。
+     *
+     * @param string $baseDir
+     * @param array<string, mixed> $options enabled / maxCheckpoints
+     * @return $this
+     */
+    public function setCheckpointDir($baseDir, array $options = [])
+    {
+        $cm = new \Ai\Agent\Checkpoint\CheckpointManager((string) $baseDir, $options);
+        $this->runtime->setCheckpointManager($cm);
+        return $this;
+    }
+
+    /**
      * 回答用户问题并恢复 Agent 执行
      *
      * @param string $questionId

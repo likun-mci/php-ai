@@ -13,6 +13,7 @@ use Ai\Agent\Skill\SkillManager;
 use Ai\Agent\Instruction\InstructionManager;
 use Ai\Agent\Mcp\McpManager;
 use Ai\Agent\Memory\MemoryManager;
+use Ai\Agent\Checkpoint\CheckpointManager;
 
 /**
  * Agent 运行时上下文
@@ -111,6 +112,12 @@ class AgentContext
 
     /** @var MemoryManager|null */
     protected $memoryManager = null;
+
+    /** @var CheckpointManager|null */
+    protected $checkpointManager = null;
+
+    /** @var string 当前 checkpoint 关联 ID */
+    protected $checkpointId = '';
 
     /**
      * @param AI $ai
@@ -282,6 +289,42 @@ class AgentContext
     public function getMemoryManager()
     {
         return $this->memoryManager;
+    }
+
+    /* ---------- 检查点管理 ---------- */
+
+    /**
+     * @param CheckpointManager|null $cm
+     * @return $this
+     */
+    public function setCheckpointManager($cm)
+    {
+        $this->checkpointManager = $cm;
+        return $this;
+    }
+
+    /**
+     * @return CheckpointManager|null
+     */
+    public function getCheckpointManager()
+    {
+        return $this->checkpointManager;
+    }
+
+    /**
+     * @param string $id
+     * @return $this
+     */
+    public function setCheckpointId($id)
+    {
+        $this->checkpointId = (string) $id;
+        return $this;
+    }
+
+    /** @return string */
+    public function getCheckpointId()
+    {
+        return $this->checkpointId;
     }
 
     /* ---------- 上下文管理 ---------- */

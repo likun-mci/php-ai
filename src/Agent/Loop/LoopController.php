@@ -672,6 +672,15 @@ class LoopController
 
             // 回填工具结果（只要有结果就回填）
             $context->appendToolResults($results);
+
+            // 检查点保存（每轮迭代后，用于崩溃恢复）
+            $cpm = $context->getCheckpointManager();
+            if ($cpm && $cpm->isEnabled()) {
+                $cpId = $context->getCheckpointId();
+                if ($cpId !== '') {
+                    $cpm->save($cpId, $iter + 1, $context->getMessages());
+                }
+            }
         }
 
         // 已达最大迭代次数

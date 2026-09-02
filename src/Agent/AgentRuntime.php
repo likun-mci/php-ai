@@ -20,6 +20,7 @@ use Ai\Agent\Skill\SkillManager;
 use Ai\Agent\Instruction\InstructionManager;
 use Ai\Agent\Mcp\McpManager;
 use Ai\Agent\Memory\MemoryManager;
+use Ai\Agent\Checkpoint\CheckpointManager;
 
 /**
  * Agent Runtime——执行引擎
@@ -114,6 +115,9 @@ class AgentRuntime
 
     /** @var MemoryManager|null */
     protected $memoryManager = null;
+
+    /** @var CheckpointManager|null */
+    protected $checkpointManager = null;
 
     /**
      * @param AI $ai
@@ -654,6 +658,26 @@ class AgentRuntime
     }
 
     /**
+     * 设置检查点管理器
+     *
+     * @param CheckpointManager|null $cm
+     * @return $this
+     */
+    public function setCheckpointManager($cm)
+    {
+        $this->checkpointManager = $cm;
+        return $this;
+    }
+
+    /**
+     * @return CheckpointManager|null
+     */
+    public function getCheckpointManager()
+    {
+        return $this->checkpointManager;
+    }
+
+    /**
      * 回答用户问题并恢复 Agent 执行
      *
      * @param string $questionId
@@ -851,6 +875,12 @@ class AgentRuntime
         $context->setInstructionManager($this->instruction);
         $context->setMcpManager($this->mcpManager);
         $context->setMemoryManager($this->memoryManager);
+        $context->setCheckpointManager($this->checkpointManager);
+        if ($this->taskId !== null) {
+            $context->setCheckpointId($this->taskId);
+        } elseif ($this->sessionId !== null) {
+            $context->setCheckpointId($this->sessionId);
+        }
         return $context;
     }
 

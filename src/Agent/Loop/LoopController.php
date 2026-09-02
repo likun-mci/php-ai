@@ -61,6 +61,9 @@ class LoopController
     /** @var array<int, array<string, mixed>>|null 暂停时的上下文消息 */
     protected $pendingContextMessages = null;
 
+    /** @var int 本次 run 已经做过几轮反思（与循环迭代号是两回事） */
+    protected $reflectionRounds = 0;
+
     /**
      * @param int $maxIter 最大迭代次数
      */
@@ -166,9 +169,15 @@ class LoopController
             return null;
         }
 
+        // reflection_round 是反思次数，iteration 是循环迭代号——ReflectionManager 的
+        // maxRounds 说的是前者，两者混用会让「跑到第 N 轮迭代后反思一律放行」
+        $round = $this->reflectionRounds;
+        $this->reflectionRounds++;
+
         return $rm->reflect($context->getMessages(), $goal, [
-            'iteration'    => (int) $iter,
-            'isFirstRound' => (int) $iter === 0,
+            'iteration'        => (int) $iter,
+            'reflection_round' => $round,
+            'isFirstRound'     => (int) $iter === 0,
         ]);
     }
 
@@ -393,6 +402,7 @@ class LoopController
         if ($this->guard) {
             $this->guard->reset();
         }
+        $this->reflectionRounds = 0;
 
         for ($iter = 0; $iter < $this->maxIter; $iter++) {
             $context->setIteration($iter + 1);

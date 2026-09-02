@@ -2477,7 +2477,18 @@ if ($rm->shouldContinue($result)) {
 }
 ```
 
-By default it uses rule-based judgement (looking for error markers, completion markers and the iteration count). Inject a custom strategy for model-driven reflection:
+The default rules are checked in order:
+
+1. The last assistant message carries a completion marker ("任务完成", "已解决", "all done", …) → done
+2. The **most recent batch** of tool results still contains an error → keep going; if the identical error hits two batches in a row it stops instead, because retrying is making no progress
+3. No tool has been called at all and this is still the first round → keep going (the model is still in conversation mode)
+4. Otherwise → done
+
+Rule 2 looks only at the last batch: an earlier error may already have been fixed in a later round, and pushing the model with a stale error just spins until the round limit. An error is identified by the `is_error` flag on the tool result (the library always sets it); the keyword scan is a fallback only for hand-built messages that lack the flag — running it over library-produced results causes false positives, where reading a file whose body contains `error` counts as a failure.
+
+Rule 4 is the "the model stopped calling tools" signal itself, which is more reliable than any keyword. **Do not force extra rounds by count** — the text fed back carries no information about the task, so the model just asks what it is about, and that puzzled reply becomes the final answer the caller receives, burying the real conclusion.
+
+Inject a custom strategy for model-driven reflection:
 
 ```php
 $rm->setStrategy(function (array $messages, $goal) use ($ai) {
@@ -2488,7 +2499,9 @@ $rm->setStrategy(function (array $messages, $goal) use ($ai) {
 });
 ```
 
-`maxRounds` is the backstop: once the reflection rounds hit the limit the loop is forced to stop, so the model cannot spin forever on "almost there".
+`maxRounds` is the backstop: once the **number of reflections** hits the limit the loop is forced to stop, so the model cannot spin forever on "almost there". It counts reflection rounds (`reflection_round`), not the agent loop's iteration number (`iteration`) — the two mean different things, and conflating them turns into "after iteration N every reflection passes", even while a tool is still failing.
+
+The limit is applied **after** the verdict: a custom strategy is always called, and the cap only steps in when the strategy says "keep going" but the rounds have run out. (Applying it first means an injected strategy never runs once the count is exceeded — and you end up suspecting your own strategy.)
 
 #### Wiring it into the Agent loop
 

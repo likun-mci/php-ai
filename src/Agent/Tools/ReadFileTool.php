@@ -5,6 +5,7 @@ use Ai\Agent\Tool\AgentToolInterface;
 use Ai\Agent\Tool\ParallelSafeToolInterface;
 use Ai\Agent\Tool\ToolContext;
 use Ai\Agent\Tool\ToolResult;
+use Ai\Helpers\Text;
 
 /**
  * 文件读取工具
@@ -127,7 +128,7 @@ class ReadFileTool implements AgentToolInterface, ParallelSafeToolInterface
 
         // 超出最大字节数的截断
         if ($resultBytes > $this->maxBytes) {
-            $result = mb_substr($result, 0, $this->maxBytes)
+            $result = Text::cutBytes($result, $this->maxBytes)
                 . "\n\n[Output truncated at {$this->maxBytes} bytes. "
                 . "Use read_file with offset/limit to continue reading.]";
             $isPartial = true;

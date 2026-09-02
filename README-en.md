@@ -1616,6 +1616,31 @@ The six built-in tools:
 
 All file tools are protected by the `PathSafety` sandbox — they cannot escape the workdir.
 
+#### Output truncation: cut by bytes, never through a character
+
+Tool output, command echoes and diff bodies all need a length cap, or a single `bash` call can blow up the context. But truncation has a trap that is easy to fall into:
+
+```php
+substr($output, 0, 1024);      // cuts by bytes → can split a CJK character in half
+mb_substr($output, 0, 1024);   // cuts by characters → lets through 3072 bytes of Chinese; the cap is meaningless
+```
+
+**Splitting a character is worse than mojibake**: invalid UTF-8 makes `json_encode()` return `false`, so the next model request cannot even be built and the whole Agent run dies — over bytes the library itself produced.
+
+Every built-in tool goes through `Ai\Helpers\Text`, which uses `mb_strcut()` to cut on a byte budget without ever splitting a character:
+
+```php
+use Ai\Helpers\Text;
+
+Text::cutBytes($output, 1024);      // byte cap, never splits a character (use for tool output and diffs)
+Text::cutChars($summary, 200);      // character cap (use for human-facing summaries)
+Text::ellipsis($text, 200);         // character cap plus an ellipsis, added only when it actually truncated
+Text::isValidUtf8($text);           // validation
+Text::length($text);                // character count
+```
+
+When writing your own tools, anything that flows back into the model should use `cutBytes()` rather than `substr()`.
+
 ### Permission system
 
 The Agent has 6 built-in permission modes that control how tool calls are gated:

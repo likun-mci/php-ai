@@ -59,6 +59,21 @@ class StrategySelector
     protected static $parallelMarkers = ['、', '；', ';', ' 和 ', ' 以及 ', ' and ', ','];
 
     /**
+     * @var string[] 明确要求改动的动词
+     *
+     * 一句「修复 Bug，改完跑测试确认通过」里同时有「修复」和「确认」，
+     * 它是修复任务而不是验证任务——验证只是修复的收尾。所以只要出现改动动词，
+     * 就不再按 verify 处理，否则 VERIFY 一旦走上独立执行路径（只跑验证不改代码），
+     * 这类任务会什么都不做就返回。
+     */
+    protected static $mutatingVerbs = [
+        '修复', '修改', '实现', '新增', '增加', '删除', '重构', '重写', '优化',
+        '补充', '调整', '改成', '改为', '换成', '迁移', '升级', '接入',
+        'fix', 'implement', 'add ', 'remove', 'refactor', 'rewrite', 'update',
+        'change', 'migrate', 'upgrade', 'create',
+    ];
+
+    /**
      * @param SubAgentManager|null $subAgents
      * @param array<string, mixed> $options autoDelegate / autoPlan / planThreshold / resolver
      */
@@ -108,8 +123,8 @@ class StrategySelector
             return $this->selectForPlanStep($trimmed, $context);
         }
 
-        // 明确的验证类任务
-        if ($this->matchKeywords($trimmed, ExecutionStrategy::VERIFY)) {
+        // 明确的验证类任务——但带改动动词的不算，那是"改完顺便验证"
+        if ($this->matchKeywords($trimmed, ExecutionStrategy::VERIFY) && !$this->hasMutatingVerb($trimmed)) {
             return StrategyDecision::verify('任务描述指向验证既有改动');
         }
 
@@ -210,6 +225,23 @@ class StrategySelector
         }
 
         return $bestScore >= 2.0 ? $best : '';
+    }
+
+    /**
+     * 任务里有没有明确要求改动的动词
+     *
+     * @param string $task
+     * @return bool
+     */
+    public function hasMutatingVerb($task)
+    {
+        $normalized = $this->normalize($task);
+        foreach (self::$mutatingVerbs as $verb) {
+            if (strpos($normalized, $this->normalize($verb)) !== false) {
+                return true;
+            }
+        }
+        return false;
     }
 
     /**

@@ -88,6 +88,7 @@
             "php tests/cli_test.php",
             "php tests/cli_session_test.php",
             "php tests/ssrf_test.php",
+            "php tests/text_truncate_test.php",
             "php tests/agent_runtime_test.php",
             "php tests/agent_advanced_test.php",
             "php tests/agent_task_test.php",

@@ -4,6 +4,7 @@ namespace Ai\Agent\Tools;
 use Ai\Agent\Tool\AgentToolInterface;
 use Ai\Agent\Tool\ToolContext;
 use Ai\Agent\Tool\ToolResult;
+use Ai\Helpers\Text;
 
 /**
  * 命令执行工具（Bash）
@@ -51,8 +52,13 @@ class BashTool implements AgentToolInterface
 
     public function description()
     {
+        $cwd = $this->workdir !== null && $this->workdir !== '' ? $this->workdir : '当前工作目录';
+
+        // 明确写出实际 cwd：不写的话模型会自己 cd 到猜的路径，
+        // 撞一次「No such file or directory」再纠正，白费一轮往返
         return '执行 shell 命令。支持管道、重定向等标准 shell 语法。'
-            . '命令会在工作目录下执行，超时 ' . $this->timeout . ' 秒自动终止。'
+            . '命令已在 ' . $cwd . ' 下执行，相对路径直接写即可，不要自行 cd 到别处。'
+            . '超时 ' . $this->timeout . ' 秒自动终止，'
             . '输出超过 ' . $this->maxOutputBytes . ' 字节时会截断。';
     }
 
@@ -159,7 +165,9 @@ class BashTool implements AgentToolInterface
 
             // 输出截断
             if (strlen($stdout) > $this->maxOutputBytes) {
-                $stdout = substr($stdout, 0, $this->maxOutputBytes)
+                // 必须按字节切且不劈开字符：劈开会产生非法 UTF-8，
+                // 下一次模型请求的 json_encode 直接失败，整个 Agent 运行中断
+                $stdout = Text::cutBytes($stdout, $this->maxOutputBytes)
                     . "\n\n[Output truncated at {$this->maxOutputBytes} bytes]";
             }
 

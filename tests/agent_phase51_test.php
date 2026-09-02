@@ -199,6 +199,14 @@ assert_eq('返回 null 时退回规则', ExecutionStrategy::DIRECT, $custom->sel
 $notParallel = $selector->select('分析这个方法为什么在并发情况下会返回错误的结果并给出修复方案');
 test('长句不被误拆成并行', $notParallel->getStrategy() !== ExecutionStrategy::PARALLEL);
 
+// 「改完顺便验证」不是验证任务——实测里这句曾被误判成 verify
+$fixThenVerify = $selector->select('修复 divide 的除零 Bug，改完运行测试确认全部通过');
+test('带改动动词的不判 verify', $fixThenVerify->getStrategy() !== ExecutionStrategy::VERIFY);
+test('识别出改动动词', $selector->hasMutatingVerb('修复除零 Bug'));
+test('纯验证句不含改动动词', !$selector->hasMutatingVerb('跑一下测试确认没问题'));
+assert_eq('纯验证仍判 verify', ExecutionStrategy::VERIFY, $selector->select('跑一下测试确认没问题')->getStrategy());
+assert_eq('改配置后确认判 direct', ExecutionStrategy::DIRECT, $selector->select('修改配置后确认服务能起来')->getStrategy());
+
 // ===== 三、SubAgentDefinition 标准化 =====
 
 echo "\n=== 三、SubAgent 配置标准化 ===\n";

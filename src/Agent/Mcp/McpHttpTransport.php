@@ -242,7 +242,9 @@ class McpHttpTransport implements McpTransportInterface
             throw new \RuntimeException('MCP HTTP 请求失败：' . $error);
         }
         if ($status >= 400) {
-            throw new \RuntimeException('MCP HTTP 返回 ' . $status . '：' . substr((string) $result, 0, 200));
+            throw new \RuntimeException(
+                'MCP HTTP 返回 ' . $status . '：' . \Ai\Helpers\Text::cutChars((string) $result, 200)
+            );
         }
         return ['body' => (string) $result, 'headers' => $responseHeaders];
     }

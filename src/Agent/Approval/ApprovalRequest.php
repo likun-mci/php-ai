@@ -1,6 +1,8 @@
 <?php
 namespace Ai\Agent\Approval;
 
+use Ai\Helpers\Text;
+
 /**
  * ApprovalRequest——一次人工审批请求
  *
@@ -277,7 +279,7 @@ class ApprovalRequest
         $diffLimit = (int) $diffLimit;
         if ($diffLimit > 0 && $this->diff !== '') {
             $diff = strlen($this->diff) > $diffLimit
-                ? substr($this->diff, 0, $diffLimit) . "\n…（diff 已截断）"
+                ? Text::cutBytes($this->diff, $diffLimit) . "\n…（diff 已截断）"
                 : $this->diff;
             $lines[] = "改动：\n" . $diff;
         }

@@ -1628,6 +1628,31 @@ $agent->setTools(ClaudeCodeTools::readOnly([
 
 所有文件工具都受 `PathSafety` 沙箱保护，无法逃逸 workdir 范围。
 
+#### 输出截断：按字节切，但不切开字符
+
+工具输出、命令回显、diff 正文都要限长，否则一条 `bash` 就能把上下文撑爆。但截断有个容易踩的坑：
+
+```php
+substr($output, 0, 1024);      // 按字节切 → 可能把一个汉字劈成两半
+mb_substr($output, 0, 1024);   // 按字符切 → 中文实际放行 3072 字节，上限形同虚设
+```
+
+**劈开汉字的后果不是显示乱码那么轻**：非法 UTF-8 会让 `json_encode()` 返回 `false`，于是下一次模型请求根本发不出去，整个 Agent 运行中断——而这段坏字节是库自己截出来的。
+
+所有内置工具都走 `Ai\Helpers\Text`，用 `mb_strcut()` 按字节切且不切开字符：
+
+```php
+use Ai\Helpers\Text;
+
+Text::cutBytes($output, 1024);      // 限字节，不劈字符（工具输出、diff 用这个）
+Text::cutChars($summary, 200);      // 限字符（给人看的摘要用这个）
+Text::ellipsis($text, 200);         // 限字符并补省略号，未超长时不加
+Text::isValidUtf8($text);           // 校验
+Text::length($text);                // 字符数
+```
+
+自己写工具时，凡是会回填给模型的内容都该用 `cutBytes()` 而不是 `substr()`。
+
 ### 权限系统
 
 Agent 内置 6 种权限模式，控制工具调用的放行策略：

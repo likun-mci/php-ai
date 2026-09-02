@@ -3,6 +3,7 @@ namespace Ai\Agent\Team;
 
 use Ai\AI;
 use Ai\Agent\AgentRuntime;
+use Ai\Helpers\Text;
 
 /**
  * AgentTeam——多角色 Agent 团队
@@ -428,10 +429,7 @@ class AgentTeam
         }
         $lines = [];
         foreach ($this->results as $record) {
-            $text = trim((string) $record['text']);
-            if (strlen($text) > 200) {
-                $text = substr($text, 0, 200) . '…';
-            }
+            $text = Text::ellipsis(trim((string) $record['text']), 200);
             $lines[] = sprintf(
                 '[%s] %s（%s，%d 轮）：%s',
                 $record['role'],

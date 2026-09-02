@@ -1,6 +1,8 @@
 <?php
 namespace Ai\Agent\Tool;
 
+use Ai\Helpers\Text;
+
 /**
  * 工具执行器
  *
@@ -192,7 +194,7 @@ class ToolExecutor
         $error = '工具执行超时（超过 ' . $this->executionTimeout . 's，尝试 ' . ($attempt + 1) . ' 次）';
         $content = $result->isSuccess() ? (string) $result->getContent() : $result->getError();
         if ($content !== '') {
-            $error .= '，最后输出：' . mb_substr($content, 0, 500);
+            $error .= '，最后输出：' . Text::cutChars($content, 500);
         }
         return ToolResult::error($error, [
             'timeout' => true,
@@ -243,7 +245,7 @@ class ToolExecutor
         if (!is_string($content) || strlen($content) <= $this->maxOutputBytes) {
             return $result;
         }
-        $truncated = mb_substr($content, 0, $this->maxOutputBytes)
+        $truncated = Text::cutBytes($content, $this->maxOutputBytes)
             . "\n\n[Output truncated at " . $this->maxOutputBytes . " bytes, "
             . (strlen($content) - $this->maxOutputBytes) . " bytes omitted. Use offset/limit to read more.]";
 

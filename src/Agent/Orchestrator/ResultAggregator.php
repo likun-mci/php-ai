@@ -240,15 +240,6 @@ class ResultAggregator
      */
     protected function truncate($text, $limit)
     {
-        $text = trim((string) $text);
-        $limit = max(1, (int) $limit);
-
-        if (function_exists('mb_strlen') && function_exists('mb_substr')) {
-            if (mb_strlen($text, 'UTF-8') <= $limit) {
-                return $text;
-            }
-            return mb_substr($text, 0, $limit, 'UTF-8') . '…';
-        }
-        return strlen($text) <= $limit ? $text : substr($text, 0, $limit) . '…';
+        return \Ai\Helpers\Text::ellipsis(trim((string) $text), max(1, (int) $limit));
     }
 }

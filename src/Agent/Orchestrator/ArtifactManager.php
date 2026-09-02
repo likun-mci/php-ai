@@ -1,6 +1,8 @@
 <?php
 namespace Ai\Agent\Orchestrator;
 
+use Ai\Helpers\Text;
+
 /**
  * ArtifactManager——产物管理
  *
@@ -139,7 +141,7 @@ class ArtifactManager
         if (strlen($content) <= $limit) {
             return $content;
         }
-        return substr($content, 0, $limit) . "\n…（完整内容见 " . $ref . '）';
+        return Text::cutBytes($content, $limit) . "\n…（完整内容见 " . $ref . '）';
     }
 
     /**

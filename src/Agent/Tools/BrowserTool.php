@@ -4,6 +4,7 @@ namespace Ai\Agent\Tools;
 use Ai\Agent\Tool\AgentToolInterface;
 use Ai\Agent\Tool\ToolContext;
 use Ai\Agent\Tool\ToolResult;
+use Ai\Helpers\Text;
 
 /**
  * 浏览器工具（Browser）
@@ -269,7 +270,7 @@ class BrowserTool implements AgentToolInterface
             return ToolResult::error('页面上找不到元素，或元素没有文本：' . $selector);
         }
         if (strlen($text) > $this->maxText) {
-            $text = substr($text, 0, $this->maxText) . "\n…（已截断）";
+            $text = Text::cutBytes($text, $this->maxText) . "\n…（已截断）";
         }
         return ToolResult::success($text, ['url' => $session->url()]);
     }
@@ -324,7 +325,7 @@ class BrowserTool implements AgentToolInterface
             ? (string) $value
             : (string) json_encode($value, JSON_UNESCAPED_UNICODE);
         if (strlen($text) > $this->maxText) {
-            $text = substr($text, 0, $this->maxText) . "\n…（已截断）";
+            $text = Text::cutBytes($text, $this->maxText) . "\n…（已截断）";
         }
         return ToolResult::success($text);
     }

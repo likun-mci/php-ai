@@ -1,6 +1,8 @@
 <?php
 namespace Ai\Agent\Reflection;
 
+use Ai\Helpers\Text;
+
 /**
  * ReflectionManager——反思管理器
  *
@@ -129,7 +131,7 @@ class ReflectionManager
                     || stripos($content, 'Fatal error') !== false
                 )) {
                     $hasError = true;
-                    $errorMessages[] = substr($content, 0, 200);
+                    $errorMessages[] = Text::cutChars($content, 200);
                 }
             }
 

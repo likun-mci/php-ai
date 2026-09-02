@@ -46,6 +46,12 @@ class SkillDefinition
     /** @var string[] 触发该技能的文件通配符（frontmatter 的 files 字段） */
     protected $filePatterns = [];
 
+    /** @var string[] 该技能必须有的工具，拿不到就用不了 */
+    protected $requiredTools = [];
+
+    /** @var string[] 该技能依赖的其它技能 */
+    protected $dependencies = [];
+
     /** @var bool 完整内容是否已加载 */
     protected $loaded = false;
 
@@ -68,6 +74,11 @@ class SkillDefinition
         $this->filePatterns = isset($data['filePatterns']) && is_array($data['filePatterns'])
             ? array_values(array_map('strval', $data['filePatterns']))
             : [];
+        foreach (['requiredTools', 'dependencies'] as $listKey) {
+            if (isset($data[$listKey]) && is_array($data[$listKey])) {
+                $this->$listKey = array_values(array_unique(array_map('strval', $data[$listKey])));
+            }
+        }
         $this->loaded       = $this->content !== '';
         $this->active       = !empty($data['active']);
     }
@@ -229,5 +240,25 @@ class SkillDefinition
             'loaded'       => $this->loaded,
             'active'       => $this->active,
         ];
+    }
+
+    /**
+     * 该技能必须有的工具
+     *
+     * @return string[]
+     */
+    public function getRequiredTools()
+    {
+        return $this->requiredTools;
+    }
+
+    /**
+     * 该技能依赖的其它技能
+     *
+     * @return string[]
+     */
+    public function getDependencies()
+    {
+        return $this->dependencies;
     }
 }

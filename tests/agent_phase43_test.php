@@ -128,7 +128,7 @@ test('提示词含元数据', strpos($prompt, 'AuthTest.php') !== false);
 
 $status = AgentMessage::status('manager', '需求冻结');
 test('状态消息是广播', $status->isBroadcast());
-assert_eq('五种类型', 5, count(AgentMessage::validTypes()));
+assert_eq('九种类型', 9, count(AgentMessage::validTypes()));
 test('非法类型退回 status', (new AgentMessage('a', 'b', 'nope', 'x'))->getType() === AgentMessage::TYPE_STATUS);
 
 foreach (['task', 'review', 'result'] as $type) {

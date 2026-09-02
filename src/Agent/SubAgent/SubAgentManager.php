@@ -778,6 +778,84 @@ class SubAgentManager
     }
 
     /**
+     * 把某次 worktree 运行的改动应用到父工作区
+     *
+     * 子 Agent 在隔离的 worktree 里改完，diff 拿回来了，接下来要么合入要么丢弃。
+     * 这个方法用 `git apply` 打补丁——不是 merge 分支，因为 worktree 里的改动
+     * 通常没提交，没有 commit 可合。
+     *
+     * @param string $runId worktree 运行记录 ID
+     * @param bool $check true 时只试打不真打（`git apply --check`）
+     * @return array{applied: bool, reason: string} 应用结果
+     */
+    public function mergeWorktreeRun($runId, $check = false)
+    {
+        $record = $this->getTranscript($runId);
+        if ($record === null) {
+            return ['applied' => false, 'reason' => 'unknown_run'];
+        }
+        $diff = isset($record['diff']) ? (string) $record['diff'] : '';
+        if (trim($diff) === '') {
+            return ['applied' => false, 'reason' => 'empty_diff'];
+        }
+        if ($this->workdir === '' || !is_dir($this->workdir . '/.git')) {
+            return ['applied' => false, 'reason' => 'no_git_repo'];
+        }
+
+        $patch = tempnam(sys_get_temp_dir(), 'php_ai_patch_');
+        if ($patch === false || @file_put_contents($patch, $diff) === false) {
+            return ['applied' => false, 'reason' => 'patch_write_failed'];
+        }
+
+        $flag = $check ? ' --check' : '';
+        $output = [];
+        $code = -1;
+        @exec(
+            'cd ' . escapeshellarg($this->workdir) . ' && git apply' . $flag . ' '
+            . escapeshellarg($patch) . ' 2>&1',
+            $output,
+            $code
+        );
+        @unlink($patch);
+
+        if ($code !== 0) {
+            return ['applied' => false, 'reason' => 'apply_failed: ' . trim(implode(' ', $output))];
+        }
+
+        if (!$check && isset($this->runs[$runId])) {
+            $this->runs[$runId]['merged'] = true;
+            $this->runs[$runId]['updated_at'] = time();
+            $this->persistRun($runId);
+        }
+        return ['applied' => true, 'reason' => $check ? 'check_passed' : 'applied'];
+    }
+
+    /**
+     * 丢弃某次 worktree 运行的改动
+     *
+     * worktree 早在运行结束时就已经删掉了，这里只是把记录标成 discarded——
+     * 明确留痕「这份 diff 被人看过并否决了」，比让它悬在记录里强。
+     *
+     * @param string $runId
+     * @param string $reason
+     * @return bool
+     */
+    public function discardWorktreeRun($runId, $reason = '')
+    {
+        if (!isset($this->runs[$runId])) {
+            $loaded = $this->getTranscript($runId);
+            if ($loaded === null) {
+                return false;
+            }
+        }
+        $this->runs[$runId]['discarded'] = true;
+        $this->runs[$runId]['discard_reason'] = (string) $reason;
+        $this->runs[$runId]['updated_at'] = time();
+        $this->persistRun($runId);
+        return true;
+    }
+
+    /**
      * 在指定目录下执行 shell 命令并返回 stdout
      *
      * @param string $command

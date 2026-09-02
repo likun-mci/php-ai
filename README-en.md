@@ -2746,6 +2746,232 @@ $sam->getTranscript($newRunId)['resumed_from'];   // the original runId
 
 Without `transcriptDir` the transcript lives only in memory and disappears with the process — background tasks and crash recovery both need it readable from another process, so long-running setups must configure it.
 
+### Verification gate and completion criteria
+
+**A task is not done just because the model says so.** Models are famously optimistic about their own progress: tests still red, three plan steps outstanding, the last tool call still erroring — and it will still report "completed".
+
+```php
+$agent->useVerificationGate();                      // pick the verification chain by task type
+$agent->setCompletionCriteria([                     // "done" becomes a set of checkable conditions
+    \Ai\Agent\Orchestrator\CompletionCriteria::VERIFICATION_PASSED,
+    \Ai\Agent\Orchestrator\CompletionCriteria::NO_PENDING_STEPS,
+    \Ai\Agent\Orchestrator\CompletionCriteria::NO_PENDING_ERRORS,
+]);
+
+$result = $agent->task('修复登录 401');
+$outcome = $agent->checkCompletion($result, '修复登录 401');
+
+if (!$outcome['completed']) {
+    echo $outcome['prompt'];
+    // 任务尚未达成完成条件：
+    // - 验证未通过
+    // - 计划里还有 2 个步骤未完成：跑测试、更新文档
+    $agent->ask($outcome['prompt']);   // continue, carrying the reasons
+}
+```
+
+The gate selects a different chain per task type — one chain for everything is either too loose (missing what mattered) or too tight (running the full integration suite over a typo fix):
+
+| Task type | Chain | Keywords |
+|---|---|---|
+| `bug_fix` | syntax → unit tests | 修复 / 报错 / bug / fix |
+| `feature` | syntax → security → unit tests | 新增 / 实现 / 支持 / implement |
+| `refactor` | syntax → tests → change-size check | 重构 / 重写 / refactor |
+| `security` | syntax → **security (must pass)** → tests | 安全 / 漏洞 / 注入 / injection |
+| `default` | syntax + security | used when the type cannot be told |
+
+```php
+use Ai\Agent\Verification\VerificationGate;
+use Ai\Agent\Verification\VerificationPolicy;
+
+$gate = new VerificationGate($vm, VerificationPolicy::security());
+$outcome = $gate->check(['file_path' => 'src/Auth.php']);
+
+$outcome['passed'];    // did the gate let it through
+$outcome['failed'];    // which steps failed, with `required` marking must-pass ones
+$outcome['skipped'];   // steps named by the policy with no verifier mounted
+$outcome['prompt'];    // failure text ready to feed back, with files and line numbers
+```
+
+A step named by the policy with no matching verifier is **skipped and recorded** rather than stalling the chain. `failFast` is on by default: once a must-pass step fails, the rest are not run for nothing.
+
+Four built-in criteria: `verification_passed` (**never having run verification counts as unmet** — treating "no verification" as a pass is the same as having no gate), `no_pending_steps`, `no_pending_errors`, `model_claims_done`. Custom criteria can be registered:
+
+```php
+$criteria->addCriterion('has_changelog', function (array $context) {
+    return ['met' => !empty($context['changelog']), 'reason' => '还没写 changelog'];
+});
+```
+
+Presets: `CompletionCriteria::lenient()` (errors only — suits light tasks with no tests and no plan) and `::strict()` (all four).
+
+### Task handoff (AgentHandoff)
+
+The coder gets halfway and finds it is really a schema problem, so the task goes to the DBA and comes back afterwards. **A handoff must leave a trace** — otherwise, after a task has passed between several roles, nobody can say what it went through.
+
+```php
+$handoff = $team->handoff('developer', 'dba', '慢查询定位到索引缺失', [
+    'task_id'         => 'task_9',
+    'context_summary' => '已定位到 UserRepo::findByEmail，全表扫描 12 万行',
+]);
+
+// The DBA finishes and hands it back
+$team->handoffBack($handoff, '索引已补，慢查询从 3s 降到 20ms');
+
+$team->handoffChain('task_9');   // ['developer → dba', 'dba → developer']
+```
+
+A handoff automatically delivers a `handoff` message to the receiving role, so the next time it is assigned work, its inbox already says who handed this over, why, and how far it got.
+
+Message types are now nine: the original `task` / `bug` / `review` / `status` / `result` plus `request` / `response` / `error` / `handoff`. A response automatically carries `reply_to` — when a role has three questions outstanding, without it there is no telling which answer belongs to which:
+
+```php
+$req  = AgentMessage::request('coder', 'dba', '这张表有索引吗');
+$resp = AgentMessage::respondTo($req, '没有，需要补');
+$resp->getReplyTo();   // the ID of $req
+```
+
+### Cross-session messaging (SessionBus)
+
+`AgentCommunication` covers messages inside one team in one process. Crossing sessions is a different problem: a background Agent finishing in another process (or another PHP request entirely) still has to reach the main session. **That message has to hit disk to get there** — an in-memory queue is invisible to another process.
+
+```php
+// On the background Agent's side
+$bus = new \Ai\Agent\Session\SessionBus('/var/data/session-bus');
+$bus->send('session_main', AgentMessage::status('background', '安全扫描完成，发现 3 个问题'));
+
+// On the main session's side
+$bus = $agent->sessionBus('/var/data/session-bus');
+$bus->pendingCount('session_main');           // 1
+echo $bus->toPrompt('session_main');          // a <session-messages> block, ready to inject
+$bus->receive('session_main');                // consumed on read
+```
+
+Subscription callbacks fire only for `send()` **within the same process** — a message delivered across processes has to be fetched with `receive()` on the other side. PHP has no long-lived inter-process push channel, and there is no way around that.
+
+Without a directory it degrades to memory-only, usable within one process; **background task notifications must configure a directory**, or the message goes out with nobody able to receive it.
+
+### Plan version chain
+
+`modifyPlan()` no longer overwrites in place; it produces a new version. **"What was the original plan and why was it changed" is the key evidence when an Agent goes off track**, and overwriting destroys it.
+
+```php
+$plan = $pm->createPlan('迁移数据库', ['steps' => ['备份', '改表']]);
+$plan->getVersionLabel();   // 'plan_v1'
+
+$pm->modifyPlan($plan->getId(), ['append' => ['校验数据']], '发现漏了校验');
+$pm->getPlan($plan->getId())->getVersion();   // 2
+
+$pm->versions($plan->getId());          // historical snapshots
+$pm->getVersion($plan->getId(), 1);     // v1 back, still two steps
+$pm->diffVersions($plan->getId(), 1, 2);
+// ['added' => ['校验数据'], 'removed' => [], 'reason' => '发现漏了校验']
+```
+
+### Workspace snapshot (WorkspaceSnapshot)
+
+Take one at the start of a task and one at the end, and the difference tells you what the task actually changed — rather than trusting the model's own report that it "changed Auth.php". Models both under-report and over-report, especially when they changed their mind mid-run and reverted.
+
+```php
+use Ai\Agent\Workspace\WorkspaceSnapshot;
+
+$before = WorkspaceSnapshot::capture('/var/www/project');
+// …the Agent works…
+$after = WorkspaceSnapshot::capture('/var/www/project');
+
+$diff = WorkspaceSnapshot::diff($before, $after);
+$diff['added'];            // files added
+$diff['modified'];         // files modified
+$diff['deleted'];          // files that disappeared
+$diff['branch_changed'];   // did the branch move
+$diff['content_changed'];  // did the diff hash change
+```
+
+A snapshot holds: cwd, branch, commit, modified files, untracked files and a hash of the working-tree diff. It still works outside a git repository — branch / commit / diff_hash simply come back empty. Record what can be recorded, leave the rest blank, guess nothing.
+
+### Worktree wrap-up: merge or discard
+
+Once a sub-agent has finished inside its isolated worktree and the diff is back, it is either merged or dropped:
+
+```php
+$samW->mergeWorktreeRun($runId, true);   // dry run first (git apply --check)
+$samW->mergeWorktreeRun($runId);         // apply for real
+// ['applied' => true, 'reason' => 'applied']
+
+$samW->discardWorktreeRun($runId, '方案不对');   // leaves a trace: this diff was reviewed and rejected
+```
+
+It applies a patch with `git apply` rather than merging a branch — changes in a worktree are usually uncommitted, so there is no commit to merge.
+
+### Skill lifecycle and dependencies
+
+```php
+$sm->onEvent(function ($e) { echo $e['type'], "\n"; });
+// skill_discovered / skill_loaded / skill_activated / skill_deactivated
+
+$sm->deactivate('deploy');   // stop injecting it on later rounds; allowed-tools are recomputed
+```
+
+SKILL.md recognises two more fields:
+
+```markdown
+---
+name: deploy
+required-tools:
+  - bash
+  - ssh
+dependencies:
+  - docker
+---
+```
+
+```php
+$sm->checkRequirements('deploy', ['bash']);
+// ['satisfied' => false, 'missing' => ['ssh', 'skill:docker']]
+```
+
+If a tool in `required_tools` is not currently available, loading the skill will not help — better to say so up front than to let the model follow the skill's instructions into a tool that does not exist.
+
+### Nearest-first instruction discovery
+
+```php
+$im->setProjectRoot('/var/www/project');
+$im->discoverFor('/var/www/project/src/Admin/User.php');
+// loads in order: project/CLAUDE.md → project/src/AGENTS.md → project/src/Admin/AI.md
+```
+
+It walks up from the file's directory to the project root and loads what it finds furthest-first — **the rule nearest the current file wins**, because it is the most specific. Recognised names: `CLAUDE.md` / `AGENTS.md` / `AI.md` / `.ai/AGENTS.md`.
+
+`projectRoot` bounds the upward walk: without a boundary it would climb to the filesystem root and drag in rules from other projects, or from the user's home directory. Already-loaded paths are skipped — injecting the same rules twice does not make the model follow them harder, it just costs context.
+
+### Memory consolidation (MemoryConsolidator)
+
+**Do not let every tool result flow into memory.** Memory turns into noise fast that way: every file read and every command run is in there, and the two or three entries that mattered are buried.
+
+```text
+Events → Task Result → Reflection → Memory Candidate → Consolidation → Memory
+```
+
+```php
+$consolidator = $agent->memoryConsolidator();
+
+$consolidator->propose('project', '登录走 JWT，密钥在 config/jwt.php', ['confidence' => 0.9]);
+$consolidator->proposeFromReflection($reflectionResult);   // reflection conclusions are worth keeping
+$consolidator->proposeFromResult($agentResult, 'task');    // first paragraph only, not the whole reply
+
+$written = $consolidator->consolidate();   // dedupe + drop low confidence + sort by confidence + cap
+```
+
+Candidates are not written immediately — before `consolidate()` they only queue in memory. That is the point of the step: judging one entry's importance in isolation is hard, comparing a batch is easy.
+
+Deduplication uses the retriever's relevance scoring as an approximation, so restating an existing memory does not add a second copy. Filter out sensitive content:
+
+```php
+$consolidator->setFilter(function (array $candidate) {
+    return strpos($candidate['content'], '密码') === false;
+});
+```
+
 ### Multi-role team (AgentTeam)
 
 An upgrade from "parent agent spawns a sub-agent" to "a set of roles that each own part of the work". The difference is that members persist: after Developer changes the code, Tester receives the context of that same round, and Reviewer can see what both concluded.

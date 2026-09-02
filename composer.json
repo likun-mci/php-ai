@@ -110,7 +110,8 @@
             "php tests/agent_code_test.php",
             "php tests/agent_phase42_test.php",
             "php tests/agent_phase43_test.php",
-            "php tests/agent_phase51_test.php"
+            "php tests/agent_phase51_test.php",
+            "php tests/agent_phase52_test.php"
         ],
         "analyse": "phpstan analyse --memory-limit=512M",
         "compat": "phpcs -p --standard=PHPCompatibility --runtime-set testVersion 7.1- --extensions=php --ignore='*/vendor/*' .",

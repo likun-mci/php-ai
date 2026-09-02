@@ -62,6 +62,9 @@ class AgentTeam
     /** @var callable|null 事件回调 function(array $event): void */
     protected $emit = null;
 
+    /** @var AgentHandoff[] 交接记录 */
+    protected $handoffs = [];
+
     /**
      * @param AI $ai
      * @param array<string, mixed> $options system / workdir / tools / permission / maxHistory
@@ -268,6 +271,96 @@ class AgentTeam
     }
 
     /**
+     * 把任务从一个成员交接给另一个成员
+     *
+     * 交接会留痕并投递一条 handoff 消息给接手方——接手方下次被分派任务时，
+     * 收件箱里就带着「谁交给我的、为什么、进展到哪」。
+     *
+     * ```php
+     * $handoff = $team->handoff('coder', 'dba', '发现是索引缺失', [
+     *     'task_id'         => 'task_1',
+     *     'context_summary' => '已定位到 UserRepo::findByEmail，全表扫描',
+     * ]);
+     *
+     * // 处理完交回去
+     * $team->handoffBack($handoff, '索引已补，慢查询消失');
+     * ```
+     *
+     * @param string $from
+     * @param string $to
+     * @param string $reason
+     * @param array<string, mixed> $options task_id / context_summary
+     * @return AgentHandoff|null 接手方不在团队里返回 null
+     */
+    public function handoff($from, $to, $reason = '', array $options = [])
+    {
+        $to = (string) $to;
+        if (!isset($this->roles[$to])) {
+            return null;
+        }
+
+        $taskId = isset($options['task_id']) ? (string) $options['task_id'] : '';
+        $handoff = new AgentHandoff((string) $from, $to, $taskId, $reason, $options);
+
+        $this->handoffs[] = $handoff;
+        $this->bus->send($handoff->toMessage());
+        $this->event('handoff', $handoff->toArray());
+
+        return $handoff;
+    }
+
+    /**
+     * 把任务交回给原交出方
+     *
+     * @param AgentHandoff $handoff 原交接记录
+     * @param string $reason
+     * @param string $contextSummary
+     * @return AgentHandoff
+     */
+    public function handoffBack(AgentHandoff $handoff, $reason = '', $contextSummary = '')
+    {
+        $reverse = $handoff->reverse($reason, $contextSummary);
+
+        $this->handoffs[] = $reverse;
+        $this->bus->send($reverse->toMessage());
+        $this->event('handoff', $reverse->toArray());
+
+        return $reverse;
+    }
+
+    /**
+     * 全部交接记录
+     *
+     * @param string $taskId 只看某个任务的，空则全部
+     * @return AgentHandoff[]
+     */
+    public function handoffs($taskId = '')
+    {
+        $taskId = (string) $taskId;
+        if ($taskId === '') {
+            return $this->handoffs;
+        }
+        return array_values(array_filter($this->handoffs, function (AgentHandoff $h) use ($taskId) {
+            return $h->getTaskId() === $taskId;
+        }));
+    }
+
+    /**
+     * 某个任务的交接链——一个任务在几个角色之间转了几圈，看这个
+     *
+     * @param string $taskId
+     * @return string[] 形如 ['coder → dba', 'dba → coder']
+     */
+    public function handoffChain($taskId)
+    {
+        $chain = [];
+        foreach ($this->handoffs($taskId) as $handoff) {
+            $chain[] = $handoff->getSourceAgent() . ' → ' . $handoff->getTargetAgent();
+        }
+        return $chain;
+    }
+
+    /**
      * 广播一条消息给全部成员
      *
      * @param string $content
@@ -418,6 +511,7 @@ class AgentTeam
     public function reset()
     {
         $this->results = [];
+        $this->handoffs = [];
         $this->bus->clear();
         return $this;
     }

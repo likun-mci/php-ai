@@ -53,6 +53,12 @@ class AgentOrchestrator
     /** @var ResultAggregator|null */
     protected $aggregator = null;
 
+    /** @var \Ai\Agent\Verification\VerificationGate|null 验证闸门 */
+    protected $gate = null;
+
+    /** @var CompletionCriteria|null 完成判据 */
+    protected $criteria = null;
+
     /** @var StrategyDecision|null 最近一次决策 */
     protected $lastDecision = null;
 
@@ -155,6 +161,121 @@ class AgentOrchestrator
             default:
                 return $this->executeDirect($task, $context);
         }
+    }
+
+    /**
+     * 跑完之后过闸门与完成判据
+     *
+     * 「模型说完成了」不等于完成：验证还没过、计划还剩几步、上一次工具还在报错，
+     * 这些都得检查。任一判据不满足就把原因交回给模型继续干——这正是
+     * Verification → Reflection → Replan 闭环的入口。
+     *
+     * @param \Ai\Agent\AgentResult $result
+     * @param string $task
+     * @param array<string, mixed> $context 追加给判据的上下文
+     * @return array<string, mixed> completed / unmet / prompt / verification
+     */
+    public function checkCompletion($result, $task = '', array $context = [])
+    {
+        $verification = null;
+        if ($this->gate !== null) {
+            if ($task !== '') {
+                $this->gate->policyForTask($task);
+            }
+            $verification = $this->gate->check(array_merge(
+                ['workdir' => $this->runtime->getWorkdir()],
+                isset($context['verification_context']) && is_array($context['verification_context'])
+                    ? $context['verification_context']
+                    : []
+            ));
+        }
+
+        $criteria = $this->criteria();
+        $evalContext = $context;
+        if ($verification !== null) {
+            $evalContext['verification_passed'] = $verification['passed'];
+        }
+        if (!isset($evalContext['plan'])) {
+            $plan = $this->currentPlan();
+            if ($plan !== null) {
+                $evalContext['plan'] = $plan;
+            }
+        }
+        if (!isset($evalContext['model_claims_done']) && is_object($result) && method_exists($result, 'isDone')) {
+            $evalContext['model_claims_done'] = $result->isDone();
+        }
+
+        $outcome = $criteria->evaluate($evalContext);
+        $outcome['verification'] = $verification;
+
+        $this->event($outcome['completed'] ? 'task_completed' : 'completion_unmet', [
+            'unmet'  => $outcome['unmet'],
+            'reasons' => $outcome['reasons'],
+        ]);
+
+        return $outcome;
+    }
+
+    /**
+     * 完成判据（惰性创建）
+     *
+     * 默认用宽松判据：没挂验证闸门时要求「验证通过」会永远达不成。
+     * 挂了闸门之后建议换成默认或严格判据。
+     *
+     * @return CompletionCriteria
+     */
+    public function criteria()
+    {
+        if ($this->criteria === null) {
+            $this->criteria = $this->gate !== null
+                ? new CompletionCriteria()
+                : CompletionCriteria::lenient();
+        }
+        return $this->criteria;
+    }
+
+    /**
+     * @param CompletionCriteria|null $criteria
+     * @return $this
+     */
+    public function setCriteria($criteria)
+    {
+        $this->criteria = $criteria instanceof CompletionCriteria ? $criteria : null;
+        return $this;
+    }
+
+    /**
+     * @param \Ai\Agent\Verification\VerificationGate|null $gate
+     * @return $this
+     */
+    public function setVerificationGate($gate)
+    {
+        $this->gate = $gate instanceof \Ai\Agent\Verification\VerificationGate ? $gate : null;
+        if ($this->gate !== null && $this->emit !== null) {
+            $this->gate->onEvent($this->emit);
+        }
+        return $this;
+    }
+
+    /**
+     * @return \Ai\Agent\Verification\VerificationGate|null
+     */
+    public function verificationGate()
+    {
+        return $this->gate;
+    }
+
+    /**
+     * 当前执行计划
+     *
+     * @return \Ai\Agent\Planning\Plan|null
+     */
+    protected function currentPlan()
+    {
+        if ($this->planManager === null || $this->runtime->getPlanId() === '') {
+            return null;
+        }
+        return $this->planManager->getPlan($this->runtime->getPlanId());
     }
 
     /**

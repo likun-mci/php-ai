@@ -35,6 +35,9 @@ class Plan
     /** @var array<int, array<string, mixed>> 计划修订历史 */
     protected $revisions = [];
 
+    /** @var int 计划版本号，每次修订 +1 */
+    protected $version = 1;
+
     /** @var string|null */
     protected $createdAt = null;
 
@@ -292,13 +295,38 @@ class Plan
      */
     public function addRevision($reason, array $changes = [])
     {
+        $this->version++;
         $this->revisions[] = [
+            'version' => $this->version,
             'time' => self::now(),
             'reason' => $reason,
             'changes' => $changes,
         ];
         $this->touch();
         return $this;
+    }
+
+    /**
+     * 当前版本号
+     *
+     * 初始计划是 v1，每次 `addRevision()` 递增。旧版本不会被覆盖——
+     * 计划改了几次、为什么改，都留在 `getRevisions()` 里。
+     *
+     * @return int
+     */
+    public function getVersion()
+    {
+        return $this->version;
+    }
+
+    /**
+     * 版本标签，如 `plan_v3`
+     *
+     * @return string
+     */
+    public function getVersionLabel()
+    {
+        return 'plan_v' . $this->version;
     }
 
     /**
@@ -364,6 +392,7 @@ class Plan
             'risks' => $this->risks,
             'dependencies' => $this->dependencies,
             'revisions' => $this->revisions,
+            'version' => $this->version,
             'created_at' => $this->createdAt,
             'updated_at' => $this->updatedAt,
         ];
@@ -396,6 +425,9 @@ class Plan
         }
         if (isset($data['revisions'])) {
             $plan->revisions = $data['revisions'];
+        }
+        if (isset($data['version'])) {
+            $plan->version = max(1, (int) $data['version']);
         }
         if (isset($data['created_at'])) {
             $plan->createdAt = $data['created_at'];
@@ -436,7 +468,13 @@ class Plan
     public function toSummary()
     {
         $lines = [];
-        $lines[] = sprintf('Plan #%s — %s (%d%%)', $this->id, $this->goal, $this->progress());
+        $lines[] = sprintf(
+            'Plan #%s %s — %s (%d%%)',
+            $this->id,
+            $this->getVersionLabel(),
+            $this->goal,
+            $this->progress()
+        );
         foreach ($this->steps as $step) {
             $lines[] = sprintf(
                 '  [%s] #%s %s',

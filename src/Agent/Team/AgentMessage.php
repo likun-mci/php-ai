@@ -23,8 +23,23 @@ class AgentMessage
     const TYPE_STATUS = 'status';
     const TYPE_RESULT = 'result';
 
+    /** 请求：需要对方回应 */
+    const TYPE_REQUEST = 'request';
+
+    /** 回应：对某条 request 的答复 */
+    const TYPE_RESPONSE = 'response';
+
+    /** 错误：执行出错的通报 */
+    const TYPE_ERROR = 'error';
+
+    /** 交接：把任务转交给另一个 Agent */
+    const TYPE_HANDOFF = 'handoff';
+
     /** @var string[] 全部合法类型 */
-    protected static $validTypes = ['task', 'bug', 'review', 'status', 'result'];
+    protected static $validTypes = [
+        'task', 'bug', 'review', 'status', 'result',
+        'request', 'response', 'error', 'handoff',
+    ];
 
     /** @var string 发送者角色 */
     protected $from = '';
@@ -132,6 +147,75 @@ class AgentMessage
     public static function result($from, $to, $content, array $metadata = [])
     {
         return new self($from, $to, self::TYPE_RESULT, $content, $metadata);
+    }
+
+    /**
+     * 请求——需要对方回应
+     *
+     * @param string $from
+     * @param string $to
+     * @param string $content
+     * @param array<string, mixed> $metadata
+     * @return self
+     */
+    public static function request($from, $to, $content, array $metadata = [])
+    {
+        return new self($from, $to, self::TYPE_REQUEST, $content, $metadata);
+    }
+
+    /**
+     * 回应某条请求
+     *
+     * 回应会自动带上 `reply_to`，收到的一方才能把答复对上是哪个问题——
+     * 一个角色同时问了三件事时，没有这个字段就分不清了。
+     *
+     * @param AgentMessage $request 被回应的请求
+     * @param string $content
+     * @param array<string, mixed> $metadata
+     * @return self
+     */
+    public static function respondTo(AgentMessage $request, $content, array $metadata = [])
+    {
+        $metadata['reply_to'] = $request->getId();
+        return new self($request->getTo(), $request->getFrom(), self::TYPE_RESPONSE, $content, $metadata);
+    }
+
+    /**
+     * 错误通报
+     *
+     * @param string $from
+     * @param string $to 空串表示广播
+     * @param string $content
+     * @param array<string, mixed> $metadata
+     * @return self
+     */
+    public static function error($from, $to, $content, array $metadata = [])
+    {
+        return new self($from, $to, self::TYPE_ERROR, $content, $metadata);
+    }
+
+    /**
+     * 交接通知
+     *
+     * @param string $from
+     * @param string $to
+     * @param string $content
+     * @param array<string, mixed> $metadata
+     * @return self
+     */
+    public static function handoff($from, $to, $content, array $metadata = [])
+    {
+        return new self($from, $to, self::TYPE_HANDOFF, $content, $metadata);
+    }
+
+    /**
+     * 这条消息在回应哪条请求
+     *
+     * @return string 不是回应时返回空串
+     */
+    public function getReplyTo()
+    {
+        return isset($this->metadata['reply_to']) ? (string) $this->metadata['reply_to'] : '';
     }
 
     /** @return string */

@@ -54,11 +54,20 @@ class Agent
     /** @var string */
     protected $lastText = '';
 
+    /** @var array<int, array<string, mixed>> 最近一次运行的消息历史（供完成判据检查错误） */
+    protected $lastMessages = [];
+
     /** @var \Ai\Agent\Orchestrator\AgentOrchestrator|null 编排器（惰性创建） */
     protected $orchestrator = null;
 
     /** @var callable|null 事件回调，编排器创建时一并接上 */
     protected $eventCallback = null;
+
+    /** @var \Ai\Agent\Session\SessionBus|null 跨 Session 消息总线 */
+    protected $sessionBus = null;
+
+    /** @var \Ai\Agent\Memory\MemoryConsolidator|null 记忆整理器 */
+    protected $consolidator = null;
 
     /**
      * @param AI $ai
@@ -740,6 +749,130 @@ class Agent
     }
 
     /**
+     * 最近一次运行的消息历史
+     *
+     * @return array<int, array<string, mixed>>
+     */
+    public function getLastMessages()
+    {
+        return $this->lastMessages;
+    }
+
+    /**
+     * 记录消息历史（run / ask 内部调用）
+     *
+     * @param array<int, array<string, mixed>> $messages
+     * @return $this
+     */
+    protected function rememberMessages(array $messages)
+    {
+        $this->lastMessages = $messages;
+        return $this;
+    }
+
+    /**
+     * 启用验证闸门
+     *
+     * 闸门按任务类型选验证链：修 Bug 一套、加功能一套、重构一套、安全改动一套。
+     * 过了才算这一步做完，没过就把失败信息交回给模型。
+     *
+     * ```php
+     * $agent->useVerificationGate(\Ai\Agent\Verification\VerificationPolicy::bugFix());
+     * $outcome = $agent->checkCompletion($result, '修复登录 401');
+     * if (!$outcome['completed']) {
+     *     $agent->ask($outcome['prompt']);   // 带着未达成的原因继续
+     * }
+     * ```
+     *
+     * @param \Ai\Agent\Verification\VerificationPolicy|null $policy 不给则按任务描述自动选
+     * @return \Ai\Agent\Verification\VerificationGate
+     */
+    public function useVerificationGate($policy = null)
+    {
+        $vm = $this->runtime->getVerificationManager();
+        if ($vm === null) {
+            $vm = new \Ai\Agent\Verification\VerificationManager();
+            $this->runtime->setVerificationManager($vm);
+        }
+        $gate = new \Ai\Agent\Verification\VerificationGate($vm, $policy);
+        if ($this->eventCallback !== null) {
+            $gate->onEvent($this->eventCallback);
+        }
+        $this->orchestrator()->setVerificationGate($gate);
+        return $gate;
+    }
+
+    /**
+     * 设置完成判据
+     *
+     * 不设置时用宽松判据。**不能因为模型说「完成了」就算完成**——
+     * 判据把完成变成一组可检查的条件。
+     *
+     * @param \Ai\Agent\Orchestrator\CompletionCriteria|string[] $criteria 判据对象或判据名数组
+     * @return $this
+     */
+    public function setCompletionCriteria($criteria)
+    {
+        if (is_array($criteria)) {
+            $criteria = new \Ai\Agent\Orchestrator\CompletionCriteria($criteria);
+        }
+        $this->orchestrator()->setCriteria($criteria);
+        return $this;
+    }
+
+    /**
+     * 检查任务是否真的达成完成条件
+     *
+     * @param AgentResult $result
+     * @param string $task 任务描述（用于自动选验证策略）
+     * @param array<string, mixed> $context
+     * @return array<string, mixed> completed / unmet / reasons / prompt / verification
+     */
+    public function checkCompletion($result, $task = '', array $context = [])
+    {
+        if (!isset($context['messages'])) {
+            $context['messages'] = $this->lastMessages;
+        }
+        return $this->orchestrator()->checkCompletion($result, (string) $task, $context);
+    }
+
+    /**
+     * 跨 Session 消息总线
+     *
+     * 后台 Agent 在另一个进程里跑完，得让主 Session 知道——那条消息必须落盘，
+     * 内存里的队列另一个进程看不见。
+     *
+     * @param string $baseDir 落盘目录，空则纯内存（只在同进程内可用）
+     * @return \Ai\Agent\Session\SessionBus
+     */
+    public function sessionBus($baseDir = '')
+    {
+        if ($this->sessionBus === null) {
+            $this->sessionBus = new \Ai\Agent\Session\SessionBus((string) $baseDir);
+        }
+        return $this->sessionBus;
+    }
+
+    /**
+     * 记忆整理器
+     *
+     * 不要让所有工具结果自动进记忆——先提候选，整理时去重筛选再写入。
+     *
+     * @return \Ai\Agent\Memory\MemoryConsolidator|null 未设置记忆管理器时返回 null
+     */
+    public function memoryConsolidator()
+    {
+        $mm = $this->runtime->getMemoryManager();
+        if ($mm === null) {
+            return null;
+        }
+        if ($this->consolidator === null) {
+            $this->consolidator = new \Ai\Agent\Memory\MemoryConsolidator($mm);
+        }
+        return $this->consolidator;
+    }
+
+    /**
      * 组建一个多角色 Agent 团队
      *
      * 团队成员共享 Agent 当前的工具与工作目录，各自持有独立上下文。
@@ -1232,6 +1365,7 @@ class Agent
 
         // 保持 lastText 兼容
         $this->lastText = $result->getText();
+        $this->rememberMessages($messages);
     }
 
     /**

@@ -2767,6 +2767,232 @@ $sam->getTranscript($newRunId)['resumed_from'];   // 原 runId
 
 不配 `transcriptDir` 时 transcript 只在内存里，进程结束即丢——后台任务与崩溃恢复都需要它能被另一个进程读到，所以长任务场景必须配。
 
+### 验证闸门与完成判据
+
+**不能因为模型说「完成了」就算完成。** 模型判断自己是否达成目标是出了名的乐观：测试还红着、计划还剩三步、上一次工具调用还在报错，它照样会说「已完成」。
+
+```php
+$agent->useVerificationGate();                      // 按任务类型自动选验证链
+$agent->setCompletionCriteria([                     // 完成 = 一组可检查的条件
+    \Ai\Agent\Orchestrator\CompletionCriteria::VERIFICATION_PASSED,
+    \Ai\Agent\Orchestrator\CompletionCriteria::NO_PENDING_STEPS,
+    \Ai\Agent\Orchestrator\CompletionCriteria::NO_PENDING_ERRORS,
+]);
+
+$result = $agent->task('修复登录 401');
+$outcome = $agent->checkCompletion($result, '修复登录 401');
+
+if (!$outcome['completed']) {
+    echo $outcome['prompt'];
+    // 任务尚未达成完成条件：
+    // - 验证未通过
+    // - 计划里还有 2 个步骤未完成：跑测试、更新文档
+    $agent->ask($outcome['prompt']);   // 带着原因继续干
+}
+```
+
+闸门按任务类型选不同的验证链——一套验证跑遍所有任务，要么太松（漏掉该验的）要么太紧（改个错别字也跑全量集成测试）：
+
+| 任务类型 | 验证链 | 识别关键词 |
+|---|---|---|
+| `bug_fix` | 语法 → 单元测试 | 修复 / 报错 / bug / fix |
+| `feature` | 语法 → 安全 → 单元测试 | 新增 / 实现 / 支持 / implement |
+| `refactor` | 语法 → 测试 → 改动规模检查 | 重构 / 重写 / refactor |
+| `security` | 语法 → **安全（必过）** → 测试 | 安全 / 漏洞 / 注入 / injection |
+| `default` | 语法 + 安全 | 认不出来时用它 |
+
+```php
+use Ai\Agent\Verification\VerificationGate;
+use Ai\Agent\Verification\VerificationPolicy;
+
+$gate = new VerificationGate($vm, VerificationPolicy::security());
+$outcome = $gate->check(['file_path' => 'src/Auth.php']);
+
+$outcome['passed'];    // 闸门放行了吗
+$outcome['failed'];    // 哪几步没过，required 标明是不是必过项
+$outcome['skipped'];   // 策略里写了但没挂验证器的步骤
+$outcome['prompt'];    // 可直接回填给模型的失败说明，带文件与行号
+```
+
+策略里写了但没挂对应验证器的步骤会被**跳过并记录**，不会让整条链卡住。`failFast` 默认开启：必过项一失败就停，不再白跑后面的。
+
+四条内置判据：`verification_passed`（**没跑过验证 = 未满足**，说「没验证所以算通过」就等于没有这道闸门）、`no_pending_steps`、`no_pending_errors`、`model_claims_done`。也可以注册自定义判据：
+
+```php
+$criteria->addCriterion('has_changelog', function (array $context) {
+    return ['met' => !empty($context['changelog']), 'reason' => '还没写 changelog'];
+});
+```
+
+预设：`CompletionCriteria::lenient()`（只看有没有报错，适合没测试没计划的轻量任务）、`::strict()`（四条全要）。
+
+### 任务交接（AgentHandoff）
+
+Coder 改到一半发现是数据库结构的问题，把任务转给 DBA；后者处理完再转回来。**交接必须留痕**——否则一个任务在几个角色之间转了几圈之后，没人说得清它经历过什么。
+
+```php
+$handoff = $team->handoff('developer', 'dba', '慢查询定位到索引缺失', [
+    'task_id'         => 'task_9',
+    'context_summary' => '已定位到 UserRepo::findByEmail，全表扫描 12 万行',
+]);
+
+// DBA 处理完交回去
+$team->handoffBack($handoff, '索引已补，慢查询从 3s 降到 20ms');
+
+$team->handoffChain('task_9');   // ['developer → dba', 'dba → developer']
+```
+
+交接会自动向接手方投递一条 `handoff` 消息，对方下次被分派任务时，收件箱里就带着「谁交给我的、为什么、进展到哪」。
+
+消息类型也补齐到九种：原有的 `task` / `bug` / `review` / `status` / `result`，新增 `request` / `response` / `error` / `handoff`。回应会自动带上 `reply_to`——一个角色同时问了三件事时，没有这个字段就分不清答复对应哪个问题：
+
+```php
+$req  = AgentMessage::request('coder', 'dba', '这张表有索引吗');
+$resp = AgentMessage::respondTo($req, '没有，需要补');
+$resp->getReplyTo();   // $req 的 ID
+```
+
+### 跨 Session 消息（SessionBus）
+
+`AgentCommunication` 管的是一个团队内部、同一个进程里的消息。跨 Session 是另一回事：后台 Agent 在另一个进程（甚至另一次 PHP 请求）里跑完，得让主 Session 知道。**那条消息必须落盘才传得过去**——内存里的队列，另一个进程根本看不见。
+
+```php
+// 后台 Agent 那边
+$bus = new \Ai\Agent\Session\SessionBus('/var/data/session-bus');
+$bus->send('session_main', AgentMessage::status('background', '安全扫描完成，发现 3 个问题'));
+
+// 主 Session 这边
+$bus = $agent->sessionBus('/var/data/session-bus');
+$bus->pendingCount('session_main');           // 1
+echo $bus->toPrompt('session_main');          // <session-messages> 块，可直接注入
+$bus->receive('session_main');                // 收完即清空
+```
+
+订阅回调只在**本进程内** `send()` 时触发——跨进程投递的消息，另一端得靠 `receive()` 主动取。PHP 没有常驻的进程间推送通道，这一点无法回避。
+
+不传目录时退化成纯内存模式，只在同进程内可用；**后台任务通知必须配目录**，否则消息发出去没人收得到。
+
+### 计划版本链
+
+`modifyPlan()` 不再原地覆盖，而是产生新版本。**「原计划是什么、为什么改成现在这样」是排查 Agent 走偏的关键线索**，直接覆盖就查不到了。
+
+```php
+$plan = $pm->createPlan('迁移数据库', ['steps' => ['备份', '改表']]);
+$plan->getVersionLabel();   // 'plan_v1'
+
+$pm->modifyPlan($plan->getId(), ['append' => ['校验数据']], '发现漏了校验');
+$pm->getPlan($plan->getId())->getVersion();   // 2
+
+$pm->versions($plan->getId());          // 历史版本快照
+$pm->getVersion($plan->getId(), 1);     // 取回 v1，仍然是两步
+$pm->diffVersions($plan->getId(), 1, 2);
+// ['added' => ['校验数据'], 'removed' => [], 'reason' => '发现漏了校验']
+```
+
+### 工作区快照（WorkspaceSnapshot）
+
+任务开始拍一张，结束再拍一张，两张一比就知道这个任务到底改了什么——而不是听模型自己报「我改了 Auth.php」。模型漏报和多报都很常见，尤其在它中途改了主意又改回去的时候。
+
+```php
+use Ai\Agent\Workspace\WorkspaceSnapshot;
+
+$before = WorkspaceSnapshot::capture('/var/www/project');
+// …Agent 干活…
+$after = WorkspaceSnapshot::capture('/var/www/project');
+
+$diff = WorkspaceSnapshot::diff($before, $after);
+$diff['added'];            // 新增的文件
+$diff['modified'];         // 改动的文件
+$diff['deleted'];          // 消失的文件
+$diff['branch_changed'];   // 分支变了没有
+$diff['content_changed'];  // diff 哈希变了没有
+```
+
+快照内容：cwd、分支、commit、已修改文件、未跟踪文件、工作区 diff 哈希。不是 git 仓库时快照仍然可用，只是 branch / commit / diff_hash 为空——能记的记下来，记不了的留空，不猜。
+
+### Worktree 收尾：合入或丢弃
+
+子 Agent 在隔离的 worktree 里改完、diff 拿回来了，接下来要么合入要么丢弃：
+
+```php
+$samW->mergeWorktreeRun($runId, true);   // 先试打（git apply --check）
+$samW->mergeWorktreeRun($runId);         // 真打
+// ['applied' => true, 'reason' => 'applied']
+
+$samW->discardWorktreeRun($runId, '方案不对');   // 留痕：这份 diff 被看过并否决了
+```
+
+用 `git apply` 打补丁而不是 merge 分支——worktree 里的改动通常没提交，没有 commit 可合。
+
+### Skill 生命周期与依赖
+
+```php
+$sm->onEvent(function ($e) { echo $e['type'], "\n"; });
+// skill_discovered / skill_loaded / skill_activated / skill_deactivated
+
+$sm->deactivate('deploy');   // 停用：后续轮次不再注入，allowed-tools 一并重算
+```
+
+SKILL.md 多认两个字段：
+
+```markdown
+---
+name: deploy
+required-tools:
+  - bash
+  - ssh
+dependencies:
+  - docker
+---
+```
+
+```php
+$sm->checkRequirements('deploy', ['bash']);
+// ['satisfied' => false, 'missing' => ['ssh', 'skill:docker']]
+```
+
+`required_tools` 里的工具当前拿不到时，这个技能加载了也用不了——与其让模型按技能指示去调一个不存在的工具，不如提前说清楚。
+
+### 指令就近发现
+
+```php
+$im->setProjectRoot('/var/www/project');
+$im->discoverFor('/var/www/project/src/Admin/User.php');
+// 依次加载：project/CLAUDE.md → project/src/AGENTS.md → project/src/Admin/AI.md
+```
+
+从文件所在目录向上找到项目根，沿途的指令文件按「远的在前、近的在后」加载——**离当前文件最近的规则优先级最高**，因为它最具体。识别 `CLAUDE.md` / `AGENTS.md` / `AI.md` / `.ai/AGENTS.md`。
+
+`projectRoot` 是向上查找的边界：没有边界的话会一路找到文件系统根，把别的项目甚至用户主目录的规则也拉进来。已加载过的路径会跳过——同一份规则注入两遍不会让模型更遵守它，只会白占上下文。
+
+### 记忆整理（MemoryConsolidator）
+
+**不要让所有工具结果自动进记忆。** 那样记忆很快会变成一堆噪音：读过的每个文件、跑过的每条命令都在里面，真正重要的两三条反而被淹没。
+
+```text
+Events → Task Result → Reflection → Memory Candidate → Consolidation → Memory
+```
+
+```php
+$consolidator = $agent->memoryConsolidator();
+
+$consolidator->propose('project', '登录走 JWT，密钥在 config/jwt.php', ['confidence' => 0.9]);
+$consolidator->proposeFromReflection($reflectionResult);   // 反思结论值得记
+$consolidator->proposeFromResult($agentResult, 'task');    // 只取首段，不整段塞
+
+$written = $consolidator->consolidate();   // 去重 + 滤低置信度 + 按置信度排序 + 截断
+```
+
+候选不会立刻写盘——`consolidate()` 之前它们只在内存里排队。这一步存在的意义就是「攒一批再筛」：单条判断谁重要很难，一批放一起比较就容易多了。
+
+去重用检索器的相关性打分做近似判断，说的是同一件事就不重复写。敏感内容用筛选器挡掉：
+
+```php
+$consolidator->setFilter(function (array $candidate) {
+    return strpos($candidate['content'], '密码') === false;
+});
+```
+
 ### 多角色团队（AgentTeam）
 
 从「父 Agent 派生子 Agent」升级为「一组各司其职的角色协作」。区别在于成员是长期存在的：Developer 改完代码，Tester 拿到的是同一轮任务的上下文，Reviewer 能看到前两者的结论。

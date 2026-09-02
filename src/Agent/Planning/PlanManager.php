@@ -36,6 +36,9 @@ class PlanManager
     /** @var int 步骤 ID 自增计数 */
     protected $stepCounter = 0;
 
+    /** @var array<string, array<int, array<string, mixed>>> planId => 各版本快照 */
+    protected $versions = [];
+
     /**
      * @param string $baseDir 持久化目录，空字符串则不持久化
      * @param array<string, mixed> $options
@@ -272,6 +275,10 @@ class PlanManager
         if (!$plan) {
             return null;
         }
+
+        // 改之前先把当前版本快照下来——旧计划不能被直接覆盖
+        $this->snapshot($plan);
+
         $changes = [];
         $steps = $plan->getSteps();
 
@@ -334,6 +341,82 @@ class PlanManager
     }
 
     /**
+     * 某个计划的全部历史版本
+     *
+     * 修改计划前的样子会被快照下来——「原计划是什么、为什么改成现在这样」
+     * 是排查 Agent 走偏的关键线索，直接覆盖就查不到了。
+     *
+     * @param string $planId
+     * @return array<int, array<string, mixed>> 版本号 => 计划快照
+     */
+    public function versions($planId)
+    {
+        $planId = (string) $planId;
+        return isset($this->versions[$planId]) ? $this->versions[$planId] : [];
+    }
+
+    /**
+     * 取某个历史版本
+     *
+     * @param string $planId
+     * @param int $version
+     * @return Plan|null 该版本不存在返回 null
+     */
+    public function getVersion($planId, $version)
+    {
+        $snapshots = $this->versions((string) $planId);
+        $version = (int) $version;
+        if (!isset($snapshots[$version])) {
+            // 当前版本不在快照里（只有被改过才快照），单独判一下
+            $current = $this->getPlan($planId);
+            return $current !== null && $current->getVersion() === $version ? $current : null;
+        }
+        return Plan::fromArray($snapshots[$version]);
+    }
+
+    /**
+     * 两个版本之间改了什么
+     *
+     * @param string $planId
+     * @param int $from
+     * @param int $to
+     * @return array<string, mixed> added / removed / reason
+     */
+    public function diffVersions($planId, $from, $to)
+    {
+        $planFrom = $this->getVersion($planId, $from);
+        $planTo = $this->getVersion($planId, $to);
+        if ($planFrom === null || $planTo === null) {
+            return ['added' => [], 'removed' => [], 'reason' => ''];
+        }
+
+        $actionsOf = function (Plan $plan) {
+            $actions = [];
+            foreach ($plan->getSteps() as $step) {
+                $actions[] = $step->getAction();
+            }
+            return $actions;
+        };
+
+        $before = $actionsOf($planFrom);
+        $after = $actionsOf($planTo);
+
+        $reason = '';
+        foreach ($planTo->getRevisions() as $revision) {
+            if (isset($revision['version']) && (int) $revision['version'] === (int) $to) {
+                $reason = isset($revision['reason']) ? (string) $revision['reason'] : '';
+                break;
+            }
+        }
+
+        return [
+            'added'   => array_values(array_diff($after, $before)),
+            'removed' => array_values(array_diff($before, $after)),
+            'reason'  => $reason,
+        ];
+    }
+
+    /**
      * 把一个已有的 Plan 对象纳入管理（并持久化）
      *
      * 从检查点或外部反序列化出来的计划用它接管——`createPlan()` 会生成新 ID，
@@ -351,6 +434,24 @@ class PlanManager
         $this->plans[$id] = $plan;
         $this->save($plan);
         return $this;
+    }
+
+    /**
+     * 快照一个计划的当前版本
+     *
+     * @param Plan $plan
+     * @return void
+     */
+    protected function snapshot(Plan $plan)
+    {
+        $planId = $plan->getId();
+        if ($planId === '') {
+            return;
+        }
+        if (!isset($this->versions[$planId])) {
+            $this->versions[$planId] = [];
+        }
+        $this->versions[$planId][$plan->getVersion()] = $plan->toArray();
     }
 
     /**

@@ -54,6 +54,9 @@ class SkillManager
     /** @var string[] 已激活技能的允许工具（合并自 allowedTools） */
     protected $allowedTools = [];
 
+    /** @var callable|null 生命周期事件回调 function(array $event): void */
+    protected $emit = null;
+
     /**
      * 注册一个技能
      *
@@ -170,6 +173,98 @@ class SkillManager
     }
 
     /**
+     * 订阅技能生命周期事件
+     *
+     * 事件：`skill_discovered` / `skill_loaded` / `skill_activated` / `skill_deactivated`。
+     * 技能什么时候被加载、被谁激活，是排查「模型为什么突然按某套流程干活」的线索。
+     *
+     * @param callable|null $emit function(array $event): void
+     * @return $this
+     */
+    public function onEvent($emit)
+    {
+        $this->emit = is_callable($emit) ? $emit : null;
+        return $this;
+    }
+
+    /**
+     * 停用一个已激活的技能
+     *
+     * 停用不会撤销已经进过上下文的内容——那已经在消息历史里了。
+     * 它影响的是后续轮次：技能正文不再注入，allowed-tools 也不再计入。
+     *
+     * @param string $name
+     * @return bool 技能不存在或本来就没激活返回 false
+     */
+    public function deactivate($name)
+    {
+        $skill = $this->get((string) $name);
+        if ($skill === null || !$skill->isActive()) {
+            return false;
+        }
+        $skill->setActive(false);
+
+        // 重算允许工具：不能只减这一个技能的，别的技能可能声明了同样的工具
+        $this->allowedTools = [];
+        foreach ($this->activeSkills() as $active) {
+            foreach ($active->getAllowedTools() as $rule) {
+                $rule = trim((string) $rule);
+                if ($rule !== '') {
+                    $this->allowedTools[] = $rule;
+                }
+            }
+        }
+
+        $this->event('skill_deactivated', ['skill' => $skill->getName()]);
+        return true;
+    }
+
+    /**
+     * 检查技能声明的依赖是否满足
+     *
+     * `required_tools` 里的工具当前拿不到时，这个技能加载了也用不了——
+     * 与其让模型按技能指示去调一个不存在的工具，不如提前说清楚。
+     *
+     * @param string $name
+     * @param string[] $availableTools 当前可用的工具名
+     * @return array{satisfied: bool, missing: string[]}
+     */
+    public function checkRequirements($name, array $availableTools)
+    {
+        $skill = $this->get((string) $name);
+        if ($skill === null) {
+            return ['satisfied' => false, 'missing' => []];
+        }
+
+        $missing = [];
+        foreach ($skill->getRequiredTools() as $tool) {
+            if (!in_array($tool, $availableTools, true)) {
+                $missing[] = $tool;
+            }
+        }
+        foreach ($skill->getDependencies() as $dependency) {
+            if ($this->get($dependency) === null) {
+                $missing[] = 'skill:' . $dependency;
+            }
+        }
+        return ['satisfied' => $missing === [], 'missing' => $missing];
+    }
+
+    /**
+     * 发出一个生命周期事件
+     *
+     * @param string $type
+     * @param array<string, mixed> $data
+     * @return void
+     */
+    protected function event($type, array $data = [])
+    {
+        if ($this->emit !== null) {
+            call_user_func($this->emit, array_merge(['type' => $type], $data));
+        }
+    }
+
+    /**
      * 发现目录下的技能，但不读正文
      *
      * 与 `loadFromDir()` 的区别：只解析 frontmatter，正文留到模型真正
@@ -203,6 +298,10 @@ class SkillManager
             if ($skill !== null) {
                 $this->skills[$skill->getName()] = $skill;
                 $found[] = $skill->getName();
+                $this->event('skill_discovered', [
+                    'skill' => $skill->getName(),
+                    'path'  => $mdFile,
+                ]);
             }
         }
         return $found;
@@ -332,14 +431,23 @@ class SkillManager
             }
         }
 
+        $listField = function ($key) use ($fm) {
+            if (!isset($fm[$key])) {
+                return [];
+            }
+            return is_array($fm[$key]) ? array_map('strval', $fm[$key]) : [(string) $fm[$key]];
+        };
+
         return new SkillDefinition([
-            'name'         => $name,
-            'description'  => isset($fm['description']) ? (string) $fm['description'] : '',
-            'content'      => $withContent ? $parsed['content'] : '',
-            'knowledge'    => isset($fm['knowledge']) ? (string) $fm['knowledge'] : '',
-            'allowedTools' => $allowed,
-            'filePatterns' => $patterns,
-            'path'         => $mdFile,
+            'name'          => $name,
+            'description'   => isset($fm['description']) ? (string) $fm['description'] : '',
+            'content'       => $withContent ? $parsed['content'] : '',
+            'knowledge'     => isset($fm['knowledge']) ? (string) $fm['knowledge'] : '',
+            'allowedTools'  => $allowed,
+            'requiredTools' => array_merge($listField('required-tools'), $listField('required_tools')),
+            'dependencies'  => $listField('dependencies'),
+            'filePatterns'  => $patterns,
+            'path'          => $mdFile,
         ]);
     }
 
@@ -361,6 +469,7 @@ class SkillManager
         }
         $parsed = self::parseFrontmatter($raw);
         $skill->setContent($parsed['content']);
+        $this->event('skill_loaded', ['skill' => $skill->getName(), 'path' => $path]);
         return true;
     }
 
@@ -477,7 +586,11 @@ class SkillManager
         if (!$skill->isLoaded()) {
             $this->loadContent($skill);
         }
+        $wasActive = $skill->isActive();
         $skill->setActive(true);
+        if (!$wasActive) {
+            $this->event('skill_activated', ['skill' => $skill->getName()]);
+        }
 
         // 收集允许工具限制（合并到全局，但不能突破权限系统）
         foreach ($skill->getAllowedTools() as $rule) {

@@ -260,3 +260,27 @@ TXT;
 // if ($session) {
 //     echo "会话已保存（{$session->getStatus()}）\n";
 // }
+
+// ============================================================
+// 6. 多轮对话：chat()
+// ============================================================
+//
+// run() 是无状态的单次运行（调用方自备完整 messages）；要接着上一轮继续说，
+// 用 chat()——上下文由库维护，每次只说新的那句，返回 AgentResult。
+//
+// $agent = (new Agent($ai))->setTools($tools);
+//
+// echo $agent->chat('北京天气怎么样')->getText();
+// echo $agent->chat('那上海呢')->getText();      // 记得住上一轮，工具往返也留在上下文里
+//
+// // 挂上 SessionManager 后，换个进程、换个实例也接得上（PHP-FPM 场景）
+// $agent->setSessionId('user-1001')
+//       ->setSessionManager(new SessionManager(new FileSessionStore('/tmp/agent_sessions')));
+//
+// // 等授权时不必 approve/deny，直接改口就行
+// $agent->chat('把 /data 下的临时文件删了');
+// if ($agent->isAwaitingPermission()) {
+//     $agent->chat('先别删，改成移到 /backup');
+// }
+//
+// $agent->clearConversation();                   // 清空上下文，下一次从头开始

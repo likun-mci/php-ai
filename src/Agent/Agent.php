@@ -63,6 +63,12 @@ class Agent
     /** @var array<int, array<string, mixed>> 最近一次运行的消息历史（供完成判据检查错误） */
     protected $lastMessages = [];
 
+    /** @var array<int, array<string, mixed>> chat() 维护的对话上下文（未挂 SessionManager 时的落脚点） */
+    protected $conversation = [];
+
+    /** @var string|null 上一轮停在等授权时挂起的请求 ID */
+    protected $pendingPermissionId = null;
+
     /** @var \Ai\Agent\Orchestrator\AgentOrchestrator|null 编排器（惰性创建） */
     protected $orchestrator = null;
 
@@ -1909,6 +1915,208 @@ class Agent
     public function lastText()
     {
         return $this->lastText;
+    }
+
+    /**
+     * 多轮对话：说一句话，拿回这一轮的结果
+     *
+     * 与 `run()` 的分工：
+     *   - `run()`  无状态单次运行。调用方自备完整 messages，跑完不记账，返回 void。
+     *   - `chat()` 有状态多轮对话。上下文由库维护，每次只说新的那句，返回 `AgentResult`。
+     *
+     * ```php
+     * $agent = (new Agent($ai))->setTools($tools);
+     * echo $agent->chat('我叫小明')->getText();
+     * echo $agent->chat('我叫什么？')->getText();      // 记得住
+     * ```
+     *
+     * 上下文存哪儿：挂了 `SessionManager` 就以会话为准（跨请求、跨进程可续跑），
+     * 否则存在实例内存里，进程退出即失。
+     *
+     * **上一轮停在等授权时，这里允许直接说新的**。库会先给那个没被批准的工具调用
+     * 补一条「未执行」的结果，再把这句话接在同一条消息里发出去——等于告诉模型
+     * 「那个别做了，改做这个」。之所以必须补：模型发出的每个 `tool_use` 都得有
+     * 一个 id 对得上的 `tool_result`，缺了下一次请求直接 400，不是降级是发不出去。
+     * 想要的若是「批准」或「明确拒绝后原样继续」，用 `approve()` / `deny()`。
+     *
+     * 注意别给 `$ai` 开 `rounds`：上下文由 chat() 自己管，AI 层再拼一份会翻倍。
+     *
+     * @param string|array<mixed> $input 一句话，或一条/一批消息
+     * @return AgentResult
+     */
+    public function chat($input = '')
+    {
+        $messages = \Ai\Agent\Context\Conversation::append(
+            $this->getConversation(),
+            \Ai\Agent\Context\Conversation::normalize($input)
+        );
+
+        // 上一轮挂着的授权请求就此了结——用户没点批准，而是给了新指示
+        $this->settlePendingPermission();
+
+        // 委派额度是每次运行的预算，与 run() 一样每轮重置
+        if ($this->delegateTool !== null) {
+            $this->delegateTool->reset();
+        }
+
+        $result = $this->runtime->run($messages, true);
+
+        $this->lastText = $result->getText();
+        // 取循环跑完的完整上下文（含中途的 assistant 回合与工具结果），
+        // 拿不到才退回自己拼的那份——否则下一轮会丢掉本轮的工具往返
+        $final = $this->runtime->getLastMessages();
+        $this->conversation = $final ? $final : $messages;
+        $this->rememberMessages($this->conversation);
+
+        $extra = $result->getExtra();
+        $this->pendingPermissionId =
+            $result->getStopReason() === \Ai\Agent\Loop\StopReason::PERMISSION_DENIED
+            && isset($extra['request_id']) && $extra['request_id'] !== ''
+                ? (string) $extra['request_id']
+                : null;
+
+        return $result;
+    }
+
+    /**
+     * 当前对话上下文
+     *
+     * 挂了 SessionManager 就读会话里的（跨请求场景下实例是新的，内存里没有），
+     * 否则读实例内存。
+     *
+     * @return array<int, array<string, mixed>>
+     */
+    public function getConversation()
+    {
+        $session = $this->currentSession();
+        if ($session !== null) {
+            $messages = $session->getMessages();
+            if ($messages) {
+                return $messages;
+            }
+        }
+        return $this->conversation;
+    }
+
+    /**
+     * 覆盖对话上下文
+     *
+     * 用于自建持久化：请求开始时把上次存下来的消息灌回来。
+     * 挂了 SessionManager 的话会一并写回会话。
+     *
+     * @param array<int, array<string, mixed>> $messages
+     * @return $this
+     */
+    public function setConversation(array $messages)
+    {
+        $this->conversation = array_values($messages);
+        $this->writeSessionMessages($this->conversation);
+        return $this;
+    }
+
+    /**
+     * 清空对话上下文，下一次 chat() 从头开始
+     *
+     * @return $this
+     */
+    public function clearConversation()
+    {
+        $this->conversation        = [];
+        $this->pendingPermissionId = null;
+        $this->writeSessionMessages([]);
+        return $this;
+    }
+
+    /**
+     * 上一轮是否停在等授权上
+     *
+     * true 时可以三选一：`approve()` 批准、`deny()` 拒绝，或直接 `chat()` 说别的。
+     *
+     * @return bool
+     */
+    public function isAwaitingPermission()
+    {
+        return $this->awaitingPermissionId() !== null;
+    }
+
+    /**
+     * 挂起中的授权请求 ID（没有则 null）
+     *
+     * @return string|null
+     */
+    protected function awaitingPermissionId()
+    {
+        if ($this->pendingPermissionId !== null && $this->pendingPermissionId !== '') {
+            return $this->pendingPermissionId;
+        }
+        $session = $this->currentSession();
+        if ($session !== null) {
+            $id = $session->getPendingPermissionId();
+            if ($id !== null && $id !== '') {
+                return (string) $id;
+            }
+        }
+        return null;
+    }
+
+    /**
+     * 用户绕开授权直接往下说：把那个请求记为拒绝
+     *
+     * 不记的话它会一直躺在权限管理器里等着，`getPendingRequests()` 越积越多，
+     * 前端的授权面板也会一直亮着一个早就过时的请求。
+     *
+     * @return void
+     */
+    protected function settlePendingPermission()
+    {
+        $requestId = $this->awaitingPermissionId();
+        if ($requestId === null) {
+            return;
+        }
+        $perm = $this->runtime->getPermission();
+        if ($perm !== null) {
+            $perm->deny($requestId, '用户未批准，改为继续对话');
+        }
+        $this->pendingPermissionId = null;
+    }
+
+    /**
+     * 当前会话对象（未挂 SessionManager 时为 null）
+     *
+     * @return \Ai\Agent\Session\AgentSession|null
+     */
+    protected function currentSession()
+    {
+        $sm = $this->runtime->getSessionManager();
+        $id = $this->runtime->getSessionId();
+        if ($sm === null || $id === null || $id === '') {
+            return null;
+        }
+        return $sm->getStore()->load($id);
+    }
+
+    /**
+     * 把消息写回会话（未挂 SessionManager 时什么都不做）
+     *
+     * @param array<int, array<string, mixed>> $messages
+     * @return void
+     */
+    protected function writeSessionMessages(array $messages)
+    {
+        $sm = $this->runtime->getSessionManager();
+        $id = $this->runtime->getSessionId();
+        if ($sm === null || $id === null || $id === '') {
+            return;
+        }
+        $store   = $sm->getStore();
+        $session = $store->load($id);
+        if ($session === null) {
+            $session = new \Ai\Agent\Session\AgentSession($id, ['messages' => $messages]);
+        } else {
+            $session->setMessages($messages);
+        }
+        $session->setPendingPermissionId(null);
+        $store->save($session);
     }
 
     /**

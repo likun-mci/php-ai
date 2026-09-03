@@ -19,7 +19,7 @@
 - ⚡ **并发批量**：`chatBatch()` 用 `curl_multi` 并发跑批，实测 10 条提速 3.3 倍，单条失败不拖垮整批
 - 🧩 **任意模型 + 任意接口**：模型名不受内置清单限制，可手选协议格式（`protocol`）并指定自定义接口地址（`base_url` / `endpoint`），一套代码同时对接官方 API、第三方中转与自建网关
 - 🌊 **流式输出**：一行 `setStream(true)`，自动按 SSE 协议实时吐出数据块；常驻内存框架用 `setStreamCallback()` 接管分片
-- 🧰 **Agent 循环**：挂载工具（函数）后自动完成「模型决策 → 执行工具 → 回填结果」多轮循环
+- 🧰 **Agent 循环**：挂载工具（函数）后自动完成「模型决策 → 执行工具 → 回填结果」多轮循环；`chat()` 连续对话，上下文由库维护
 - 🤖 **Claude Code CLI**：直接调用本机 claude 程序（`Ai\Cli\ClaudeCode`），文件读写 / 工具执行 / 会话续接 / 结构化输出，路径自动检测并缓存
 - 📊 **CLI 信息查询**：不发起对话即可读取版本、登录态、模型列表、额度用量与限流、生效设置、MCP 状态
 - 🔌 **常驻双工会话**：`Ai\Cli\ClaudeCodeSession` 复刻官方 IDE 插件的进程模式，长驻进程多轮对话 + 工具权限实时回调 PHP 决策 + 优雅中断 + 处理过程中继续提需求
@@ -1406,6 +1406,47 @@ Agent 只是**临时借用**你的 AI 实例：跑完会把 `setStream()` 恢复
 > 也可以直接写 OpenAI 原生格式（`{type:'function'}` 的工具定义、`role:'tool'` 的消息），
 > 库会识别并转成目标平台的结构，不强制迁移已有代码。
 
+### chat()：多轮对话
+
+`run()` 是**无状态**的单次运行——调用方自备完整 `messages`，跑完不记账。要接着上一轮继续说，用 `chat()`：上下文由库维护，每次只说新的那句，返回 `AgentResult`。
+
+| | `run(array $messages)` | `chat($input)` |
+|---|---|---|
+| 上下文 | 调用方自备完整消息 | 库维护，只传新的那句 |
+| 返回 | `void`（文本取 `lastText()`） | `AgentResult` |
+| 适合 | 单次任务、自己管历史 | 聊天界面、连续追问 |
+
+```php
+$agent = (new Agent($ai))->setTools($tools);
+
+echo $agent->chat('我叫小明')->getText();
+echo $agent->chat('我叫什么？')->getText();      // 记得住；中途的工具往返也留在上下文里
+```
+
+上下文存哪儿：默认在实例内存里，进程退出即失；挂上 `SessionManager` 就落到会话，跨请求、跨进程都能接着聊（见[会话持久化](#会话持久化)）。
+
+> ⚠️ 用 `chat()` 时**不要**给 `$ai` 设 `rounds`：上下文由 Agent 维护，AI 层再拼一份会翻倍。
+
+**等授权时可以直接说新的。** 上一轮停在 `permission_denied`（等用户决策）时，除了 `approve()` / `deny()`，还可以直接 `chat()` 说别的——等于告诉模型「那个别做了，改做这个」：
+
+```php
+$agent->chat('把 /data 下的临时文件删了');
+
+if ($agent->isAwaitingPermission()) {
+    $agent->chat('先别删，改成移到 /backup');    // 不必 approve/deny，直接改口
+}
+```
+
+库会先给那个没被批准的工具调用补一条「未执行」的结果，再把这句话作为同一条消息里的文本块接在后面。补结果这一步不是可选的：模型发出的每个 `tool_use` 都必须有一个 id 对得上的 `tool_result`，缺了下一次请求直接被平台判 400——不是降级，是整轮发不出去。
+
+| 方法 | 说明 |
+|------|------|
+| `chat($input)` | 说一句话（也接受一条/一批消息），返回 `AgentResult` |
+| `getConversation()` | 读当前上下文；挂了 `SessionManager` 时读的是会话里那份 |
+| `setConversation(array)` | 灌入上下文，用于自建持久化 |
+| `clearConversation()` | 清空，下一次 `chat()` 从头开始 |
+| `isAwaitingPermission()` | 上一轮是否停在等授权 |
+
 ### 不用 Agent，自己控制循环
 
 `AIResponse` 提供了平台无关的取用接口：
@@ -1746,14 +1787,23 @@ $agent
     ->setSessionId('user-abc-123')
     ->setSessionManager(new SessionManager($store));
 
+// 下次请求换一个新实例，只要 sessionId 一样就接得上——
+// chat() 自己从会话里读上下文，不用手动把消息传回去
+$agent->chat('接着上次说');
+```
+
+用 `run()` 的场合（自备完整消息的单次运行），续跑要自己把消息取回来：
+
+```php
 $agent->run($messages);
 
-// 下次请求恢复会话
 $session = $store->load('user-abc-123');
 if ($session) {
-    $agent->run($session->getMessages());
+    $agent->run($session->getMessages());     // run() 以会话里的消息为准
 }
 ```
+
+> `run()` 在会话存在时**以会话消息为准**，传进去的那份被视为它的旧副本。所以别拿 `run()` 追加新一轮提问——那句话会被覆盖掉且不报错。追加走 [`chat()`](#chat多轮对话)。
 
 会话状态流转：`running` → `paused`（等待授权）→ `running`（恢复）→ `completed` / `interrupted`。
 
@@ -2433,7 +2483,8 @@ $agent->setCheckpointDir('/tmp/checkpoints');
 $messages = $agent->recoverFromCrash('task_1');
 if ($messages !== null) {
     // 恢复成功，继续执行
-    $result = $agent->run($messages);
+    $agent->run($messages);
+    $text = $agent->lastText();          // run() 返回 void，文本从这里取
 } else {
     // 无可用检查点，从头开始
     $agent->run([['role' => 'user', 'content' => '请检查项目']]);

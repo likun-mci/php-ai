@@ -90,6 +90,7 @@
             "php tests/ssrf_test.php",
             "php tests/text_truncate_test.php",
             "php tests/agent_runtime_test.php",
+            "php tests/agent_chat_test.php",
             "php tests/agent_advanced_test.php",
             "php tests/agent_task_test.php",
             "php tests/agent_verification_test.php",

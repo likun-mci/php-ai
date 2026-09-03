@@ -70,6 +70,9 @@ class AgentRuntime
     /** @var string|null */
     protected $sessionId = null;
 
+    /** @var array<int, array<string, mixed>> 最近一次运行结束时的完整上下文 */
+    protected $lastMessages = [];
+
     /** @var BudgetManager|null */
     protected $budget = null;
 
@@ -365,6 +368,22 @@ class AgentRuntime
     {
         $this->sessionId = (string) $id;
         return $this;
+    }
+
+    /**
+     * @return SessionManager|null
+     */
+    public function getSessionManager()
+    {
+        return $this->sessionManager;
+    }
+
+    /**
+     * @return string|null
+     */
+    public function getSessionId()
+    {
+        return $this->sessionId;
     }
 
     /**
@@ -1243,9 +1262,10 @@ class AgentRuntime
      * 运行 Agent 循环
      *
      * @param array<int, array<string, mixed>> $messages 初始消息
+     * @param bool $ignoreSessionMessages 传入的消息即完整上下文，不要用会话里的覆盖
      * @return AgentResult
      */
-    public function run(array $messages)
+    public function run(array $messages, $ignoreSessionMessages = false)
     {
         // 构造上下文
         $this->registerSpawnAgent();
@@ -1282,9 +1302,16 @@ class AgentRuntime
         if ($this->sessionManager && $this->sessionId) {
             $session = $this->sessionManager->getStore()->load($this->sessionId);
             if ($session) {
-                $context->setMessages($session->getMessages() ?: $messages);
-                if ($session->getIteration() > 0) {
-                    $context->setIteration($session->getIteration());
+                // 续跑（run）：会话里存着的才是权威上下文，传进来的通常是它的旧副本，
+                // 覆盖回去是对的。
+                // 新一轮对话（chat）：调用方已经把「历史 + 用户刚说的话」拼好了，会话
+                // 消息只是它的前缀——这时再覆盖，用户那句话就被静默吃掉，模型拿旧上下文
+                // 重答一遍，调用方连个错都收不到。迭代计数同理：新一轮的上限该从 0 起算。
+                if (!$ignoreSessionMessages) {
+                    $context->setMessages($session->getMessages() ?: $messages);
+                    if ($session->getIteration() > 0) {
+                        $context->setIteration($session->getIteration());
+                    }
                 }
                 $resumedStopReason = $session->getStopReason();
                 // 标记为 running
@@ -1329,13 +1356,18 @@ class AgentRuntime
                 if ($this->budget) {
                     $session->setBudgetState($this->budget->summary());
                 }
-                if ($result->isDone()) {
-                    $session->complete();
-                } elseif ($result->getStopReason() === \Ai\Agent\Loop\StopReason::PERMISSION_DENIED) {
+                if ($result->getStopReason() === \Ai\Agent\Loop\StopReason::PERMISSION_DENIED) {
                     $session->pause();
                     $permId = $result->getExtra()['request_id'] ?? '';
                     if ($permId) {
                         $session->setPendingPermissionId($permId);
+                    }
+                } else {
+                    // 这一轮没停在授权上，说明上次挂起的那个请求已经翻篇了。
+                    // 不清掉的话它会一直留在会话里，把之后每一轮都误标成「等授权」
+                    $session->setPendingPermissionId(null);
+                    if ($result->isDone()) {
+                        $session->complete();
                     }
                 }
                 $store->save($session);
@@ -1379,6 +1411,9 @@ class AgentRuntime
             throw $e;
         } finally {
             $this->ai->setStream($streamWasOn);
+            // 本次跑完的完整上下文——chat() 靠它接着往下拼。
+            // 放在 finally 里：异常中断的那一轮同样要留下现场
+            $this->lastMessages = $context->getMessages();
         }
     }
 
@@ -1412,6 +1447,18 @@ class AgentRuntime
             $context->getMessages(),
             $extra
         );
+    }
+
+    /**
+     * 最近一次运行结束时的完整上下文
+     *
+     * 包含循环中途追加的 assistant 回合与工具结果，不只是传进去的那几条。
+     *
+     * @return array<int, array<string, mixed>>
+     */
+    public function getLastMessages()
+    {
+        return $this->lastMessages;
     }
 
     /**

@@ -19,7 +19,7 @@ Every example in this document is taken from a real production system (a CodeIgn
 - ⚡ **Concurrent batching** — `chatBatch()` uses `curl_multi`; measured 3.3× speed-up on 10 items, and one failure does not drag down the batch
 - 🧩 **Any model, any endpoint** — model names are not restricted to the built-in list. Pick the protocol format (`protocol`) and point at a custom endpoint (`base_url` / `endpoint`), so one codebase talks to official APIs, third-party relays and self-hosted gateways alike
 - 🌊 **Streaming** — one call to `setStream(true)` emits chunks in real time over SSE; in long-running frameworks use `setStreamCallback()` to take over the chunks
-- 🧰 **Agent loop** — attach tools (functions) and the library drives the "model decides → run tool → feed result back" loop for you
+- 🧰 **Agent loop** — attach tools (functions) and the library drives the "model decides → run tool → feed result back" loop for you; `chat()` keeps the conversation going with the context maintained for you
 - 🤖 **Claude Code CLI** — drive the local `claude` binary directly (`Ai\Cli\ClaudeCode`): file I/O, tool execution, session resumption, structured output, with automatic path detection and caching
 - 📊 **CLI introspection** — read version, login state, model list, quota usage and rate limits, effective settings and MCP status without starting a conversation
 - 🔌 **Persistent duplex session** — `Ai\Cli\ClaudeCodeSession` mirrors the official IDE plugin's process model: multi-turn conversation in a long-lived process, tool-permission callbacks decided in PHP, graceful interruption, and new requests accepted mid-turn
@@ -1394,6 +1394,47 @@ The Agent only **borrows** your AI instance: it restores `setStream()` to its pr
 
 > You may also write native OpenAI format (`{type:'function'}` tool definitions, `role:'tool'` messages) — the library recognises it and converts to the target platform's structure, so existing code need not be migrated.
 
+### chat(): multi-turn conversation
+
+`run()` is a **stateless** single run — the caller supplies the full `messages` and nothing is remembered afterwards. To carry on from the previous turn, use `chat()`: the library maintains the context, you send only what's new, and you get an `AgentResult` back.
+
+| | `run(array $messages)` | `chat($input)` |
+|---|---|---|
+| Context | caller supplies the full messages | maintained by the library; send only what's new |
+| Returns | `void` (text via `lastText()`) | `AgentResult` |
+| Fits | one-off tasks, your own history handling | chat UIs, follow-up questions |
+
+```php
+$agent = (new Agent($ai))->setTools($tools);
+
+echo $agent->chat('My name is Alice')->getText();
+echo $agent->chat("What's my name?")->getText();   // it remembers; tool round-trips stay in the context too
+```
+
+Where the context lives: in the instance's memory by default, gone when the process exits; attach a `SessionManager` and it goes to the session, so the conversation survives across requests and processes (see [Session persistence](#session-persistence)).
+
+> ⚠️ Do **not** set `rounds` on `$ai` when using `chat()`: the Agent maintains the context, and a second copy assembled by the AI layer would double it.
+
+**While awaiting permission you can simply say something new.** When the previous turn stopped at `permission_denied` (waiting for a user decision), besides `approve()` / `deny()` you may just `chat()` something else — which tells the model "drop that one, do this instead":
+
+```php
+$agent->chat('Delete the temp files under /data');
+
+if ($agent->isAwaitingPermission()) {
+    $agent->chat('Hold off on deleting — move them to /backup instead');   // no approve/deny needed
+}
+```
+
+The library first fills in a "not executed" result for the tool call that was never approved, then appends your sentence as a text block inside that same message. Filling it in is not optional: every `tool_use` the model emits must be matched by a `tool_result` with the exact same id — without it the next request is rejected with a 400 by the platform. That is not a degradation; the whole turn fails to send.
+
+| Method | Description |
+|--------|-------------|
+| `chat($input)` | Say one thing (a single message or a batch is also accepted), returns `AgentResult` |
+| `getConversation()` | Read the current context; with a `SessionManager` attached, reads the session's copy |
+| `setConversation(array)` | Load a context in, for your own persistence layer |
+| `clearConversation()` | Clear it; the next `chat()` starts fresh |
+| `isAwaitingPermission()` | Whether the previous turn stopped awaiting permission |
+
 ### Driving the loop yourself, without Agent
 
 `AIResponse` exposes platform-neutral accessors:
@@ -1734,14 +1775,23 @@ $agent
     ->setSessionId('user-abc-123')
     ->setSessionManager(new SessionManager($store));
 
+// On the next request a fresh instance picks up where you left off, as long as the
+// sessionId matches — chat() reads the context from the session, no need to pass messages back
+$agent->chat('Carry on from last time');
+```
+
+With `run()` (a single run where you supply the full messages), you fetch them back yourself:
+
+```php
 $agent->run($messages);
 
-// On the next request, resume the session
 $session = $store->load('user-abc-123');
 if ($session) {
-    $agent->run($session->getMessages());
+    $agent->run($session->getMessages());     // run() treats the session's messages as authoritative
 }
 ```
+
+> When a session exists, `run()` treats **the session's messages as authoritative** and the ones you pass in as an older copy of them. So don't use `run()` to append a new question — it would be overwritten, silently. Use [`chat()`](#chat-multi-turn-conversation) to append.
 
 Session state lifecycle: `running` → `paused` (waiting for approval) → `running` (resumed) → `completed` / `interrupted`.
 
@@ -2417,7 +2467,8 @@ $agent->setCheckpointDir('/tmp/checkpoints');
 $messages = $agent->recoverFromCrash('task_1');
 if ($messages !== null) {
     // Recovery succeeded, continue
-    $result = $agent->run($messages);
+    $agent->run($messages);
+    $text = $agent->lastText();          // run() returns void; the text comes from here
 } else {
     // No checkpoint available, start fresh
     $agent->run([['role' => 'user', 'content' => 'Please check the project']]);

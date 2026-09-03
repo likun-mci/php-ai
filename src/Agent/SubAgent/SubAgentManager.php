@@ -90,6 +90,9 @@ class SubAgentManager
     /** @var \Ai\Agent\Mcp\McpManager|null 父 Agent 的 MCP 管理器 */
     protected $parentMcp = null;
 
+    /** @var \Ai\Agent\Memory\MemoryManager|null 父 Agent 的记忆管理器（子 Agent 继承，避免跨用户污染） */
+    protected $parentMemory = null;
+
     /** @var string transcript 落盘目录，空则只留在内存 */
     protected $transcriptDir = '';
 
@@ -592,6 +595,22 @@ class SubAgentManager
     }
 
     /**
+     * 设置父 Agent 的记忆管理器
+     *
+     * 子 Agent 默认复用它：其 scope 文件已编码 userId / 项目身份，直接继承可
+     * 避免「父→user memory、子→global memory」的跨用户污染（见 dev.md 第二十一节）。
+     * def 显式指定 memoryDir 时以 def 为准。
+     *
+     * @param \Ai\Agent\Memory\MemoryManager|null $mm
+     * @return $this
+     */
+    public function setParentMemory($mm)
+    {
+        $this->parentMemory = $mm instanceof \Ai\Agent\Memory\MemoryManager ? $mm : null;
+        return $this;
+    }
+
+    /**
      * 解析子 Agent 实际可用的工具
      *
      * 三步收窄，每一步都只会让工具变少：
@@ -709,6 +728,9 @@ class SubAgentManager
         $memoryDir = $def->getMemoryDir();
         if ($memoryDir !== '') {
             $runtime->setMemoryManager(new \Ai\Agent\Memory\MemoryManager($memoryDir));
+        } elseif ($this->parentMemory !== null) {
+            // 继承父记忆：user/project/agent 长期记忆同源，隔离维度已在 scope 文件里
+            $runtime->setMemoryManager($this->parentMemory);
         }
 
         return $runtime;

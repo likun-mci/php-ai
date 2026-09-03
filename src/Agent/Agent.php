@@ -102,6 +102,33 @@ class Agent
     /** @var \Ai\Agent\Permission\PermissionPolicy|null 分层权限策略 */
     protected $permissionPolicy = null;
 
+    /** @var \Ai\Agent\Storage\AgentHome|null 存储布局中枢（惰性创建） */
+    protected $agentHome = null;
+
+    /** @var string 显式指定的 HOME 数据根（.agent 基址），空表示自动探测 */
+    protected $explicitAgentHome = '';
+
+    /** @var string 显式指定的项目根，空表示从 workdir 向上推导 */
+    protected $explicitProjectRoot = '';
+
+    /** @var string 用户标识（多租户场景必填，用于 user memory / session 隔离） */
+    protected $userId = '';
+
+    /** @var bool 惰性自动持久化开关（默认开，见 dev.md 3.3） */
+    protected $autoPersist = true;
+
+    /** @var bool 用户是否显式配置了 Memory（显式则跳过自动挂载，见 dev.md 3.2） */
+    protected $memoryConfigured = false;
+
+    /** @var bool 用户是否显式配置了 SessionManager（显式则跳过自动挂载） */
+    protected $sessionConfigured = false;
+
+    /** @var bool 自动挂载的 MemoryManager 是否由本类创建（是则每次按最终状态重连 scope） */
+    protected $autoMemoryMounted = false;
+
+    /** @var bool 自动记忆沉淀开关（默认关，见 dev.md 第十五节：自动写长期记忆风险高） */
+    protected $autoConsolidate = false;
+
     /**
      * @param AI $ai
      */
@@ -352,6 +379,7 @@ class Agent
     public function setWorkdir($workdir)
     {
         $this->runtime->setWorkdir($workdir);
+        $this->agentHome = null;  // 仅重置缓存，最终目录由最终状态在 ensurePersistence() 决定
         return $this;
     }
 
@@ -415,7 +443,232 @@ class Agent
     public function setSessionManager($sm)
     {
         $this->runtime->setSessionManager($sm);
+        $this->sessionConfigured = true;   // 显式配置，跳过自动挂载（见 dev.md 3.2）
         return $this;
+    }
+
+    /**
+     * 显式指定 HOME 数据根（.agent 基址），覆盖自动探测
+     *
+     * @param string $dir
+     * @return $this
+     */
+    public function setAgentHome($dir)
+    {
+        $this->explicitAgentHome = (string) $dir;
+        $this->agentHome = null;
+        return $this;
+    }
+
+    /**
+     * 显式指定项目根，固定项目身份（跨目录 resume 时推荐，见 dev.md 4.3）
+     *
+     * @param string $dir
+     * @return $this
+     */
+    public function setProjectRoot($dir)
+    {
+        $this->explicitProjectRoot = (string) $dir;
+        $this->agentHome = null;
+        return $this;
+    }
+
+    /**
+     * 设置用户标识——多租户 Web 应用的硬要求（见 dev.md 4.1）
+     *
+     * 设置后 user memory 与 session 按用户隔离；原始 userId 不进磁盘路径。
+     *
+     * @param string $userId
+     * @return $this
+     */
+    public function setUserId($userId)
+    {
+        $this->userId = (string) $userId;
+        $this->agentHome = null;
+        return $this;
+    }
+
+    /** @return string */
+    public function getUserId()
+    {
+        return $this->userId;
+    }
+
+    /**
+     * 开关惰性自动持久化（默认开）
+     *
+     * 关闭后回到旧的纯内存行为：仅 setSessionId() 不再产生磁盘数据。
+     *
+     * @param bool $enabled
+     * @return $this
+     */
+    public function autoPersist($enabled = true)
+    {
+        $this->autoPersist = (bool) $enabled;
+        return $this;
+    }
+
+    /**
+     * 存储布局中枢（惰性创建，按当前最终状态解析）
+     *
+     * @return \Ai\Agent\Storage\AgentHome
+     */
+    public function agentHome()
+    {
+        if ($this->agentHome === null) {
+            $opts = ['userId' => $this->userId];
+            if ($this->explicitAgentHome !== '') {
+                $opts['home'] = $this->explicitAgentHome;
+            }
+            if ($this->explicitProjectRoot !== '') {
+                $opts['projectRoot'] = $this->explicitProjectRoot;
+            }
+            $this->agentHome = new \Ai\Agent\Storage\AgentHome(
+                $this->runtime->getWorkdir(),
+                $opts
+            );
+        }
+        return $this->agentHome;
+    }
+
+    /**
+     * 生成一个新的会话 ID（128 bit 随机；不是授权凭证，见 dev.md 4.2）
+     *
+     * @return string
+     */
+    public static function newSessionId()
+    {
+        try {
+            return bin2hex(random_bytes(16));
+        } catch (\Exception $e) {
+            // random_bytes 在极端环境可能抛异常，退回一个仍不可猜的组合
+            return bin2hex(pack('NNNN', mt_rand(), mt_rand(), mt_rand(), getmypid()));
+        }
+    }
+
+    /**
+     * 确保持久化就绪——惰性挂载 Memory / Session（见 dev.md 3.1）
+     *
+     * 在 run() / chat() / currentSession() 等真正需要持久化的入口触发。
+     * 最终目录由**最终状态**决定，而不是 setter 调用顺序。只读入口不写盘，
+     * 但会把 scope→文件映射连好，读取仍走磁盘上已有的记忆。
+     *
+     * @return void
+     */
+    protected function ensurePersistence()
+    {
+        if (!$this->autoPersist || !$this->hasPersistenceSignal()) {
+            return;
+        }
+        $home = $this->agentHome();
+
+        // ===== Memory 自动挂载 =====
+        if (!$this->memoryConfigured) {
+            $mm = $this->runtime->getMemoryManager();
+            if ($mm === null) {
+                $mm = new \Ai\Agent\Memory\MemoryManager();
+                $this->runtime->setMemoryManager($mm);
+                $this->autoMemoryMounted = true;
+            }
+            if ($this->autoMemoryMounted) {
+                // 每次按最终状态重连 scope 文件（sessionId / userId 可能后设）
+                $this->wireMemoryScopes($mm, $home);
+            }
+        }
+
+        // ===== Session 自动挂载 =====
+        // 只有设置了 sessionId 才挂载——不替用户凭空造 session
+        $sid = $this->runtime->getSessionId();
+        if (!$this->sessionConfigured
+            && $this->runtime->getSessionManager() === null
+            && $sid !== null && $sid !== ''
+        ) {
+            $userId = $this->userId !== '' ? $this->userId : null;
+            $dir = $home->sessionDir($sid, $userId);
+            // 自动挂载用 JSONL 存储（append 成本 O(新增)，见 dev.md 5.2）；
+            // 挂载本身零副作用：目录在首次写入时惰性建（0700）
+            $inner = new \Ai\Agent\Session\JsonlSessionStore($dir);
+            $store = new \Ai\Agent\Session\OwnedSessionStore(
+                $inner,
+                $this->userId,
+                $home->projectSlug()
+            );
+            $this->runtime->setSessionManager(new \Ai\Agent\Session\SessionManager($store));
+        }
+    }
+
+    /**
+     * 有 MemoryManager 且是用工具的 Agent 时，注册 remember / forget 工具
+     *
+     * 幂等；无 MemoryManager 不注册（不注册必然失败的工具，见 dev.md 14.2）；
+     * registry 为空（纯对话、无工具的 Agent）也不注册，避免给它平白加工具。
+     * 写入的权限把关由 PermissionManager 负责（remember/forget 属写工具，manual 默认询问）。
+     *
+     * @return void
+     */
+    protected function registerMemoryTools()
+    {
+        $mm = $this->runtime->getMemoryManager();
+        if ($mm === null) {
+            return;
+        }
+        $registry = $this->runtime->getToolRegistry();
+        if (!$registry->all()) {
+            return;  // 无工具的 Agent 不平白加工具
+        }
+        if (!$registry->has('remember')) {
+            $registry->register(new \Ai\Agent\Tools\RememberTool($mm));
+        }
+        if (!$registry->has('forget')) {
+            $registry->register(new \Ai\Agent\Tools\ForgetTool($mm));
+        }
+    }
+
+    /**
+     * 是否存在持久化意图信号
+     *
+     * @return bool
+     */
+    protected function hasPersistenceSignal()
+    {
+        $sid = $this->runtime->getSessionId();
+        return ($sid !== null && $sid !== '')
+            || $this->userId !== ''
+            || $this->explicitAgentHome !== ''
+            || $this->explicitProjectRoot !== '';
+    }
+
+    /**
+     * 把 AgentHome 的布局连到 MemoryManager 的 scope→文件映射
+     *
+     * @param \Ai\Agent\Memory\MemoryManager $mm
+     * @param \Ai\Agent\Storage\AgentHome $home
+     * @return void
+     */
+    protected function wireMemoryScopes($mm, $home)
+    {
+        $files = [
+            'agent'   => $home->memoryPath('agent'),
+            'project' => $home->memoryPath('project'),
+        ];
+        if ($this->userId !== '') {
+            $up = $home->memoryPath('user');
+            if ($up !== '') {
+                $files['user'] = $up;
+            }
+        }
+        // session / task 需要 sessionId
+        $sid = $this->runtime->getSessionId();
+        if ($sid !== null && $sid !== '') {
+            $userId = $this->userId !== '' ? $this->userId : null;
+            $dir = $home->sessionDir($sid, $userId);
+            $safe = \Ai\Helpers\Path::safeName($sid);
+            $files['session'] = $dir . '/' . $safe . '.memory.md';
+            $files['task']    = $dir . '/' . $safe . '.task.md';
+        }
+        $mm->setScopeFiles($files);
+        // project 读取合并主 + HOME 回退（见 dev.md 10.4）
+        $mm->setScopeReadPaths('project', $home->memoryReadPaths('project'));
     }
 
     /**
@@ -1437,6 +1690,41 @@ class Agent
     }
 
     /**
+     * 开关自动记忆沉淀（默认关，见 dev.md 第十五节）
+     *
+     * 开启后每次 run() / chat() 完成会从结果提炼候选、去重后批量写入长期记忆。
+     * 默认关闭：自动写长期记忆比自动保存会话风险高得多——模型可主动 remember
+     * 明确要记的内容，但从每次结果里自动提炼必须由用户显式选择开启。
+     *
+     * @param bool $enabled
+     * @return $this
+     */
+    public function autoConsolidate($enabled = true)
+    {
+        $this->autoConsolidate = (bool) $enabled;
+        return $this;
+    }
+
+    /**
+     * 若开启自动沉淀：从本次结果提炼候选并写入长期记忆
+     *
+     * @param mixed $result AgentResult
+     * @return void
+     */
+    protected function maybeConsolidate($result)
+    {
+        if (!$this->autoConsolidate) {
+            return;
+        }
+        $consolidator = $this->memoryConsolidator();
+        if ($consolidator === null) {
+            return;
+        }
+        $consolidator->proposeFromResult($result);
+        $consolidator->consolidate();
+    }
+
+    /**
      * 组建一个多角色 Agent 团队
      *
      * 团队成员共享 Agent 当前的工具与工作目录，各自持有独立上下文。
@@ -1779,6 +2067,8 @@ class Agent
     public function setMemoryManager($mm)
     {
         $this->runtime->setMemoryManager($mm);
+        $this->memoryConfigured = true;   // 显式配置，跳过自动挂载（见 dev.md 3.2）
+        $this->autoMemoryMounted = false;
         return $this;
     }
 
@@ -1794,6 +2084,8 @@ class Agent
     {
         $mm = new \Ai\Agent\Memory\MemoryManager((string) $baseDir);
         $this->runtime->setMemoryManager($mm);
+        $this->memoryConfigured = true;   // 显式配置，跳过自动挂载
+        $this->autoMemoryMounted = false;
         return $this;
     }
 
@@ -1946,6 +2238,8 @@ class Agent
      */
     public function chat($input = '')
     {
+        $this->ensurePersistence();
+        $this->registerMemoryTools();
         $messages = \Ai\Agent\Context\Conversation::append(
             $this->getConversation(),
             \Ai\Agent\Context\Conversation::normalize($input)
@@ -1974,6 +2268,8 @@ class Agent
             && isset($extra['request_id']) && $extra['request_id'] !== ''
                 ? (string) $extra['request_id']
                 : null;
+
+        $this->maybeConsolidate($result);
 
         return $result;
     }
@@ -2087,6 +2383,7 @@ class Agent
      */
     protected function currentSession()
     {
+        $this->ensurePersistence();
         $sm = $this->runtime->getSessionManager();
         $id = $this->runtime->getSessionId();
         if ($sm === null || $id === null || $id === '') {
@@ -2103,6 +2400,7 @@ class Agent
      */
     protected function writeSessionMessages(array $messages)
     {
+        $this->ensurePersistence();
         $sm = $this->runtime->getSessionManager();
         $id = $this->runtime->getSessionId();
         if ($sm === null || $id === null || $id === '') {
@@ -2127,6 +2425,8 @@ class Agent
      */
     public function run(array $messages)
     {
+        $this->ensurePersistence();
+        $this->registerMemoryTools();
         // 委派次数上限是**每次运行**的预算，不是这个 Agent 对象一辈子的额度。
         // 不重置的话，同一个实例跑第二个任务时额度已经被上一个任务花光了
         if ($this->delegateTool !== null) {
@@ -2139,6 +2439,7 @@ class Agent
         // 保持 lastText 兼容
         $this->lastText = $result->getText();
         $this->rememberMessages($messages);
+        $this->maybeConsolidate($result);
     }
 
     /**

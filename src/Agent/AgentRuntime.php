@@ -457,6 +457,8 @@ class AgentRuntime
         // 叫停父 Agent 也该把它派出去的活儿一起停掉
         $sam->setParentBudget($this->budget);
         $sam->setParentCancellation($this->cancellation);
+        // 记忆继承：见 dev.md 第二十一节（避免子 Agent 跨用户污染）
+        $sam->setParentMemory($this->memoryManager);
         return $this;
     }
 
@@ -867,6 +869,12 @@ class AgentRuntime
     public function setMemoryManager($mm)
     {
         $this->memoryManager = $mm;
+        // 记忆继承：子 Agent 复用父的记忆管理器，其 scope 文件已编码 userId /
+        // 项目身份，避免「父→user memory、子→global memory」的跨用户污染
+        // （见 dev.md 第二十一节）
+        if ($this->subAgentManager !== null) {
+            $this->subAgentManager->setParentMemory($mm);
+        }
         return $this;
     }
 

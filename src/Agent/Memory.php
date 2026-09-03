@@ -31,8 +31,10 @@ class Memory
     /**
      * @param mixed $file 记忆文件绝对路径
      * @param int $maxInject 注入对话时的最大字符数（防止 token 膨胀）
+     *
+     * 默认 10000，与 MemoryManager 统一（见 dev.md 第十七节：所有 Memory 实例一致）。
      */
-    public function __construct($file, $maxInject = 20000)
+    public function __construct($file, $maxInject = 10000)
     {
         $this->file = (string) $file;
         $this->maxInject = (int) $maxInject;

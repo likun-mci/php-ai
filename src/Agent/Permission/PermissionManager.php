@@ -58,6 +58,9 @@ class PermissionManager
     /** @var string[] 需要询问的危险工具 */
     protected static $dangerousTools = ['bash', 'delete_file', 'rm', 'exec'];
 
+    /** @var string[] 持久写工具：非文件编辑但有持久副作用，manual 模式默认询问（如记忆写入，见 dev.md 14.2） */
+    protected static $writeTools = ['remember', 'forget'];
+
     /** @var array<string, PermissionRequest> 待处理的权限请求 */
     protected $requests = [];
 
@@ -207,7 +210,8 @@ class PermissionManager
                 if (in_array($toolName, self::$readOnlyTools, true)) {
                     return PermissionResult::allow();
                 }
-                if (in_array($toolName, self::$dangerousTools, true)) {
+                if (in_array($toolName, self::$dangerousTools, true)
+                    || in_array($toolName, self::$writeTools, true)) {
                     return $this->createRequest($toolName, $input);
                 }
                 return PermissionResult::allow();

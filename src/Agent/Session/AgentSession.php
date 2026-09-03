@@ -48,6 +48,12 @@ class AgentSession
     /** @var string|null */
     protected $pendingPermissionId = null;
 
+    /** @var string 会话归属用户（原始 userId，用于 ownership 校验；空表示未绑定） */
+    protected $userId = '';
+
+    /** @var string 会话归属项目身份（项目 slug，用于 ownership 校验；空表示未绑定） */
+    protected $projectId = '';
+
     /**
      * @param string $id
      * @param array<string, mixed> $data
@@ -67,6 +73,8 @@ class AgentSession
         $this->stopReason = isset($data['stop_reason']) ? (string) $data['stop_reason'] : '';
         $this->budgetState    = isset($data['budget_state']) && is_array($data['budget_state']) ? $data['budget_state'] : [];
         $this->pendingPermissionId = isset($data['pending_permission_id']) ? (string) $data['pending_permission_id'] : null;
+        $this->userId    = isset($data['user_id']) ? (string) $data['user_id'] : '';
+        $this->projectId = isset($data['project_id']) ? (string) $data['project_id'] : '';
     }
 
     /** @return string */
@@ -87,6 +95,52 @@ class AgentSession
     public function getWorkdir() { return $this->workdir; }
     /** @return array<string, mixed> */
     public function getExtra() { return $this->extra; }
+    /** @return string */
+    public function getUserId() { return $this->userId; }
+    /** @return string */
+    public function getProjectId() { return $this->projectId; }
+
+    /**
+     * @param string $system
+     * @return $this
+     */
+    public function setSystem($system) { $this->system = (string) $system; $this->touch(); return $this; }
+    /**
+     * @param array<string, mixed> $extra
+     * @return $this
+     */
+    public function setExtra(array $extra) { $this->extra = $extra; $this->touch(); return $this; }
+    /**
+     * @param string $userId
+     * @return $this
+     */
+    public function setUserId($userId) { $this->userId = (string) $userId; $this->touch(); return $this; }
+    /**
+     * @param string $projectId
+     * @return $this
+     */
+    public function setProjectId($projectId) { $this->projectId = (string) $projectId; $this->touch(); return $this; }
+
+    /**
+     * ownership 校验：当前 userId / project 身份是否与本会话记录一致
+     *
+     * 会话未绑定该维度（空字符串）时对该维度不设限——路径隔离已是主防线，
+     * 本校验是深度防御（见 dev.md 4.3 第三层）。路径正确不代替授权校验。
+     *
+     * @param string $userId 当前 userId
+     * @param string $projectId 当前项目身份（slug）
+     * @return bool
+     */
+    public function belongsTo($userId, $projectId)
+    {
+        if ($this->userId !== '' && $this->userId !== (string) $userId) {
+            return false;
+        }
+        if ($this->projectId !== '' && $this->projectId !== (string) $projectId) {
+            return false;
+        }
+        return true;
+    }
 
     /**
      * @param array<int, array<string, mixed>> $messages
@@ -176,6 +230,8 @@ class AgentSession
             'stop_reason' => $this->stopReason,
             'budget_state' => $this->budgetState,
             'pending_permission_id' => $this->pendingPermissionId,
+            'user_id'    => $this->userId,
+            'project_id' => $this->projectId,
         ];
     }
 

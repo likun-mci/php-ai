@@ -696,13 +696,12 @@ class LoopController
                             $systemPrompt .= "\n\n" . $instPrompt;
                         }
                     }
-                    // 长期记忆注入：有任务目标时只注入相关记忆，否则注入全部
+                    // 长期记忆注入：长期 scope 常驻、短期 scope 按目标相关性（见 dev.md 第十七节）。
+                    // 仅当模型真有删除能力（注册了 remember/forget 工具）时才带 (#id)（见 dev.md 14.3）。
                     $mm = $context->getMemoryManager();
                     if ($mm && $mm->isEnabled()) {
-                        $goal = $context->getGoal();
-                        $memPrompt = $goal !== ''
-                            ? $mm->forPromptRelevant($goal)
-                            : $mm->forPrompt();
+                        $withId = $registry->get('remember') !== null || $registry->get('forget') !== null;
+                        $memPrompt = $mm->forInjection($context->getGoal(), $withId);
                         if ($memPrompt !== '') {
                             $systemPrompt .= "\n\n" . $memPrompt;
                         }

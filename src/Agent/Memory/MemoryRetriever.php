@@ -178,7 +178,7 @@ class MemoryRetriever
      * 空行与 markdown 标题行被跳过——标题是分节标记，不是记忆内容本身。
      *
      * @param string[] $scopes 空数组表示全部作用域
-     * @return array<int, array{scope: string, line: int, text: string, score: float}>
+     * @return array<int, array{scope: string, line: int, id: string, date: string, text: string, raw: string, score: float}>
      */
     public function entries(array $scopes = [])
     {
@@ -195,19 +195,60 @@ class MemoryRetriever
             }
             $lines = preg_split('/\r?\n/', $content);
             foreach ($lines === false ? [] : $lines as $no => $line) {
-                $text = trim($line);
-                if ($text === '' || strpos($text, '#') === 0) {
-                    continue;
+                $raw = trim($line);
+                if ($raw === '' || strpos($raw, '#') === 0) {
+                    continue;  // 空行 / markdown 标题（# 开头）跳过
                 }
+                $parsed = $this->parseEntry($raw);
                 $entries[] = [
                     'scope' => $scope,
                     'line'  => $no + 1,
-                    'text'  => $text,
+                    'id'    => $parsed['id'],
+                    'date'  => $parsed['date'],
+                    'text'  => $parsed['text'],
+                    'raw'   => $raw,
                     'score' => 0.0,
                 ];
             }
         }
         return $entries;
+    }
+
+    /**
+     * 解析一条记忆行的三段结构：`- [date] (#id) text`
+     *
+     * 三段都可缺省，向后兼容：旧的无前缀行整行即文本（打分不受影响，见 dev.md 14.3）。
+     * 打分只用 `text`，不让 6 位 hex 的 id 干扰中日韩二元组匹配。
+     *
+     * @param string $raw 已 trim 的整行
+     * @return array{id: string, date: string, text: string}
+     */
+    protected function parseEntry($raw)
+    {
+        $rest = $raw;
+        // 可选 bullet
+        if (preg_match('/^-\s+/', $rest, $bm)) {
+            $rest = substr($rest, strlen($bm[0]));
+        }
+        $id = '';
+        $date = '';
+        $matched = false;
+        if (preg_match('/^\[(\d{4}-\d{2}-\d{2})\]\s*/', $rest, $dm)) {
+            $date = $dm[1];
+            $rest = substr($rest, strlen($dm[0]));
+            $matched = true;
+        }
+        if (preg_match('/^\(#([0-9a-fA-F]{4,12})\)\s*/', $rest, $im)) {
+            $id = strtolower($im[1]);
+            $rest = substr($rest, strlen($im[0]));
+            $matched = true;
+        }
+        // 没有任何日期/id 前缀 → 整行即文本（保持旧打分行为）
+        return [
+            'id'   => $id,
+            'date' => $date,
+            'text' => $matched ? trim($rest) : $raw,
+        ];
     }
 
     /**
@@ -232,7 +273,8 @@ class MemoryRetriever
         $kept = array_slice($entries, $total - $keep);
         $lines = [];
         foreach ($kept as $entry) {
-            $lines[] = $entry['text'];
+            // 原样保留 `- [date] (#id) ` 前缀，不重新序列化成裸文本（见 dev.md 14.3）
+            $lines[] = $entry['raw'];
         }
         $this->manager->write((string) $scope, implode("\n", $lines));
         return $total - $keep;
@@ -260,12 +302,14 @@ class MemoryRetriever
         $kept = [];
         $removed = 0;
         foreach ($entries as $entry) {
-            $ts = $this->extractDate($entry['text']);
+            // 优先用解析出的 date 段（新格式日期在前缀里，已从 text 剥离）；
+            // 无 date 段再回退到从 raw 里抽取，兼容旧的裸日期行
+            $ts = $entry['date'] !== '' ? $this->dateToTs($entry['date']) : $this->extractDate($entry['raw']);
             if ($ts !== null && $ts < $cutoff) {
                 $removed++;
                 continue;
             }
-            $kept[] = $entry['text'];
+            $kept[] = $entry['raw'];  // 原样保留前缀
         }
 
         if ($removed > 0) {
@@ -416,6 +460,21 @@ class MemoryRetriever
     protected function extractDate($text)
     {
         if (!preg_match('/^\[?(\d{4})-(\d{2})-(\d{2})\]?/', trim((string) $text), $m)) {
+            return null;
+        }
+        $ts = mktime(0, 0, 0, (int) $m[2], (int) $m[3], (int) $m[1]);
+        return $ts === false ? null : $ts;
+    }
+
+    /**
+     * 把 YYYY-MM-DD 转 Unix 时间戳，非法返回 null
+     *
+     * @param string $date
+     * @return int|null
+     */
+    protected function dateToTs($date)
+    {
+        if (!preg_match('/^(\d{4})-(\d{2})-(\d{2})$/', (string) $date, $m)) {
             return null;
         }
         $ts = mktime(0, 0, 0, (int) $m[2], (int) $m[3], (int) $m[1]);

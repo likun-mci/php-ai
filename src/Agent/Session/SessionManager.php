@@ -138,7 +138,13 @@ class SessionManager
             ]);
         } else {
             $session->setMessages($messages);
-            $extra['system'] = $system;
+            // 修复：既有会话此前 system/extra 未被真正写回（见 dev.md 第二十节）
+            if ($system !== '') {
+                $session->setSystem($system);
+            }
+            if ($extra) {
+                $session->setExtra($extra);
+            }
         }
         $this->store->save($session);
     }

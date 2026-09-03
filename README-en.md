@@ -1885,6 +1885,31 @@ $result->getFilesChanged();  // which files were touched
 $result->toContract();       // full structured result, ready to return as JSON
 ```
 
+### Retrying transient model failures
+
+The transport layer retries 408 / 429 / 5xx but not 4xx — generally correct, since a 400 usually means the request itself is malformed and resending changes nothing.
+
+Field testing found an exception: third-party gateways that wrap other vendors' models behind an Anthropic-compatible API return 400 **intermittently**. The same byte-identical request sent four times succeeded three times and failed once with `400 Format Error`. Over a 25-iteration task that probability becomes a certainty — at a 1-in-4 per-call failure rate a full run is almost guaranteed to die partway through, taking all prior work with it.
+
+So the loop adds its own retry around the model call (2 attempts by default, exponential backoff):
+
+```php
+$agent->getRuntime()->getLoop()->setModelRetries(3, 500);   // 3 retries, 500ms initial backoff
+$agent->getRuntime()->getLoop()->setModelRetries(0);        // off
+```
+
+This retries the **same model** (for transient gateway faults), a different job from `setFallbackModels()` — that one switches models only after retries are exhausted (for a model that is genuinely unavailable). Auth failures and missing models (401 / 403 / 404 / 413) give up immediately, since retrying only wastes time. Every retry emits a `model_retry` event.
+
+If the retries are exhausted anyway, the result carries **the last model text** rather than an empty string — a model call failing on iteration N should not erase what iterations 1..N-1 actually did:
+
+```php
+if ($result->getStopReason() === 'model_error') {
+    echo $result->getText();                         // what it said before dying
+    echo $result->getExtra()['error'];               // why it died
+    echo implode(',', $result->getFilesChanged());   // which files it already changed
+}
+```
+
 ### Cancellation: making the Agent stoppable
 
 In production a task has to be stoppable mid-flight: the user hit stop, the browser went away, the task ran too long. `CancellationToken` lets the loop bow out at **safe points**:

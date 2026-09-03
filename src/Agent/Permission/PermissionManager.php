@@ -93,9 +93,18 @@ class PermissionManager
     {
         $valid = [self::MODE_MANUAL, self::MODE_AUTO, self::MODE_PLAN,
                   self::MODE_ACCEPT_EDITS, self::MODE_DONT_ASK, self::MODE_BYPASS];
-        if (in_array($mode, $valid, true)) {
-            $this->mode = $mode;
+        if (!in_array($mode, $valid, true)) {
+            // 原先是静默忽略：写错一个模式名（`acceptAll`、`acceptEdits`、
+            // `bypassPermissions` 都是很自然的猜法），权限悄悄停在 manual，
+            // Agent 一路跑到第一个 bash 调用才卡住等授权。到那时已经花掉一次
+            // 完整的模型往返，而且现场没有任何线索指向「模式名写错了」。
+            // 装配期的错误就该在装配期炸出来。
+            throw new \InvalidArgumentException(
+                '未知的权限模式 "' . (is_scalar($mode) ? (string) $mode : gettype($mode))
+                . '"，可选：' . implode(' / ', $valid)
+            );
         }
+        $this->mode = $mode;
         return $this;
     }
 

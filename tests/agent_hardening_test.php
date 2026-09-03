@@ -214,5 +214,107 @@ $withErrors = $criteria->evaluate([
 ]);
 ok(!$withErrors['completed'], '最近工具结果报错时不算完成');
 
+// ============================================================
+echo "\n=== 五、实测暴露的三处（用真实网关跑出来的） ===\n";
+// ============================================================
+
+// 5.1 模型调用瞬时失败要重试
+//     背景：同一份字节完全相同的请求连发四次，三次成功一次 400 Format Error。
+//     传输层不重试 4xx（一般是对的），于是一次偶发 400 杀掉整轮 Agent。
+class FlakyAI extends \Ai\AI
+{
+    public $failTimes = 1;
+    public $calls = 0;
+    public $failWith = 'HTTP Error: 400: Format Error';
+
+    public function chat($payload = ''): \Ai\Contracts\AIResponseInterface
+    {
+        $this->calls++;
+        if ($this->calls <= $this->failTimes) {
+            throw new \Ai\Exceptions\AIException($this->failWith, 'test', '400');
+        }
+        return new \Ai\Response\AIResponse(['content' => '干完了']);
+    }
+}
+
+$flaky = new FlakyAI(['api_key' => 'test', 'platform' => 'openai']);
+$rt = new AgentRuntime($flaky);
+$rt->getLoop()->setModelRetries(2, 1);   // 退避 1ms，别让测试白等
+$res = $rt->run([['role' => 'user', 'content' => '干活']]);
+eq('end_turn', $res->getStopReason(), '偶发 400 重试后跑通（原先整轮暴毙）');
+eq('干完了', $res->getText(), '拿到正常结果');
+eq(2, $flaky->calls, '重试了一次就成功，没有多试');
+
+// 重试用尽仍失败 → 收尾，但不能无限试
+$flaky2 = new FlakyAI(['api_key' => 'test', 'platform' => 'openai']);
+$flaky2->failTimes = 99;
+$rt2 = new AgentRuntime($flaky2);
+$rt2->getLoop()->setModelRetries(2, 1);
+$res2 = $rt2->run([['role' => 'user', 'content' => '干活']]);
+eq('model_error', $res2->getStopReason(), '重试用尽后如实报 model_error');
+eq(3, $flaky2->calls, '总共只试 1+2 次，不无限重试');
+
+// 鉴权失败不该重试——重试只是白等
+$auth = new FlakyAI(['api_key' => 'test', 'platform' => 'openai']);
+$auth->failTimes = 99;
+$auth->failWith = 'HTTP Error: 401: Unauthorized';
+$rt3 = new AgentRuntime($auth);
+$rt3->getLoop()->setModelRetries(3, 1);
+$rt3->run([['role' => 'user', 'content' => '干活']]);
+eq(1, $auth->calls, '401 立即放弃，不做无谓重试');
+
+// 关掉重试时行为与从前一致
+$off = new FlakyAI(['api_key' => 'test', 'platform' => 'openai']);
+$off->failTimes = 99;
+$rtOff = new AgentRuntime($off);
+$rtOff->getLoop()->setModelRetries(0);
+$rtOff->run([['role' => 'user', 'content' => '干活']]);
+eq(1, $off->calls, 'setModelRetries(0) 时只调一次');
+
+// 5.2 模型调用失败不能把已有成果一起丢
+//     实测最坏的一种：文件已改好、测试已跑过，最后一次调用撞上偶发 400，
+//     调用方拿到空字符串，只能判定任务失败。
+class LateFailAI extends \Ai\AI
+{
+    public $calls = 0;
+    public function chat($payload = ''): \Ai\Contracts\AIResponseInterface
+    {
+        $this->calls++;
+        if ($this->calls === 1) {
+            return new \Ai\Response\AIResponse([
+                'content'    => '我已经把 Cart.php 改好并跑通了测试',
+                'tool_calls' => [['id' => 'c1', 'name' => 'noop', 'input' => []]],
+            ]);
+        }
+        throw new \Ai\Exceptions\AIException('HTTP Error: 400: Format Error', 'test', '400');
+    }
+}
+
+$late = new LateFailAI(['api_key' => 'test', 'platform' => 'openai']);
+$rt4 = new AgentRuntime($late);
+$rt4->getLoop()->setModelRetries(0);
+$rt4->setTools(['noop' => ['description' => 'x', 'handler' => function () { return 'ok'; }]]);
+$res4 = $rt4->run([['role' => 'user', 'content' => '修 Bug']]);
+
+eq('model_error', $res4->getStopReason(), '如实报模型错误');
+ok($res4->getText() !== '', '最后一段文本没有跟着一起丢（原先是空串）');
+ok(strpos($res4->getText(), 'Cart.php') !== false, '调用方看得到已经做过什么');
+ok(isset($res4->getExtra()['error']), '错误原因也在');
+
+// 5.3 权限模式名写错要当场炸，不要静默忽略
+$pmgr = new \Ai\Agent\Permission\PermissionManager();
+$threw = false;
+try {
+    $pmgr->setMode('acceptAll');       // 很自然的猜法，但不是合法值
+} catch (\InvalidArgumentException $e) {
+    $threw = true;
+    ok(strpos($e->getMessage(), 'bypass') !== false, '异常里列出可选值');
+}
+ok($threw, '非法权限模式当场抛异常（原先静默忽略，跑到第一个 bash 才卡住）');
+eq('manual', $pmgr->getMode(), '抛异常后模式保持不变');
+
+$pmgr->setMode('bypass');
+eq('bypass', $pmgr->getMode(), '合法模式正常设置');
+
 echo "\n=== 结果: {$pass} 通过, {$fail} 失败 ===\n";
 exit($fail > 0 ? 1 : 0);

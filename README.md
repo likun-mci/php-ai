@@ -1895,6 +1895,31 @@ $result->getFilesChanged();  // 动过哪些文件
 $result->toContract();       // 完整结构化结果，可直接 JSON 返回
 ```
 
+### 模型调用的瞬时失败重试
+
+传输层会重试 408 / 429 / 5xx，但不重试 4xx——一般来说这是对的，400 通常意味着请求本身有问题，重发多少次都一样。
+
+实测发现这条规则有例外：把别家模型包装成 Anthropic 兼容接口的第三方网关会**偶发**吐 400。同一份字节完全相同的请求连发四次，三次成功、一次 `400 Format Error`。这个概率放到 25 轮的任务上就是必然事件——单次 1/4 的失败率，跑完一整轮几乎注定中途暴毙，而且前面所有工作一起丢。
+
+所以循环层对模型调用另做一层重试（默认 2 次，指数退避）：
+
+```php
+$agent->getRuntime()->getLoop()->setModelRetries(3, 500);   // 重试 3 次，首次退避 500ms
+$agent->getRuntime()->getLoop()->setModelRetries(0);        // 关掉
+```
+
+它重试的是**同一个模型**（治网关瞬时故障），与 `setFallbackModels()` 分工不同——后者是重试完还不行才换模型（治模型本身不可用）。鉴权失败、模型不存在（401 / 403 / 404 / 413）立即放弃，重试只是白等。每次重试都发 `model_retry` 事件。
+
+万一重试用尽仍然失败，结果里会**带上最后一段模型文本**而不是空字符串——模型调用挂在第 N 轮，前 N-1 轮真做过的事不该跟着一起丢：
+
+```php
+if ($result->getStopReason() === 'model_error') {
+    echo $result->getText();                         // 挂掉之前它说过什么
+    echo $result->getExtra()['error'];               // 为什么挂
+    echo implode(',', $result->getFilesChanged());   // 已经改了哪些文件
+}
+```
+
 ### 取消：让 Agent 停得下来
 
 生产环境里任务需要能中途停下：用户按了停止、浏览器断开、任务超时。`CancellationToken` 让循环在**安全点**收手：

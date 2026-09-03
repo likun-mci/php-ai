@@ -65,6 +65,12 @@ class LoopController
     /** @var int 本次 run 已经做过几轮反思（与循环迭代号是两回事） */
     protected $reflectionRounds = 0;
 
+    /** @var int 模型调用瞬时失败的重试次数（同一个模型，治网关偶发故障） */
+    protected $modelRetries = 2;
+
+    /** @var int 重试首次退避毫秒数，之后指数增长 */
+    protected $modelRetryBaseMs = 400;
+
     /**
      * @param int $maxIter 最大迭代次数
      */
@@ -381,6 +387,92 @@ class LoopController
     }
 
     /**
+     * 调一次模型，瞬时失败就重试
+     *
+     * 传输层已经重试 408/429/5xx，但**不重试 4xx**——一般来说这是对的，
+     * 400 通常意味着请求本身有问题，重发多少次都一样。
+     *
+     * 可是实测打脸：同一份**字节完全相同**的请求连发四次，三次成功一次
+     * `400 Format Error`。一些第三方网关（尤其是把别家模型包装成 Anthropic
+     * 兼容接口的那种）会偶发地吐 400。这个概率放到 25 轮的任务上就是必然事件：
+     * 单次 1/4 的失败率，跑完一整轮几乎注定中途暴毙，而且前面所有工作一起丢。
+     *
+     * 一次 Agent 运行的代价远高于一次多余的模型调用，所以这里对**任何**模型错误
+     * 都退避重试几次。只有明确不可能靠重试解决的（鉴权失败、模型不存在）立刻放弃——
+     * 那些重试只是白等。
+     *
+     * 与 `fallbackModels` 的分工：这里重试**同一个模型**（治瞬时故障），
+     * 重试完还不行才换降级模型（治模型本身不可用）。
+     *
+     * @param \Ai\AI $ai
+     * @param array<string, mixed> $params
+     * @param AgentContext $context
+     * @return \Ai\Contracts\AIResponseInterface
+     * @throws \Throwable 重试用尽后抛出最后一次的异常
+     */
+    protected function chatWithRetry($ai, array $params, AgentContext $context)
+    {
+        $attempt = 0;
+        while (true) {
+            try {
+                return $ai->chat($params);
+            } catch (\Throwable $e) {
+                $attempt++;
+                if ($attempt > $this->modelRetries || !$this->isRetryableModelError($e)) {
+                    throw $e;
+                }
+                $delayMs = $this->modelRetryBaseMs * (1 << ($attempt - 1));
+                $context->emit('model_retry', [
+                    'attempt'  => $attempt,
+                    'delay_ms' => $delayMs,
+                    'error'    => $e->getMessage(),
+                ]);
+                usleep($delayMs * 1000);
+            }
+        }
+    }
+
+    /**
+     * 这个模型错误值得重试吗
+     *
+     * 默认「除非明显没救，否则都试」。反过来做（只重试白名单里的错误）在实践中
+     * 会漏掉一堆网关自造的错误码——各家网关的错误文案五花八门，穷举不完。
+     *
+     * @param \Throwable $e
+     * @return bool
+     */
+    protected function isRetryableModelError($e)
+    {
+        $code = '';
+        if ($e instanceof \Ai\Exceptions\AIException) {
+            $code = (string) $e->getErrorCode();
+        }
+        $message = $e->getMessage();
+
+        // 鉴权、权限、模型不存在、请求实体过大——重试只是白等
+        foreach (['401', '403', '404', '413'] as $c) {
+            if ($code === $c || strpos($message, 'HTTP Error: ' . $c) !== false) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    /**
+     * 设置模型调用的瞬时失败重试次数
+     *
+     * @param int $times 0 表示不重试
+     * @param int $baseMs 首次退避毫秒数，之后指数增长
+     * @return $this
+     */
+    public function setModelRetries($times, $baseMs = 400)
+    {
+        $this->modelRetries = max(0, (int) $times);
+        $this->modelRetryBaseMs = max(0, (int) $baseMs);
+        return $this;
+    }
+
+    /**
      * 压缩时必须原样留住的状态
      *
      * 压缩靠模型摘要，而摘要是会漏的——尤其是长任务压到第三、第四次之后，
@@ -630,7 +722,7 @@ class LoopController
                     if ($hooks && $hooks->hasBeforeModel()) {
                         $modelParams = $hooks->triggerBeforeModel($modelParams);
                     }
-                    $resp = $ai->chat($modelParams);
+                    $resp = $this->chatWithRetry($ai, $modelParams, $context);
                     // after_model 钩子
                     if ($hooks && $hooks->hasAfterModel()) {
                         $resp = $hooks->triggerAfterModel($resp);
@@ -643,7 +735,10 @@ class LoopController
             }
             if ($resp === null) {
                 $context->emit('error', ['message' => $modelError ? $modelError->getMessage() : '模型调用失败']);
-                return AgentResult::stopped(StopReason::MODEL_ERROR, '', [
+                // 带上最后一段文本：模型调用挂在第 N 轮，前 N-1 轮真做过的事不该跟着一起丢。
+                // 实测里见过最坏的一种——文件已经改好、测试已经跑过，最后一次调用撞上
+                // 服务端偶发 400，调用方拿到的却是空字符串，只能判定任务失败
+                return AgentResult::stopped(StopReason::MODEL_ERROR, $context->getLastText(), [
                     'error' => $modelError ? $modelError->getMessage() : '模型调用失败',
                     'iterations' => $iter,
                 ]);

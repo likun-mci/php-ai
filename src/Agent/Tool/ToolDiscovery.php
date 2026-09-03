@@ -23,8 +23,11 @@ namespace Ai\Agent\Tool;
  */
 class ToolDiscovery
 {
-    /** @var ToolRegistry 全部工具都在这里 */
+    /** @var ToolRegistry 运行时注册表（工具实际从这里被执行） */
     protected $registry;
+
+    /** @var array<string, mixed> 全量工具目录（构造时快照，不随注册表被裁而变） */
+    protected $catalog = [];
 
     /** @var string[] 一开始就给模型的工具 */
     protected $alwaysAvailable = [];
@@ -45,6 +48,11 @@ class ToolDiscovery
     public function __construct(ToolRegistry $registry, array $options = [])
     {
         $this->registry = $registry;
+        // 建的时候把整份目录**快照**下来。原先 search()/activate() 直接查
+        // $this->registry，而装配流程紧接着就把那个注册表裁到只剩常用工具——
+        // 于是它只能在「已经给了模型的那几个」里搜，搜出来的自然全是已启用的，
+        // 渐进披露整个失效。目录得独立于运行时注册表存在
+        $this->catalog = $registry->all();
         if (isset($options['alwaysAvailable']) && is_array($options['alwaysAvailable'])) {
             $this->alwaysAvailable = array_values(array_map('strval', $options['alwaysAvailable']));
         }
@@ -87,7 +95,7 @@ class ToolDiscovery
     {
         $tools = [];
         foreach ($this->alwaysAvailable as $name) {
-            $tool = $this->registry->get($name);
+            $tool = $this->lookup($name);
             if ($tool !== null && $this->allowedByGroup($name)) {
                 $tools[$name] = $tool;
             }
@@ -105,7 +113,7 @@ class ToolDiscovery
     {
         $tools = $this->initialTools();
         foreach (array_keys($this->activated) as $name) {
-            $tool = $this->registry->get($name);
+            $tool = $this->lookup($name);
             if ($tool !== null && $this->allowedByGroup($name)) {
                 $tools[$name] = $tool;
             }
@@ -127,13 +135,17 @@ class ToolDiscovery
         }
 
         $scored = [];
-        foreach ($this->registry->all() as $name => $tool) {
+        foreach ($this->catalog as $name => $tool) {
             $name = (string) $name;
             if ($name === 'search_tools' || !$this->allowedByGroup($name)) {
                 continue;
             }
 
-            $description = method_exists($tool, 'description') ? (string) $tool->description() : '';
+            // 目录里存的是工具对象，但 registerAll 也接受旧格式的数组定义，
+            // 先确认是对象再调方法
+            $description = is_object($tool) && method_exists($tool, 'description')
+                ? (string) $tool->description()
+                : '';
             $haystack = $this->normalize($name . ' ' . $description);
 
             $score = 0.0;
@@ -171,7 +183,7 @@ class ToolDiscovery
     public function activate($name)
     {
         $name = (string) $name;
-        if ($this->registry->get($name) === null || !$this->allowedByGroup($name)) {
+        if ($this->lookup($name) === null || !$this->allowedByGroup($name)) {
             return false;
         }
         $this->activated[$name] = true;
@@ -240,6 +252,48 @@ class ToolDiscovery
                 return implode("\n", $lines);
             },
         ];
+    }
+
+    /**
+     * 从目录里取工具，取不到再退回运行时注册表
+     *
+     * 退回这一步留给「建好 discovery 之后又注册进来的工具」——MCP 工具就是
+     * 连上服务器才知道有哪些。
+     *
+     * @param string $name
+     * @return mixed|null
+     */
+    protected function lookup($name)
+    {
+        $name = (string) $name;
+        if (isset($this->catalog[$name])) {
+            return $this->catalog[$name];
+        }
+        return $this->registry->get($name);
+    }
+
+    /**
+     * 把新工具补进目录（运行时才接进来的，如 MCP）
+     *
+     * @param array<string, mixed> $tools
+     * @return $this
+     */
+    public function addToCatalog(array $tools)
+    {
+        foreach ($tools as $name => $tool) {
+            $this->catalog[(string) $name] = $tool;
+        }
+        return $this;
+    }
+
+    /**
+     * 全量目录里的工具名
+     *
+     * @return string[]
+     */
+    public function catalogNames()
+    {
+        return array_keys($this->catalog);
     }
 
     /**

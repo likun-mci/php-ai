@@ -536,7 +536,21 @@ test('权限策略已应用', count($agent->getRuntime()->getPermission()->getRu
 
 $disc = $agent->useToolDiscovery(['read_file', 'grep']);
 test('工具发现已启用', $disc instanceof ToolDiscovery);
-test('工具集收窄到初始集', count($agent->getRuntime()->getToolRegistry()->all()) <= 3);
+
+// 收窄的是「给模型看什么」，不是「能执行什么」。
+// 这里原先断言注册表被裁到 <= 3 个——那恰好是在断言目录被毁掉：
+// 搜索和激活都查注册表，裁完就只能在已经给了模型的那几个里搜，
+// 渐进披露整个失效。现在注册表保持全量，由 toolDefs() 每轮按激活集过滤
+test('注册表保持全量（激活了才执行得了）',
+    count($agent->getRuntime()->getToolRegistry()->all()) > 3);
+$discCtx = new \Ai\Agent\AgentContext($aiC, $agent->getRuntime()->getToolRegistry(), null);
+$discCtx->setToolDiscovery($disc);
+test('给模型的工具定义收窄到初始集', count($discCtx->toolDefs()) <= 3);
+
+// 激活之后模型下一轮就该看得见——这是渐进披露的全部意义
+$disc->activate('my_tool');
+test('激活后模型立刻看得见（每轮重算工具定义）',
+    in_array('my_tool', array_column($discCtx->toolDefs(), 'name'), true));
 
 // resume：后台任务查句柄
 list($aiR) = makeAI53();

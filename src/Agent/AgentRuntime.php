@@ -118,6 +118,12 @@ class AgentRuntime
     /** @var MemoryManager|null */
     protected $memoryManager = null;
 
+    /** @var \Ai\Agent\Loop\CancellationToken|null 取消令牌 */
+    protected $cancellation = null;
+
+    /** @var \Ai\Agent\Tool\ToolDiscovery|null 工具发现（渐进披露） */
+    protected $toolDiscovery = null;
+
     /** @var PlanManager|null */
     protected $planManager = null;
 
@@ -1025,6 +1031,76 @@ class AgentRuntime
      * @param array<int, array<string, mixed>> $messages
      * @return AgentContext
      */
+    /**
+     * 设置取消令牌
+     *
+     * 循环会在三个安全点检查它：开新一轮之前、模型回话后工具开跑前、
+     * 一批工具结果回填之后。命中就存检查点并以 `user_cancel` 收尾——
+     * 取消不是放弃，之后还能从检查点接着跑。
+     *
+     * @param \Ai\Agent\Loop\CancellationToken|null $token
+     * @return $this
+     */
+    public function setCancellation($token)
+    {
+        $this->cancellation = $token instanceof \Ai\Agent\Loop\CancellationToken ? $token : null;
+        return $this;
+    }
+
+    /**
+     * @return \Ai\Agent\Loop\CancellationToken|null
+     */
+    public function getCancellation()
+    {
+        return $this->cancellation;
+    }
+
+    /**
+     * 取消当前运行
+     *
+     * 没挂令牌时自动建一个——调用方要停，不该因为「你没先注册令牌」而停不下来。
+     *
+     * @param string $reason
+     * @return $this
+     */
+    public function cancel($reason = '调用方要求取消')
+    {
+        if ($this->cancellation === null) {
+            $this->cancellation = new \Ai\Agent\Loop\CancellationToken();
+        }
+        $this->cancellation->cancel($reason);
+        return $this;
+    }
+
+    /**
+     * 设置工具发现（渐进披露）
+     *
+     * 注册表里仍然放全部工具（激活了才执行得了），但每轮**给模型看的**
+     * 只有当前激活的那部分。
+     *
+     * @param \Ai\Agent\Tool\ToolDiscovery|null $discovery
+     * @return $this
+     */
+    public function setToolDiscovery($discovery)
+    {
+        $this->toolDiscovery = $discovery instanceof \Ai\Agent\Tool\ToolDiscovery ? $discovery : null;
+        return $this;
+    }
+
+    /**
+     * @return \Ai\Agent\Tool\ToolDiscovery|null
+     */
+    public function getToolDiscovery()
+    {
+        return $this->toolDiscovery;
+    }
+
+    /**
+     * 组装本次运行的 AgentContext
+     *
+     * @param array<int, array<string, mixed>> $messages
+     * @return AgentContext
+     */
     protected function buildContext(array $messages)
     {
         $context = new AgentContext($this->ai, $this->toolRegistry, $this->emit);
@@ -1058,6 +1134,8 @@ class AgentRuntime
         $context->setReflectionManager($this->reflection);
         $context->setGoal($this->goal);
         $context->setCheckpointManager($this->checkpointManager);
+        $context->setCancellation($this->cancellation);
+        $context->setToolDiscovery($this->toolDiscovery);
         if ($this->taskId !== null) {
             $context->setCheckpointId($this->taskId);
         } elseif ($this->sessionId !== null) {

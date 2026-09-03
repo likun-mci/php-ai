@@ -1863,7 +1863,75 @@ $bm = new BudgetManager([
 $agent->getRuntime()->setBudget($bm);
 ```
 
-超出预算时 Agent 停止，停止原因为 `budget_exceeded`。
+`BudgetManager` 还管两个与花钱无关、但同样能让任务跑飞的维度：
+
+```php
+$bm = new BudgetManager([
+    'maxDuration'  => 300,   // 墙钟上限：最多跑 5 分钟
+    'maxToolCalls' => 100,   // 工具调用次数上限
+]);
+```
+
+这两条是**执行预算**，与 token / 成本各管各的：一个卡在慢工具上的任务可能一个 token 都没多花，却已经占着 HTTP 连接跑了十分钟；一个反复 grep 的 Agent 可能 token 不多，工具调用已经上百次。超限时同样以 `budget_exceeded` 停止，`summary()['reason']` 会说清是哪一项：
+
+```php
+$summary = $bm->summary();
+// ['exceeded' => true, 'reason' => '超过墙钟上限（312.4s > 300s）',
+//  'tokens' => 48210, 'cost' => 0.83, 'elapsed' => 312.4, 'tool_calls' => 37]
+```
+
+墙钟从循环开始处起算（`start()` 由循环自动调用），不是从 `BudgetManager` 构造时——它常常在装配阶段就建好，离真正开跑可能隔着很久。同一个实例跑第二个任务前调 `reset()` 清空计量。
+
+### 取消：让 Agent 停得下来
+
+生产环境里任务需要能中途停下：用户按了停止、浏览器断开、任务超时。`CancellationToken` 让循环在**安全点**收手：
+
+```php
+use Ai\Agent\Loop\CancellationToken;
+
+// 1. 同进程直接取消
+$token = new CancellationToken();
+$agent->setCancellation($token);
+// …另一处（信号处理器、定时器）：
+$token->cancel('用户中断');
+
+// 2. Web：浏览器一断就别再烧钱
+$agent->setCancellation(CancellationToken::whenConnectionAborted());
+
+// 3. 后台任务：另一个进程 touch 一下就能叫停
+$agent->setCancellation(CancellationToken::whenFileExists("/tmp/stop-{$taskId}"));
+
+// 4. 硬超时
+$agent->setCancellation(CancellationToken::afterSeconds(600));
+
+// 也可以直接叫停，没挂令牌会自动建一个
+$agent->cancel('不用跑了');
+```
+
+检查点选在三个**安全边界**上：开新一轮之前、模型回话后工具开跑前、一批工具结果回填之后。不在这些点之外硬中断——PHP 没有安全的线程中断，半途掐掉一个正在写文件的工具，留下的是半截文件，比多跑一轮糟得多。
+
+**取消不是放弃。** 命中后会先存检查点再以 `user_cancel` 收尾，之后可以接着跑：
+
+```php
+$result = $agent->getRuntime()->run($messages);
+if ($result->getStopReason() === 'user_cancel') {
+    echo $result->getExtra()['reason'];      // 取消原因
+    echo $result->getExtra()['resumable'];   // 能不能从检查点恢复
+}
+```
+
+长跑的工具（下载、全库扫描）可以在执行途中反复问「还要不要继续」：
+
+```php
+$handler = function (array $in, ToolContext $ctx) {
+    foreach ($items as $item) {
+        if ($ctx->isCancelled()) {
+            return '已取消，处理了 ' . $done . ' 项';
+        }
+        // …
+    }
+};
+```
 
 ### 并行工具执行
 
@@ -2610,6 +2678,8 @@ $agent->useToolDiscovery(['read_file', 'grep', 'glob']);
 
 搜索是纯本地的关键词匹配（工具名 + 描述），不调模型——为了省 token 而多花一次模型调用不划算。
 
+收窄的是「**给模型看什么**」，不是「能执行什么」：工具注册表始终保有全量工具（否则搜出来激活了也执行不了），每轮真正发给模型的工具定义由激活集过滤。所以模型这一轮 `search_tools` 激活的工具，**下一轮就能看见并直接调用**。
+
 ### 分层权限策略
 
 权限来自四个层面，关系是**取交集**而不是取并集，并且 **DENY 优先**：
@@ -2807,6 +2877,15 @@ echo $agent->orchestrator()->lastDecision()->toSummary();
 | `background` | 描述里明确要求后台 | 「后台扫描整个项目」 |
 | `ask_user` | 任务描述为空或无法判断 | —— |
 | `verify` | 只是要确认既有改动 | 「跑一下测试确认没问题」 |
+
+默认的策略选择是**基于关键词**的，读不懂任务：「顺便重构一下措辞」会被判成大型重构。`useModelStrategy()` 把这一步也交给模型：
+
+```php
+$agent->useModelStrategy();                            // 用当前模型决策
+$agent->useModelStrategy(['model' => 'gpt-4o-mini']);  // 决策用便宜的小模型
+```
+
+这是一次小而便宜的模型调用：只要一段 JSON，不给工具、不进 Agent 循环，同一个任务描述会缓存。模型拿不准、返回的不是 JSON、或者调用失败时**自动退回规则版**——决策失败不该是任务失败。模型点名一个不存在的子 Agent 时降级成 `direct` 自己干，而不是硬派出去。
 
 **决策一定会进事件流**（`strategy_decision` 事件，带 `reason`）。Agent 自主选策略之后，使用者必须能回答「它为什么这么干」，否则出了问题只能靠猜：
 

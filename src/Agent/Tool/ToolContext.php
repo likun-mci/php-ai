@@ -30,6 +30,15 @@ class ToolContext
     /** @var bool */
     protected $cancelled = false;
 
+    /**
+     * @var callable|null 取消探针 function(): bool
+     *
+     * 长跑的工具（下载、大范围扫描）需要在执行途中反复问「还要不要继续」。
+     * 布尔快照回答不了这个问题——它在 ToolContext 建好的那一刻就定死了，
+     * 而取消信号总是在那之后才到。
+     */
+    protected $cancelProbe = null;
+
     /** @var int */
     protected $iteration = 0;
 
@@ -57,7 +66,12 @@ class ToolContext
         $this->agentId      = isset($options['agentId']) ? (string) $options['agentId'] : '';
         $this->parentAgentId = isset($options['parentAgentId']) ? (string) $options['parentAgentId'] : '';
         $this->emit         = isset($options['emit']) && is_callable($options['emit']) ? $options['emit'] : null;
-        $this->cancelled    = !empty($options['cancelled']);
+        // cancelled 可以给布尔，也可以给一个每次都重新求值的探针
+        if (isset($options['cancelled']) && is_callable($options['cancelled'])) {
+            $this->cancelProbe = $options['cancelled'];
+        } else {
+            $this->cancelled = !empty($options['cancelled']);
+        }
         $this->iteration    = isset($options['iteration']) ? (int) $options['iteration'] : 0;
         $this->toolCallId   = isset($options['toolCallId']) ? (string) $options['toolCallId'] : '';
         $this->timeout      = isset($options['timeout']) ? (int) $options['timeout'] : 0;
@@ -76,7 +90,17 @@ class ToolContext
     public function parentAgentId() { return $this->parentAgentId; }
 
     /** @return bool */
-    public function isCancelled() { return $this->cancelled; }
+    public function isCancelled()
+    {
+        if ($this->cancelled) {
+            return true;
+        }
+        if ($this->cancelProbe !== null && call_user_func($this->cancelProbe)) {
+            $this->cancelled = true;
+            return true;
+        }
+        return false;
+    }
 
     /** @return int */
     public function iteration() { return $this->iteration; }

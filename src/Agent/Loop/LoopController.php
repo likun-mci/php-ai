@@ -385,9 +385,51 @@ class LoopController
      * @param AgentContext $context
      * @return AgentResult
      */
+    /**
+     * 收到取消信号后收尾
+     *
+     * 存检查点再返回——取消不是放弃：用户按停止往往是想「先停一下」，
+     * 之后还要能从这里接着跑。不存的话这一轮的工作就白做了。
+     *
+     * @param AgentContext $context
+     * @param int $iterations 已完成的迭代数
+     * @param string $text 最后一段模型文本
+     * @return AgentResult
+     */
+    protected function cancelled(AgentContext $context, $iterations, $text = '')
+    {
+        $token = $context->getCancellation();
+        $reason = $token !== null && $token->getReason() !== ''
+            ? $token->getReason()
+            : '任务已取消';
+
+        $cpm = $context->getCheckpointManager();
+        if ($cpm && $cpm->isEnabled() && $context->getCheckpointId() !== '') {
+            $cpm->save(
+                $context->getCheckpointId(),
+                (int) $iterations,
+                $context->getMessages(),
+                $this->checkpointExtra($context)
+            );
+        }
+
+        $context->emit('cancelled', ['reason' => $reason, 'iterations' => (int) $iterations]);
+
+        return AgentResult::stopped(StopReason::USER_CANCEL, $text !== '' ? $text : $context->getLastText(), [
+            'iterations' => (int) $iterations,
+            'reason'     => $reason,
+            'resumable'  => $context->getCheckpointId() !== '',
+        ]);
+    }
+
+    /**
+     * 跑 Agent 循环
+     *
+     * @param AgentContext $context
+     * @return AgentResult
+     */
     public function run(AgentContext $context)
     {
-        $toolDefs = $context->toolDefs();
         $ai       = $context->getAI();
         $emit     = $context->getEmitter();
         $registry = $context->getToolRegistry();
@@ -404,9 +446,26 @@ class LoopController
         }
         $this->reflectionRounds = 0;
 
+        // 墙钟计时从这里起算——BudgetManager 常在装配阶段就建好，
+        // 离真正开跑可能隔着很久，拿构造时刻当起点会一开跑就判超时
+        $budget = $context->getBudget();
+        if ($budget) {
+            $budget->start();
+        }
+
         for ($iter = 0; $iter < $this->maxIter; $iter++) {
+            // 取消检查点之一：开新一轮之前。已经收到取消就不该再花一次模型调用
+            if ($context->isCancelled()) {
+                return $this->cancelled($context, $iter);
+            }
+
             $context->setIteration($iter + 1);
             $context->emit('thinking', ['iter' => $iter + 1]);
+
+            // 工具定义每轮重算：渐进披露下模型上一轮激活的工具，这一轮才看得见。
+            // 放在循环外只算一次的话，search_tools 激活的工具永远进不了请求，
+            // 整个渐进披露等于没有
+            $toolDefs = $context->toolDefs();
 
             // 每轮迭代构造 ToolContext，携带最新 agentId / iteration / sessionId
             $toolContext = new ToolContext([
@@ -416,6 +475,9 @@ class LoopController
                 'iteration' => $iter + 1,
                 'timeout'   => $this->toolTimeout,
                 'emit'      => $emit ? function ($event) use ($emit) { $emit($event); } : null,
+                // 传探针而不是布尔快照：长跑的工具（下载、全库扫描）要在执行途中
+                // 反复问「还要不要继续」，快照在这一刻就定死了，答不了后来的取消
+                'cancelled' => function () use ($context) { return $context->isCancelled(); },
             ]);
 
             // 上下文压缩检查（Phase 4）
@@ -541,7 +603,6 @@ class LoopController
             $toolCalls = $resp->getToolCalls();
 
             // 预算检查（Phase 7）
-            $budget = $context->getBudget();
             if ($budget) {
                 $budget->record($resp->getUsage());
                 if ($budget->exceeded()) {
@@ -583,6 +644,18 @@ class LoopController
                     'usage'      => $usage,
                     'iterations' => $iter + 1,
                 ]);
+            }
+
+            // 取消检查点之二：模型已经回话、工具还没开跑。
+            // 这是最划算的收手点——再往下就要动文件、跑命令了
+            if ($context->isCancelled()) {
+                return $this->cancelled($context, $iter + 1, $text);
+            }
+
+            // 工具调用计数进预算（次数上限是防跑飞的硬闸，与 token 无关：
+            // 一个反复 grep 的 Agent 可能 token 不多，工具调用已经上百次）
+            if ($budget) {
+                $budget->recordToolCalls(count($toolCalls));
             }
 
             // 执行工具调用
@@ -814,6 +887,12 @@ class LoopController
 
             // 回填工具结果（只要有结果就回填）
             $context->appendToolResults($results);
+
+            // 取消检查点之三：这一批工具跑完、结果已回填。
+            // 结果先进上下文再停，恢复时才不会丢掉这一轮真正做过的事
+            if ($context->isCancelled()) {
+                return $this->cancelled($context, $iter + 1, $text);
+            }
 
             // 检查点保存（每轮迭代后，用于崩溃恢复）
             $cpm = $context->getCheckpointManager();

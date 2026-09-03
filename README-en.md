@@ -1853,6 +1853,76 @@ $agent->getRuntime()->setBudget($bm);
 
 When the budget is exceeded, the Agent stops with `budget_exceeded`.
 
+`BudgetManager` also covers two dimensions that have nothing to do with money but can equally let a task run away:
+
+```php
+$bm = new BudgetManager([
+    'maxDuration'  => 300,   // wall clock: at most 5 minutes
+    'maxToolCalls' => 100,   // cap on tool invocations
+]);
+```
+
+These two are the **execution budget**, independent of tokens and cost: a task stuck on a slow tool may not have spent a single extra token while holding an HTTP connection open for ten minutes; an Agent that greps in circles may be light on tokens and already past a hundred tool calls. Exceeding them also stops with `budget_exceeded`, and `summary()['reason']` says which limit it was:
+
+```php
+$summary = $bm->summary();
+// ['exceeded' => true, 'reason' => 'wall-clock limit exceeded (312.4s > 300s)',
+//  'tokens' => 48210, 'cost' => 0.83, 'elapsed' => 312.4, 'tool_calls' => 37]
+```
+
+The wall clock starts at the top of the loop (`start()` is called by the loop itself), not when `BudgetManager` is constructed — it is often built during wiring, long before anything actually runs. Call `reset()` before reusing one instance for a second task.
+
+### Cancellation: making the Agent stoppable
+
+In production a task has to be stoppable mid-flight: the user hit stop, the browser went away, the task ran too long. `CancellationToken` lets the loop bow out at **safe points**:
+
+```php
+use Ai\Agent\Loop\CancellationToken;
+
+// 1. Cancel directly, same process
+$token = new CancellationToken();
+$agent->setCancellation($token);
+// …elsewhere (a signal handler, a timer):
+$token->cancel('User interrupted');
+
+// 2. Web: stop burning money the moment the browser disconnects
+$agent->setCancellation(CancellationToken::whenConnectionAborted());
+
+// 3. Background jobs: another process just touches a file to call it off
+$agent->setCancellation(CancellationToken::whenFileExists("/tmp/stop-{$taskId}"));
+
+// 4. Hard timeout
+$agent->setCancellation(CancellationToken::afterSeconds(600));
+
+// You can also just stop it — a token is created for you if none is set
+$agent->cancel('No need to continue');
+```
+
+The checkpoints sit on three **safe boundaries**: before starting a new iteration, after the model replies but before any tool runs, and after a batch of tool results has been written back. Nothing is interrupted outside those points — PHP has no safe thread interruption, and killing a tool halfway through a file write leaves half a file, which is worse than one extra iteration.
+
+**Cancelling is not abandoning.** On a hit the loop saves a checkpoint and finishes with `user_cancel`, so the work can be resumed:
+
+```php
+$result = $agent->getRuntime()->run($messages);
+if ($result->getStopReason() === 'user_cancel') {
+    echo $result->getExtra()['reason'];      // why it was cancelled
+    echo $result->getExtra()['resumable'];   // whether a checkpoint exists
+}
+```
+
+Long-running tools (downloads, whole-repository scans) can keep asking whether to carry on:
+
+```php
+$handler = function (array $in, ToolContext $ctx) {
+    foreach ($items as $item) {
+        if ($ctx->isCancelled()) {
+            return 'Cancelled after processing ' . $done . ' items';
+        }
+        // …
+    }
+};
+```
+
 ### Parallel tool execution
 
 When the model returns multiple tool calls in one turn, parallel-safe tools (read_file / grep / glob) can run together while the rest run sequentially. Off by default — enable explicitly:
@@ -2589,6 +2659,8 @@ $agent->useToolDiscovery(['read_file', 'grep', 'glob']);
 
 Search is local keyword matching over tool names and descriptions, with no model call — spending a model call to save tokens is a poor trade.
 
+What gets narrowed is **what the model sees**, not what can be executed: the tool registry always holds the full catalogue (otherwise a tool found and enabled could not actually run), and the definitions sent to the model each round are filtered by the active set. So a tool the model enables via `search_tools` this round **becomes visible and callable on the next one**.
+
 ### Layered permission policy
 
 Permissions come from four layers, combined by **intersection** rather than union, with **DENY winning**:
@@ -2786,6 +2858,15 @@ The seven strategies:
 | `background` | the description asks for it | "scan the whole project in the background" |
 | `ask_user` | empty or undecidable description | — |
 | `verify` | only confirming an existing change | "run the tests and confirm" |
+
+Strategy selection is **keyword-based** by default, and keywords cannot read a task: "and while you're there, refactor the wording" gets classified as a major refactor. `useModelStrategy()` hands this step to the model too:
+
+```php
+$agent->useModelStrategy();                            // decide with the current model
+$agent->useModelStrategy(['model' => 'gpt-4o-mini']);  // decide with a cheap small model
+```
+
+It is one small, cheap model call: a single JSON object, no tools, outside the Agent loop, cached per task description. When the model is unsure, returns something that is not JSON, or the call fails, it **falls back to the rule-based version** — a failed decision should not be a failed task. If the model names a sub-agent that does not exist, the decision degrades to `direct` rather than dispatching into the void.
 
 **Every decision goes into the event stream** (a `strategy_decision` event carrying `reason`). Once the Agent picks its own strategy, you must be able to answer "why did it do that" — otherwise a bad run leaves you guessing:
 

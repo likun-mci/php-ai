@@ -917,7 +917,15 @@ class Agent
             'groups'          => $this->toolGroups,
         ]);
         $this->toolDiscovery = $discovery;
-        $this->setTools($discovery->initialTools());
+
+        // 注册表保持**全量**——被搜出来激活的工具得真能执行。原先这里把注册表
+        // 裁到只剩初始工具，等于把目录本身删了：模型搜不到没给它的工具，
+        // 就算搜到也执行不了。收窄的是「给模型看什么」，不是「能执行什么」，
+        // 由 AgentContext::toolDefs() 每轮按激活集过滤
+        $this->tools(['search_tools' => $discovery->searchToolDefinition()]);
+        $discovery->addToCatalog($this->runtime->getToolRegistry()->all());
+        $this->runtime->setToolDiscovery($discovery);
+
         return $discovery;
     }
 
@@ -1060,6 +1068,80 @@ class Agent
     public function taskStatus($taskId)
     {
         return $this->orchestrator()->dispatcher()->status((string) $taskId);
+    }
+
+    /**
+     * 让模型来选执行策略，取代关键词规则
+     *
+     * `task()` 的外层策略选择默认是基于词表的：出现「重构」就先拆计划，长度过阈值
+     * 就算复杂。词表读不懂任务——「顺便重构一下措辞」会被判成大型重构。
+     * 挂上这个之后，策略由一次小而便宜的模型调用决定；模型拿不准或调用失败时
+     * **自动退回规则版**，任务不会因为「决定怎么做」这一步而失败。
+     *
+     * ```php
+     * $agent->useModelStrategy();                          // 用当前模型决策
+     * $agent->useModelStrategy(['model' => 'gpt-4o-mini']); // 决策用便宜的小模型
+     * ```
+     *
+     * @param array<string, mixed> $options model（决策专用模型）
+     * @return \Ai\Agent\Orchestrator\ModelStrategyResolver
+     */
+    public function useModelStrategy(array $options = [])
+    {
+        $resolver = new \Ai\Agent\Orchestrator\ModelStrategyResolver(
+            $this->ai,
+            $this->runtime->getSubAgentManager(),
+            $options
+        );
+        $this->orchestrator()->selector()->setResolver($resolver);
+        return $resolver;
+    }
+
+    /**
+     * 设置取消令牌
+     *
+     * 循环会在三个安全点检查：开新一轮之前、模型回话后工具开跑前、一批工具结果
+     * 回填之后。不在这些点之外硬中断——PHP 没有安全的线程中断，半途掐掉一个
+     * 正在写文件的工具，留下的是半截文件，比多跑一轮糟得多。
+     *
+     * ```php
+     * // Web：浏览器一断就别再烧钱
+     * $agent->setCancellation(CancellationToken::whenConnectionAborted());
+     *
+     * // 后台任务：另一个进程 touch 一下就能叫停
+     * $agent->setCancellation(CancellationToken::whenFileExists("/tmp/stop-{$taskId}"));
+     * ```
+     *
+     * @param \Ai\Agent\Loop\CancellationToken|null $token
+     * @return $this
+     */
+    public function setCancellation($token)
+    {
+        $this->runtime->setCancellation($token);
+        return $this;
+    }
+
+    /**
+     * 取消当前运行
+     *
+     * 取消不是放弃：命中后会先存检查点再以 `user_cancel` 收尾，
+     * 之后可以从检查点接着跑。
+     *
+     * @param string $reason
+     * @return $this
+     */
+    public function cancel($reason = '调用方要求取消')
+    {
+        $this->runtime->cancel($reason);
+        return $this;
+    }
+
+    /**
+     * @return \Ai\Agent\Loop\CancellationToken|null
+     */
+    public function cancellation()
+    {
+        return $this->runtime->getCancellation();
     }
 
     /**

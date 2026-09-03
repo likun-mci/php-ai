@@ -121,6 +121,12 @@ class AgentContext
     /** @var PlanManager|null */
     protected $planManager = null;
 
+    /** @var \Ai\Agent\Loop\CancellationToken|null 取消令牌 */
+    protected $cancellation = null;
+
+    /** @var \Ai\Agent\Tool\ToolDiscovery|null 工具发现（渐进披露） */
+    protected $toolDiscovery = null;
+
     /** @var string 当前执行计划 ID */
     protected $planId = '';
 
@@ -585,7 +591,69 @@ class AgentContext
      */
     public function toolDefs()
     {
-        return $this->toolRegistry->defs();
+        $defs = $this->toolRegistry->defs();
+        if ($this->toolDiscovery === null) {
+            return $defs;
+        }
+
+        // 渐进披露：注册表里放着全部工具（否则激活了也执行不了），
+        // 但**给模型看的**只有当前激活的那部分。每轮重新算一次，
+        // 模型这一轮用 search_tools 激活的工具，下一轮就能看见
+        $active = $this->toolDiscovery->activeTools();
+        $visible = [];
+        foreach ($defs as $def) {
+            $name = isset($def['name']) ? (string) $def['name'] : '';
+            if ($name !== '' && isset($active[$name])) {
+                $visible[] = $def;
+            }
+        }
+        return $visible;
+    }
+
+    /**
+     * @param \Ai\Agent\Loop\CancellationToken|null $token
+     * @return $this
+     */
+    public function setCancellation($token)
+    {
+        $this->cancellation = $token instanceof \Ai\Agent\Loop\CancellationToken ? $token : null;
+        return $this;
+    }
+
+    /**
+     * @return \Ai\Agent\Loop\CancellationToken|null
+     */
+    public function getCancellation()
+    {
+        return $this->cancellation;
+    }
+
+    /**
+     * 现在该停了吗
+     *
+     * @return bool
+     */
+    public function isCancelled()
+    {
+        return $this->cancellation !== null && $this->cancellation->isCancelled();
+    }
+
+    /**
+     * @param \Ai\Agent\Tool\ToolDiscovery|null $discovery
+     * @return $this
+     */
+    public function setToolDiscovery($discovery)
+    {
+        $this->toolDiscovery = $discovery instanceof \Ai\Agent\Tool\ToolDiscovery ? $discovery : null;
+        return $this;
+    }
+
+    /**
+     * @return \Ai\Agent\Tool\ToolDiscovery|null
+     */
+    public function getToolDiscovery()
+    {
+        return $this->toolDiscovery;
     }
 
     /* ---------- 事件发射 ---------- */

@@ -49,6 +49,18 @@ class BudgetManager
     /** @var float 累计估算成本 */
     protected $totalCost = 0.0;
 
+    /** @var int 墙钟上限（秒，0 = 不限） */
+    protected $maxDuration = 0;
+
+    /** @var int 工具调用次数上限（0 = 不限） */
+    protected $maxToolCalls = 0;
+
+    /** @var float|null 计时起点（microtime），null = 还没开始 */
+    protected $startedAt = null;
+
+    /** @var int 累计工具调用次数 */
+    protected $toolCalls = 0;
+
     /**
      * @param array<string, mixed> $options maxTokens / maxBudget / pricing / perMillion
      */
@@ -63,7 +75,77 @@ class BudgetManager
         if (isset($options['pricing']) && is_array($options['pricing'])) {
             $this->pricing = $options['pricing'];
         }
+        if (isset($options['maxDuration'])) {
+            $this->maxDuration = max(0, (int) $options['maxDuration']);
+        }
+        if (isset($options['maxToolCalls'])) {
+            $this->maxToolCalls = max(0, (int) $options['maxToolCalls']);
+        }
         $this->perMillion = !empty($options['perMillion']);
+    }
+
+    /**
+     * 开始计时
+     *
+     * 墙钟上限得有个起点。放在循环开始处调用，而不是构造时——
+     * BudgetManager 常常在装配阶段就建好，离真正开跑可能隔着很久。
+     * 重复调用不会重置，一次运行只有一个起点。
+     *
+     * @return $this
+     */
+    public function start()
+    {
+        if ($this->startedAt === null) {
+            $this->startedAt = microtime(true);
+        }
+        return $this;
+    }
+
+    /**
+     * 重置本次运行的计量
+     *
+     * 同一个实例跑第二个任务时，额度不该还是上一个任务用剩的。
+     *
+     * @return $this
+     */
+    public function reset()
+    {
+        $this->totalInputTokens = 0;
+        $this->totalOutputTokens = 0;
+        $this->totalCachedTokens = 0;
+        $this->requestCount = 0;
+        $this->totalCost = 0.0;
+        $this->toolCalls = 0;
+        $this->startedAt = null;
+        return $this;
+    }
+
+    /**
+     * 记录工具调用次数
+     *
+     * @param int $n
+     * @return $this
+     */
+    public function recordToolCalls($n = 1)
+    {
+        $this->toolCalls += max(0, (int) $n);
+        return $this;
+    }
+
+    /**
+     * 已运行秒数
+     *
+     * @return float 还没 start() 时返回 0
+     */
+    public function elapsed()
+    {
+        return $this->startedAt === null ? 0.0 : (microtime(true) - $this->startedAt);
+    }
+
+    /** @return int */
+    public function getToolCalls()
+    {
+        return $this->toolCalls;
     }
 
     /**
@@ -113,13 +195,7 @@ class BudgetManager
      */
     public function exceeded()
     {
-        if ($this->maxTokens > 0 && $this->getTotalTokens() > $this->maxTokens) {
-            return true;
-        }
-        if ($this->maxBudget > 0 && $this->totalCost > $this->maxBudget) {
-            return true;
-        }
-        return false;
+        return $this->summary()['exceeded'];
     }
 
     /**
@@ -139,11 +215,24 @@ class BudgetManager
             $exceeded = true;
             $reason = '预算超限（$' . round($this->totalCost, 4) . ' > $' . $this->maxBudget . '）';
         }
+        // 墙钟排在 token 之后判：一个卡在慢工具上的任务可能一个 token 都没多花，
+        // 却已经占着 HTTP 连接跑了十分钟。生产环境里超时比超支更常见
+        $elapsed = $this->elapsed();
+        if ($this->maxDuration > 0 && $elapsed > $this->maxDuration) {
+            $exceeded = true;
+            $reason = '超过墙钟上限（' . round($elapsed, 1) . 's > ' . $this->maxDuration . 's）';
+        }
+        if ($this->maxToolCalls > 0 && $this->toolCalls > $this->maxToolCalls) {
+            $exceeded = true;
+            $reason = '工具调用次数超限（' . $this->toolCalls . ' > ' . $this->maxToolCalls . '）';
+        }
         return [
-            'exceeded' => $exceeded,
-            'reason'   => $reason,
-            'tokens'   => $this->getTotalTokens(),
-            'cost'     => $this->totalCost,
+            'exceeded'   => $exceeded,
+            'reason'     => $reason,
+            'tokens'     => $this->getTotalTokens(),
+            'cost'       => $this->totalCost,
+            'elapsed'    => round($elapsed, 3),
+            'tool_calls' => $this->toolCalls,
         ];
     }
 

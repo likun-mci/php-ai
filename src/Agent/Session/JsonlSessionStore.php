@@ -242,8 +242,12 @@ class JsonlSessionStore implements AgentSessionStoreInterface
                 $canAppend = true;  // 首次写：从空文件 append 全部
             }
 
-            $seq = isset($persisted['seq']) ? (int) $persisted['seq'] : 0;
-            $startFrom = ($canAppend && isset($persisted['message_count']))
+            // startFrom / seq 必须以 jsonl 现状为准：jsonl 缺失（崩溃残留、被删、
+            // 只恢复了 state）时即便 state 记着非 0 message_count，也要从 0 全量写，
+            // 否则 append 会跳过前 N 条、产出静默残缺的会话
+            $jsonlExists = is_file($jsonl);
+            $seq = ($jsonlExists && isset($persisted['seq'])) ? (int) $persisted['seq'] : 0;
+            $startFrom = ($canAppend && $jsonlExists && isset($persisted['message_count']))
                 ? (int) $persisted['message_count'] : 0;
 
             if ($canAppend) {

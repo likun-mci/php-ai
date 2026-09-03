@@ -167,6 +167,20 @@ test('损坏行被跳过、其余读出', $l !== null && count($l->getMessages()
     && $l->getMessages()[0]['content'] === 'good1'
     && $l->getMessages()[1]['content'] === 'good2');
 
+// ===== 六·五、jsonl 缺失但 state 存在：不丢历史 =====
+echo "\n=== 六·五、jsonl 缺失 + state 存在 ===\n";
+$store->save(new AgentSession('recover', ['messages' => msgs(4)]));
+$recBase = $dir . '/' . Path::safeName('recover');
+// 模拟 jsonl 丢失（崩溃残留 / 误删单文件），state.json 仍在且记着 4 条
+@unlink($recBase . '.jsonl');
+test('jsonl 已删、state 尚在', !is_file($recBase . '.jsonl') && is_file($recBase . '.state.json'));
+// 下一次 save（内容不变的 4 条）——不能因 state 记着 count=4 而 append 0 条丢掉全部
+$store->save(new AgentSession('recover', ['messages' => msgs(4)]));
+$rec = $store->load('recover');
+assert_eq('jsonl 缺失后重写不丢消息', 4, $rec === null ? -1 : count($rec->getMessages()));
+test('重写后消息内容正确', $rec !== null && $rec->getMessages()[0]['content'] === 'm0'
+    && $rec->getMessages()[3]['content'] === 'm3');
+
 // ===== 七、并发 save 完整性 =====
 echo "\n=== 七、并发 save 完整性 ===\n";
 $concDir = $base . '/conc';

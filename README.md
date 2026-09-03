@@ -1807,6 +1807,48 @@ if ($session) {
 
 会话状态流转：`running` → `paused`（等待授权）→ `running`（恢复）→ `completed` / `interrupted`。
 
+### 默认持久化与双根存储
+
+自 v1.63 起，Agent 具备**惰性自动持久化**：不必显式挂 `SessionManager` / `MemoryManager`，只要表达了持久化意图（设置 `setSessionId()`、`setUserId()`、`setAgentHome()` 或 `setProjectRoot()` 之一），库就会自动把会话与记忆落到磁盘。
+
+```php
+$agent
+    ->setWorkdir('/var/www/project')
+    ->setUserId('u_10086')          // 多租户场景的硬要求：按用户隔离
+    ->setSessionId(Agent::newSessionId());
+
+$agent->chat('记住我偏好深色主题');
+// 换个新实例，只要 userId + sessionId 一致就接得上
+```
+
+> **行为变化（升级须知）**：从本版本起，仅调用 `setSessionId()` 也可能产生磁盘数据。若只想要纯内存行为，显式关闭：
+>
+> ```php
+> $agent->autoPersist(false);
+> ```
+
+**双根存储**：数据分两处落盘，语义不同——
+
+| 根 | 位置 | 内容 | 权限 |
+|----|------|------|------|
+| 项目根 | `<project>/.agent/AGENT.md` | 对团队/其他 Agent 也有价值的项目长期知识（可进 Git） | `0755` |
+| HOME 根 | `~/.agent/`（`users/`、`projects/`、`sessions/` …） | 含用户输入/输出、绝对路径、session ID 等 | `0700` |
+
+项目根从 `workdir` 向上寻找 `.agent/`（到 HOME 必停，最多 10 层，不依赖 `.git`，不用 `realpath()`）；找不到则用 `workdir`。跨目录部署（蓝绿发布、CI 与开发机路径不同）若需复用会话，显式 `setProjectRoot()` 固定项目身份。
+
+**多租户隔离**：`setUserId()` 后，用户记忆与会话按用户分片存放，原始 `userId` **不进磁盘路径**（只存其 SHA-256 分片）。会话加载时做 ownership 校验：当前 `userId` / 项目身份与会话记录不符则拒绝加载。`sessionId` 由 `Agent::newSessionId()` 生成（128 bit 随机），但它**不是授权凭证**，应用层仍须校验用户是否拥有目标会话。
+
+**JSONL 会话存储**：自动挂载使用 `JsonlSessionStore`——每个会话一个 `<sid>.jsonl`（每行一个事件）+ `<sid>.state.json`（非消息状态）。消息通常只增不减，追加一行的成本是 O(新增)；只有 compact / rollback 时才整份重写（临时文件 + rename 原子替换）。整个读改写事务在 `<sid>.lock` 独占锁下完成，避免并发 lost update。显式 `new FileSessionStore(...)` 的旧用户不受影响，旧 `<sid>.json` 仍可读、不自动迁移；需要转换存量会话时运行 `php bin/agent-migrate-sessions.php <目录>`。
+
+**记忆与指令的区别**——两者物理与语义分离，不要混淆：
+
+| 文件 | 性质 |
+|------|------|
+| `AGENTS.md` / `CLAUDE.md` | 人写的规则/规程，Agent 只读的 **Instruction** |
+| `.agent/AGENT.md` | Agent 自动维护、跨会话复用的 **Memory** |
+
+**Git**：库**不会**自动改动 `.gitignore` / `git config` / `git status`。是否提交项目记忆 `.agent/AGENT.md` 由项目自行决定；若要提交，可自行配置 `.agent/.gitignore`。
+
 ### 子 Agent
 
 通过 `SubAgentManager` 注册子 Agent，主 Agent 可通过 `spawn_agent` 工具派生子 Agent 执行独立任务，子 Agent 拥有隔离的上下文，不会导致主 Agent 上下文膨胀：
@@ -2444,6 +2486,37 @@ $retriever->expire('agent', 30);       // 删除 30 天前的条目
 
 `expire()` 只处理带日期前缀的条目（`[2026-09-02] ...`），没有日期的一律保留——
 分不清写入时间就不该替用户决定它过期了。
+
+#### 模型自主记忆（remember / forget 工具）
+
+自 v1.65 起，`remember()` 默认给每条记忆加上**日期 + 内容散列 id** 前缀：
+
+```text
+- [2026-09-03] (#9bda3a) 项目使用 CodeIgniter 3
+```
+
+id 取内容散列（非随机/自增），因此**同一条内容重复 `remember()` 天然幂等**，不会把
+记忆文件撑满。`remember($scope, $content, ['date' => false])` 可关掉日期前缀（id 仍写）。
+配套的删除按 id 精确进行：
+
+```php
+$mm->remember('project', '项目使用 CodeIgniter 3');   // 写入带 id 的条目
+$mm->forgetById('project', '9bda3a');                 // 按 id 精确删
+$mm->findByPattern('project', 'CodeIgniter');         // 按子串找候选（不删）
+```
+
+挂了记忆、且是**用工具的 Agent**（如 `codeAgent()`）时，库会自动注册 `remember` /
+`forget` 两个工具，让模型主动记录/删除结论。记忆写入属持久副作用，默认经
+`PermissionManager` 把关（`dont_ask` / `bypass` 放行）。注入系统提示词时，长期 scope
+（`agent` / `user` / `project`）**常驻**、短期 scope（`session` / `task`）按目标相关性——
+即便某次检索零命中，长期记忆也不会消失。
+
+**自动沉淀**默认关闭——自动从每次结果里提炼长期记忆比自动保存会话风险高得多，
+必须显式开启：
+
+```php
+$agent->autoConsolidate(true);   // 每次 run()/chat() 后从结果提炼候选、去重后写入
+```
 
 ### 检查点（CheckpointManager）
 

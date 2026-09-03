@@ -316,5 +316,35 @@ eq('manual', $pmgr->getMode(), '抛异常后模式保持不变');
 $pmgr->setMode('bypass');
 eq('bypass', $pmgr->getMode(), '合法模式正常设置');
 
+// ============================================================
+echo "\n=== 六、代码 Agent 默认提示词 ===\n";
+// ============================================================
+
+// 背景：codeAgent() 原先一个字的系统提示词都没有。工具描述只说明「这工具做什么」，
+// 回答不了「什么时候该用」。实测后果具体可测（真网关、三功能多文件任务）：
+//   无提示词  ：update_plan 0 次，给已有文件加方法用 write_file 整体重写
+//   有提示词  ：update_plan 2~3 次，全部走 edit_file 增量改
+$prompt = \Ai\Agent\CodeAgentPrompt::build();
+ok($prompt !== '', '生成了提示词');
+ok(strpos($prompt, 'edit_file') !== false, '讲了用 edit_file 改已有文件');
+ok(strpos($prompt, 'write_file') !== false, '讲了 write_file 的适用范围');
+ok(strpos($prompt, 'update_plan') !== false, '讲了什么时候写计划');
+ok(strpos($prompt, 'delegate') !== false, '讲了什么时候委派');
+
+$withTest = \Ai\Agent\CodeAgentPrompt::build(['test' => 'composer test']);
+ok(strpos($withTest, 'composer test') !== false, '给了测试命令就写进提示词');
+ok(strpos(\Ai\Agent\CodeAgentPrompt::build(), 'composer test') === false,
+    '没给测试命令时不编一个出来');
+
+$ai6 = new StubAI(['api_key' => 'test', 'platform' => 'openai']);
+$agent6 = \Ai\Agent\Agent::create($ai6)->setWorkdir(sys_get_temp_dir())
+    ->codeAgent(['noIndex' => true]);
+ok($agent6->getRuntime()->getSystem() !== '', 'codeAgent 装上了默认提示词');
+
+// 调用方自己设过就不该被顶掉——那是他们的意图
+$agent7 = \Ai\Agent\Agent::create($ai6)->setWorkdir(sys_get_temp_dir())
+    ->setSystem('我自己的提示词')->codeAgent(['noIndex' => true]);
+eq('我自己的提示词', $agent7->getRuntime()->getSystem(), '自定义提示词不被默认值覆盖');
+
 echo "\n=== 结果: {$pass} 通过, {$fail} 失败 ===\n";
 exit($fail > 0 ? 1 : 0);

@@ -156,6 +156,16 @@ class AgentRuntime
     }
 
     /**
+     * 当前系统提示词
+     *
+     * @return string
+     */
+    public function getSystem()
+    {
+        return $this->system;
+    }
+
+    /**
      * @param mixed $system
      * @return $this
      */

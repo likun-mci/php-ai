@@ -1280,6 +1280,20 @@ class Agent
             $this->enableReflection();
         }
 
+        // 默认系统提示词：告诉模型这些工具**什么时候**该用
+        //
+        // 工具描述只说明「这个工具做什么」，回答不了「什么时候该用它」。
+        // 不给提示词的实测后果是具体的：三个功能的多文件任务里 update_plan 一次
+        // 没被调用，给已有文件加方法时用 write_file 整体重写而不是 edit_file 增量改。
+        // 两件事工具描述都拦不住。
+        //
+        // 调用方自己设过 system 就不覆盖——那是他们的意图，不该被默认值顶掉。
+        if ($this->runtime->getSystem() === '') {
+            $this->setSystem(\Ai\Agent\CodeAgentPrompt::build([
+                'test' => isset($options['test']) ? (string) $options['test'] : '',
+            ]));
+        }
+
         // 项目指令（CLAUDE.md / AGENTS.md）
         $this->loadInstructions($workdir);
 

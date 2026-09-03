@@ -2869,6 +2869,34 @@ A few boundaries:
 - The delegation cap (8 by default) is a **per-run** budget, reset at the start of `run()` and `task()`.
 - Code that calls neither `modelDrivenTools()` nor `codeAgent()` sees exactly the same tool set and behaviour as before.
 
+### Default system prompt
+
+`codeAgent()` installs a default system prompt (`CodeAgentPrompt`) that tells the model **when** to use these tools — a tool description explains what a tool does, but not when reaching for it is the right move.
+
+Calling `setSystem()` yourself takes precedence:
+
+```php
+$agent = Agent::create($ai)->workdir($dir)->codeAgent();          // default prompt
+$agent = Agent::create($ai)->setSystem('...')->codeAgent();       // your own
+echo \Ai\Agent\CodeAgentPrompt::build(['test' => 'composer test']);  // read the default
+```
+
+It covers four things: understand the current state before changing it; always modify **existing** files with `edit_file` (`write_file` is for new files only); write down steps with `update_plan` once a task has three or more of them; and actually verify after changing code.
+
+The prompt was tuned empirically. The same task (add three features to a multi-file project and extend the tests) against a real gateway:
+
+| | No prompt | With prompt | Plus the "batch your edits" line |
+|---|---|---|---|
+| Iterations | 6 | 13 | 9 |
+| Cost | $0.032 | $0.067 | $0.053 |
+| `update_plan` calls | 0 | 3 | 2 |
+| How existing files were edited | `write_file` full rewrite ×3 | `edit_file` ×6 | `edit_file` ×5 (issued together) |
+| Test result | ALL PASS | ALL PASS | ALL PASS |
+
+All three runs produced correct results; what differs is **process safety and cost**. The no-prompt run rewrote three existing files wholesale with `write_file` — the files were small and the rewrites happened to be right, but on a file of several hundred lines a wholesale rewrite is exactly how an agent silently deletes code. The default prompt trades roughly 60% more cost for removing that risk; adding the "issue edits you have already decided on together" line brings the premium down to about 40%.
+
+If that is too expensive, supply a shorter prompt of your own, or `setSystem('')` — but that returns the model to guessing.
+
 ### Orchestration layer (AgentOrchestrator)
 
 `AgentRuntime` answers "how do I run one iteration"; the orchestration layer answers **"how should this work be done"** — call tools directly, break it into a plan first, delegate to a sub-agent, fan out in parallel, or push it to the background.

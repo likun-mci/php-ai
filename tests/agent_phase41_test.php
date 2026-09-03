@@ -279,9 +279,12 @@ $rt9->setSystem('助手')->setMemoryManager($mm)->setGoal('登录接口报 401')
 $sys9 = isset($tr9->requests[0]['messages'][0]['content'])
     ? (string) $tr9->requests[0]['messages'][0]['content']
     : (isset($tr9->requests[0]['system']) ? (string) $tr9->requests[0]['system'] : '');
-test('注入了相关记忆块', strpos($sys9, '<memory-relevant') !== false);
+// v1.65（dev.md 第十七节）行为变更：project 属长期 scope，**常驻注入**而非按相关性过滤，
+// 以免零命中导致长期记忆完全失效；token 由 maxInject 上限约束。
+// 因此有 goal 时 project 整体注入（含"无关"的 Vite 那条），走 <memory> 而非 <memory-relevant>。
+test('注入了长期记忆块', strpos($sys9, '<memory') !== false);
 test('注入了相关那条', strpos($sys9, 'JWT') !== false);
-test('无关那条未注入', strpos($sys9, 'Vite') === false);
+test('长期 project 常驻（含 Vite，不再按相关性过滤）', strpos($sys9, 'Vite') !== false);
 
 // 无 goal 时注入全部记忆（与升级前一致）
 $tr10 = new ScriptedTransport41();

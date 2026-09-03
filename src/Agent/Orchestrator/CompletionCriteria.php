@@ -61,14 +61,20 @@ class CompletionCriteria
     /**
      * 宽松判据：只要没有明显的未完成信号就算完成
      *
-     * 适合没有测试、没有计划的轻量任务——对这类任务要求验证通过，
-     * 会因为「没有验证器」永远达不到完成。
+     * 「宽松」指的是不要求验证通过——没挂验证器的轻量任务，
+     * 要求 `verification_passed` 会永远达不成。
+     *
+     * 但**计划里还有没做完的步骤**不属于「宽松可以忽略」的范畴：那是模型自己
+     * 写下的待办，还剩着就说明活没干完。这条判据在没有计划时自动满足
+     * （见 `checkPlan()`），所以放进宽松档不会误伤无计划的任务——
+     * 原先把它排除在外，等于模型用 `update_plan` 写的计划从来没人核对过：
+     * 留着三个 pending 步骤直接收工，判据照样说「完成」。
      *
      * @return self
      */
     public static function lenient()
     {
-        return new self([self::NO_PENDING_ERRORS]);
+        return new self([self::NO_PENDING_ERRORS, self::NO_PENDING_STEPS]);
     }
 
     /**

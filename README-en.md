@@ -1872,6 +1872,19 @@ $summary = $bm->summary();
 
 The wall clock starts at the top of the loop (`start()` is called by the loop itself), not when `BudgetManager` is constructed — it is often built during wiring, long before anything actually runs. Call `reset()` before reusing one instance for a second task.
 
+**Sub-agents share the parent's ledger**: tokens, cost and tool calls spent by delegated work are recorded against the parent, and the parent's wall-clock limit applies to it too. Same principle as permissions — a sub-agent's allowance is a subset of the parent's. Without inheritance, a parent capped at five minutes cannot stop the work it delegated from running for twenty. The cancellation token is passed down as well: stopping the parent stops the sub-agents it dispatched.
+
+When a run finishes, cost, duration and changed files are filled into `AgentResult` automatically, so you don't have to assemble them from each manager yourself:
+
+```php
+$result = $agent->getRuntime()->run($messages);
+
+$result->getCost();          // estimated cost of this run
+$result->getDuration();      // milliseconds
+$result->getFilesChanged();  // which files were touched
+$result->toContract();       // full structured result, ready to return as JSON
+```
+
 ### Cancellation: making the Agent stoppable
 
 In production a task has to be stoppable mid-flight: the user hit stop, the browser went away, the task ran too long. `CancellationToken` lets the loop bow out at **safe points**:

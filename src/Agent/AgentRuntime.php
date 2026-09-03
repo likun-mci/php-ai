@@ -366,6 +366,10 @@ class AgentRuntime
     public function setBudget($bm)
     {
         $this->budget = $bm;
+        // 装配顺序不该由调用方记：先设管理器后设预算是常见写法，这里补上同步
+        if ($this->subAgentManager !== null) {
+            $this->subAgentManager->setParentBudget($bm);
+        }
         return $this;
     }
 
@@ -420,6 +424,10 @@ class AgentRuntime
         $sam->setParentTools($this->toolRegistry->all());
         $sam->setParentSkills($this->skillManager);
         $sam->setParentMcp($this->mcpManager);
+        // 预算与取消同样往下传：子 Agent 花的是父 Agent 的钱和时间，
+        // 叫停父 Agent 也该把它派出去的活儿一起停掉
+        $sam->setParentBudget($this->budget);
+        $sam->setParentCancellation($this->cancellation);
         return $this;
     }
 
@@ -1044,6 +1052,9 @@ class AgentRuntime
     public function setCancellation($token)
     {
         $this->cancellation = $token instanceof \Ai\Agent\Loop\CancellationToken ? $token : null;
+        if ($this->subAgentManager !== null) {
+            $this->subAgentManager->setParentCancellation($this->cancellation);
+        }
         return $this;
     }
 
@@ -1065,10 +1076,12 @@ class AgentRuntime
      */
     public function cancel($reason = '调用方要求取消')
     {
-        if ($this->cancellation === null) {
-            $this->cancellation = new \Ai\Agent\Loop\CancellationToken();
+        $token = $this->cancellation;
+        if ($token === null) {
+            $token = new \Ai\Agent\Loop\CancellationToken();
+            $this->setCancellation($token);
         }
-        $this->cancellation->cancel($reason);
+        $token->cancel($reason);
         return $this;
     }
 
@@ -1093,6 +1106,78 @@ class AgentRuntime
     public function getToolDiscovery()
     {
         return $this->toolDiscovery;
+    }
+
+    /**
+     * 把本次运行的度量填进结果
+     *
+     * `AgentResult` 的契约字段（cost / duration_ms / files_changed …）一直存在，
+     * 但从来没人填——调用方得自己去 BudgetManager 和 WorkspaceManager 里各取一遍，
+     * 于是 `toContract()` 返回的成本永远是 0。生产环境要按次核算成本、
+     * 要知道这次跑了多久、动了哪些文件，这些都该由运行时填好。
+     *
+     * 只补**没有的**字段：循环里已经算出来的（如 usage）不覆盖。
+     *
+     * @param AgentResult $result
+     * @param float $startedAt
+     * @param AgentContext $context
+     * @return void
+     */
+    protected function attachRunMetrics($result, $startedAt, AgentContext $context)
+    {
+        if (!$result instanceof AgentResult) {
+            return;
+        }
+
+        $extra = $result->getExtra();
+        $details = [];
+
+        if (!isset($extra['duration_ms'])) {
+            $details['duration_ms'] = round((microtime(true) - $startedAt) * 1000, 1);
+        }
+
+        if ($this->budget !== null) {
+            $summary = $this->budget->summary();
+            if (!isset($extra['cost'])) {
+                $details['cost'] = $summary['cost'];
+            }
+            if (!isset($extra['tool_calls_count'])) {
+                $details['tool_calls_count'] = $summary['tool_calls'];
+            }
+            $details['budget'] = isset($extra['budget']) ? $extra['budget'] : $summary;
+        }
+
+        // 动过哪些文件：代码任务的核心产出。工作区管理器已经在跟踪，
+        // 只是从来没往结果里放
+        if ($this->workspace !== null && !isset($extra['files_changed'])) {
+            try {
+                $this->workspace->refresh();
+                $modified = $this->workspace->getModified();
+                if (is_array($modified) && $modified) {
+                    $details['files_changed'] = array_values($modified);
+                }
+            } catch (\Throwable $e) {
+                // 工作区不是 git 仓库、或 git 不可用——拿不到就不填，
+                // 不能让「补充度量」这一步把一次成功的运行搞失败
+            }
+        }
+
+        if (!isset($extra['plan']) && $this->planManager !== null && $this->planId !== '') {
+            $plan = $this->planManager->getPlan($this->planId);
+            if ($plan !== null) {
+                $details['plan'] = [
+                    'id'       => $plan->getId(),
+                    'goal'     => $plan->getGoal(),
+                    'version'  => $plan->getVersion(),
+                    'progress' => $plan->progress(),
+                    'pending'  => count($plan->getPendingSteps()),
+                ];
+            }
+        }
+
+        if ($details) {
+            $result->withDetails($details);
+        }
     }
 
     /**
@@ -1207,8 +1292,11 @@ class AgentRuntime
             $this->hooks->triggerAgentStart();
         }
 
+        $runStartedAt = microtime(true);
+
         try {
             $result = $this->loop->run($context);
+            $this->attachRunMetrics($result, $runStartedAt, $context);
             // agent_stop 钩子
             if ($this->hooks && $this->hooks->hasAgentStop()) {
                 $this->hooks->triggerAgentStop($result->getStopReason());

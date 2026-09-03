@@ -173,10 +173,13 @@ class ContextManager
      * @param callable $summarizer function(array $messages, string $taskHint): string
      *                             传入被压缩的旧消息，返回摘要文本
      * @param string $taskHint 任务提示（帮助摘要器保留关键信息）
+     * @param string $preserve 原样保留的结构化状态（改过的文件、计划进度、当前分支）。
+     *                         摘要会漏，这一段不会——它不经模型转述，直接拼进上下文。
      * @return array<int, array<string, mixed>> 压缩后的消息列表
      */
-    public function compact($summarizer, $taskHint = '')
+    public function compact($summarizer, $taskHint = '', $preserve = '')
     {
+        $preserve = (string) $preserve;
         $count = count($this->messages);
         if ($count <= $this->keepRecent) {
             return $this->messages;
@@ -220,11 +223,27 @@ class ContextManager
                 }
                 return true;
             });
-            $this->messages = array_merge(array_values($old), $keepMessages);
+            // 摘要失败时状态更不能丢：这条路径下模型对早期历史一无所知，
+            // 全靠这段结构化事实撑住
+            $rescued = array_merge(array_values($old), $keepMessages);
+            if ($preserve !== '') {
+                array_unshift($rescued, [
+                    'role'    => 'system',
+                    'content' => "[Preserved state]\n" . $preserve,
+                ]);
+            }
+            $this->messages = $rescued;
             return $this->messages;
         }
 
-        $summaryMsg = ['role' => 'system', 'content' => '[Conversation summary]\n' . $summary];
+        // 摘要负责叙事，preserve 负责事实。事实原样拼进去，不经模型转述——
+        // 长任务压到第三、第四次之后，「改过哪些文件」「计划还剩几步」
+        // 一旦被摘要漏掉，模型会重做已经做完的事，或者以为自己做完了
+        $content = "[Conversation summary]\n" . $summary;
+        if ($preserve !== '') {
+            $content .= "\n\n[Preserved state]\n" . $preserve;
+        }
+        $summaryMsg = ['role' => 'system', 'content' => $content];
         $this->messages = array_merge([$summaryMsg], $keepMessages);
         return $this->messages;
     }

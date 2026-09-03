@@ -1882,6 +1882,19 @@ $summary = $bm->summary();
 
 墙钟从循环开始处起算（`start()` 由循环自动调用），不是从 `BudgetManager` 构造时——它常常在装配阶段就建好，离真正开跑可能隔着很久。同一个实例跑第二个任务前调 `reset()` 清空计量。
 
+**子 Agent 与父 Agent 共用同一本账**：委派出去的活儿花的 token、成本、工具调用都记在父账本上，父 Agent 的墙钟上限对它一样有效。跟权限同一条道理——子 Agent 的额度 ⊆ 父 Agent 的额度。不继承的话，父 Agent 设了 5 分钟上限却挡不住它派出去的活儿跑二十分钟。取消令牌一并往下传：叫停父 Agent 会把它派出去的子 Agent 一起停掉。
+
+运行结束后，成本、耗时、改动的文件会自动填进 `AgentResult`，不必自己去各个管理器里拼：
+
+```php
+$result = $agent->getRuntime()->run($messages);
+
+$result->getCost();          // 本次运行的估算成本
+$result->getDuration();      // 毫秒
+$result->getFilesChanged();  // 动过哪些文件
+$result->toContract();       // 完整结构化结果，可直接 JSON 返回
+```
+
 ### 取消：让 Agent 停得下来
 
 生产环境里任务需要能中途停下：用户按了停止、浏览器断开、任务超时。`CancellationToken` 让循环在**安全点**收手：

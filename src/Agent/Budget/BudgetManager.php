@@ -201,7 +201,8 @@ class BudgetManager
     /**
      * 预算超限详情
      *
-     * @return array{exceeded: bool, reason: string, tokens: int, cost: float}
+     * @return array{exceeded: bool, reason: string, tokens: int, cost: float,
+     *               elapsed: float, tool_calls: int}
      */
     public function summary()
     {

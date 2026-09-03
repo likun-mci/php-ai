@@ -81,6 +81,12 @@ class SubAgentManager
     /** @var \Ai\Agent\Skill\SkillManager|null 父 Agent 的技能管理器 */
     protected $parentSkills = null;
 
+    /** @var \Ai\Agent\Budget\BudgetManager|null 父 Agent 的预算（子 Agent 共用同一本账） */
+    protected $parentBudget = null;
+
+    /** @var \Ai\Agent\Loop\CancellationToken|null 父 Agent 的取消令牌 */
+    protected $parentCancellation = null;
+
     /** @var \Ai\Agent\Mcp\McpManager|null 父 Agent 的 MCP 管理器 */
     protected $parentMcp = null;
 
@@ -494,6 +500,59 @@ class SubAgentManager
      * @param array<string, mixed> $tools
      * @return $this
      */
+    /**
+     * 设置父 Agent 的预算
+     *
+     * 子 Agent 与父 Agent **共用同一本账**：它花的 token、成本、工具调用次数都记在
+     * 父账本上，父 Agent 的墙钟上限对它同样有效。预算跟权限是同一条道理——
+     * 子 Agent 的额度 ⊆ 父 Agent 的额度。
+     *
+     * @param \Ai\Agent\Budget\BudgetManager|null $budget
+     * @return $this
+     */
+    public function setParentBudget($budget)
+    {
+        $this->parentBudget = $budget instanceof \Ai\Agent\Budget\BudgetManager ? $budget : null;
+        return $this;
+    }
+
+    /**
+     * @return \Ai\Agent\Budget\BudgetManager|null
+     */
+    public function getParentBudget()
+    {
+        return $this->parentBudget;
+    }
+
+    /**
+     * 设置父 Agent 的取消令牌
+     *
+     * 叫停父 Agent 时，它派出去的子 Agent 也该一起停——否则主循环已经收尾，
+     * 子 Agent 还在后台跑。
+     *
+     * @param \Ai\Agent\Loop\CancellationToken|null $token
+     * @return $this
+     */
+    public function setParentCancellation($token)
+    {
+        $this->parentCancellation = $token instanceof \Ai\Agent\Loop\CancellationToken ? $token : null;
+        return $this;
+    }
+
+    /**
+     * @return \Ai\Agent\Loop\CancellationToken|null
+     */
+    public function getParentCancellation()
+    {
+        return $this->parentCancellation;
+    }
+
+    /**
+     * 设置父 Agent 的工具集（子 Agent 的能力从这里面收窄而来）
+     *
+     * @param array<string, mixed> $tools
+     * @return $this
+     */
     public function setParentTools(array $tools)
     {
         $this->parentTools = $tools;
@@ -626,6 +685,21 @@ class SubAgentManager
         // MCP：父 Agent 已登记的服务器里挑子集
         if ($def->getMcpServers() && $this->parentMcp !== null) {
             $runtime->setMcpManager($this->parentMcp);
+        }
+
+        // 预算继承：跟权限同一条道理——子 Agent 花的也是父 Agent 的钱和时间。
+        // 共用**同一个** BudgetManager 实例，于是子 Agent 的 token、成本、
+        // 工具调用都累进父账本，父 Agent 的墙钟上限对它一样有效。
+        // 不继承的话，一个被委派出去的子 Agent 可以自己跑到天荒地老——
+        // 父 Agent 设了 5 分钟上限，却挡不住它派出去的活儿跑二十分钟
+        if ($this->parentBudget !== null) {
+            $runtime->setBudget($this->parentBudget);
+        }
+
+        // 取消继承：叫停父 Agent 就该把它派出去的活儿一起停掉，
+        // 否则主循环已经收尾，子 Agent 还在后台烧钱
+        if ($this->parentCancellation !== null) {
+            $runtime->setCancellation($this->parentCancellation);
         }
 
         if ($def->getHooks() !== null) {

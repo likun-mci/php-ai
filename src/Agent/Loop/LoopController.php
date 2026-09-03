@@ -10,6 +10,7 @@ use Ai\Agent\Tool\ToolContext;
 use Ai\Agent\Tool\ToolExecutor;
 use Ai\Agent\Tool\ToolRegistry;
 use Ai\Agent\Tool\ToolResult;
+use Ai\Helpers\Text;
 
 /**
  * 循环控制器——Agent 自循环的核心
@@ -380,11 +381,56 @@ class LoopController
     }
 
     /**
-     * 运行主循环
+     * 压缩时必须原样留住的状态
+     *
+     * 压缩靠模型摘要，而摘要是会漏的——尤其是长任务压到第三、第四次之后，
+     * 「改过哪些文件」「测试跑没跑过」「计划还剩几步」这类事实一旦被摘掉，
+     * 模型会开始重做已经做完的事，或者以为自己做完了。
+     *
+     * 所以这些不交给模型转述：从计划、工作区、目标里**结构化地**取出来，
+     * 原样拼进压缩后的上下文。摘要负责叙事，这一段负责事实。
      *
      * @param AgentContext $context
-     * @return AgentResult
+     * @return string 没有可留的状态时返回空串
      */
+    protected function stateDigest(AgentContext $context)
+    {
+        $lines = [];
+
+        $goal = $context->getGoal();
+        if ($goal !== '') {
+            $lines[] = '目标：' . Text::cutChars($goal, 300);
+        }
+
+        $plan = $context->getPlan();
+        if ($plan !== null) {
+            $lines[] = '计划（v' . $plan->getVersion() . '，完成度 ' . $plan->progress() . '%）：';
+            foreach ($plan->getSteps() as $step) {
+                $lines[] = '  [' . $step->getStatus() . '] ' . Text::cutChars((string) $step->getAction(), 120);
+            }
+        }
+
+        $wm = $context->getWorkspaceManager();
+        if ($wm !== null) {
+            try {
+                $wm->refresh();
+                $modified = $wm->getModified();
+                if (is_array($modified) && $modified) {
+                    $lines[] = '已改动的文件：' . implode('、', array_slice(array_values($modified), 0, 30));
+                }
+                $branch = $wm->getBranch();
+                if ((string) $branch !== '') {
+                    $lines[] = '当前分支：' . $branch;
+                }
+            } catch (\Throwable $e) {
+                // 不是 git 仓库或 git 不可用——拿不到就不写，
+                // 不能让「保住状态」这一步把压缩本身搞崩
+            }
+        }
+
+        return $lines ? implode("\n", $lines) : '';
+    }
+
     /**
      * 收到取消信号后收尾
      *
@@ -495,7 +541,11 @@ class LoopController
                         $hooks->triggerBeforeCompact($cm->tokenCount(), count($cm->messages()));
                     }
                     $summarizer = $this->makeSummarizer($ai);
-                    $newMessages = $cm->compact($summarizer, $context->getSystem());
+                    $newMessages = $cm->compact(
+                        $summarizer,
+                        $context->getSystem(),
+                        $this->stateDigest($context)
+                    );
                     $context->setMessages($newMessages);
                     $context->emit('context_compact_done', [
                         'messages' => count($newMessages),

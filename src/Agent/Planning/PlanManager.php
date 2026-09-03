@@ -341,6 +341,62 @@ class PlanManager
     }
 
     /**
+     * 整表覆写计划步骤
+     *
+     * `modifyPlan()` 的 append/insert/replace/remove 适合精确的小改；模型自己管计划
+     * 时用的是另一种语义——**每次给出完整的最新一版**。增量补丁要求模型准确记住
+     * 上一版的步骤 ID，记错一个就错位；整表覆盖没有这个失败模式。
+     *
+     * 覆写前照例快照：旧版本不能因为覆写而消失，「原计划是什么、为什么改成现在这样」
+     * 是排查 Agent 走偏的关键线索。
+     *
+     * @param string $planId
+     * @param array<int, PlanStep|string|array<string, mixed>> $steps 完整的新步骤表
+     * @param string $reason 修订原因
+     * @return Plan|null 计划不存在时返回 null
+     */
+    public function rewrite($planId, array $steps, $reason = '模型更新计划')
+    {
+        $plan = $this->getPlan($planId);
+        if (!$plan) {
+            return null;
+        }
+
+        $this->snapshot($plan);
+
+        $before = [];
+        foreach ($plan->getSteps() as $old) {
+            $before[] = (string) $old->getAction();
+        }
+
+        $normalized = [];
+        foreach ($steps as $i => $stepDef) {
+            if ($stepDef instanceof PlanStep) {
+                $normalized[] = $stepDef;
+            } elseif (is_string($stepDef)) {
+                $normalized[] = new PlanStep($i + 1, $stepDef);
+            } elseif (is_array($stepDef)) {
+                $normalized[] = PlanStep::fromArray(array_merge([
+                    'id'     => $i + 1,
+                    'action' => '',
+                ], $stepDef));
+            }
+        }
+        $plan->setSteps($normalized);
+
+        $after = [];
+        foreach ($normalized as $step) {
+            $after[] = (string) $step->getAction();
+        }
+        $plan->addRevision($reason, [
+            ['rewrite', count($before) . ' 步 → ' . count($after) . ' 步'],
+        ]);
+        $this->save($plan);
+
+        return $plan;
+    }
+
+    /**
      * 某个计划的全部历史版本
      *
      * 修改计划前的样子会被快照下来——「原计划是什么、为什么改成现在这样」

@@ -2737,6 +2737,49 @@ $artifacts->summarize('task_1', 'out.txt', $output, 5);
 
 产物名会做路径穿越防护，`../../../etc/passwd` 这类写法进不来。
 
+### 模型驱动：让模型自己拆计划、自己派子 Agent
+
+编排层用规则在**模型看到任务之前**决定策略——描述里出现「重构」就先拆计划，撞上某个子 Agent 的 description 就派给它。规则跑得快、可复现，但它看不懂任务：真正该委派的探索识别不出来，碰巧撞词的简单改动反而被派走。
+
+`modelDrivenTools()` 把这两件事做成**工具**，交给模型在循环里自己决定：
+
+```php
+$agent = Agent::create($ai)
+    ->workdir(__DIR__)
+    ->tools($tools)
+    ->setPlanManager(new PlanManager())
+    ->setSubAgentManager($sam)
+    ->modelDrivenTools();      // ← 挂上 update_plan 与 delegate
+
+$agent->run([['role' => 'user', 'content' => '给项目加上 OAuth 登录并跑通测试']]);
+```
+
+`codeAgent()` 会自动挂上这两个工具（它本来就装了 PlanManager 和六个子 Agent），传 `['noModelDrivenTools' => true]` 可以关掉。
+
+| 工具 | 模型用它做什么 |
+|---|---|
+| `update_plan` | 写下打算怎么做、每完成一步标成 `completed`、发现原计划不对就整表改掉 |
+| `delegate` | 把需要翻很多文件才能得出一个结论的探索，交给子 Agent 在**独立上下文**里做，只收回摘要 |
+
+**计划是状态，不是脚本。** 关键差别在于模型能在拿到真实结果之后改主意——读了三个文件发现项目里已经有现成的 `AuthProvider` 基础类，就直接把计划改掉，而不是照着开工前定死的那张表继续走：
+
+```php
+$agent->onEvent(function ($e) {
+    if ($e['type'] === 'plan_updated') {
+        echo "计划改到第 {$e['version']} 版，共 {$e['steps']} 步，进度 {$e['progress']}%\n";
+    }
+});
+```
+
+每次覆写前的版本都会被快照保留（`PlanManager::versions()`）——「原计划是什么、为什么改成现在这样」是排查 Agent 走偏的关键线索，直接覆盖就查不到了。想在自己的代码里做同样的整表覆写，用 `PlanManager::rewrite($planId, $steps, $reason)`。
+
+几条边界：
+
+- 两个工具都**不会**进子 Agent 的工具集。没声明 `tools` 的子 Agent 会继承父工具集的全部，拿到 `delegate` 就能再派子 Agent，一层套一层没有底。
+- 依赖没挂就不注册：没有 `PlanManager` 就没有 `update_plan`，没有子 Agent 就没有 `delegate`。注册一个必然报错的工具只会让模型白调一轮。
+- 委派次数上限（默认 8 次）是**每次运行**的预算，`run()` / `task()` 各自开头重置。
+- 不调用 `modelDrivenTools()`、也不走 `codeAgent()` 的代码，工具集与行为完全不变。
+
 ### 编排层（AgentOrchestrator）
 
 `AgentRuntime` 回答的是「怎么跑一轮循环」，编排层回答的是**「这活该怎么干」**——直接调工具、先拆计划、派给子 Agent、并行铺开，还是丢后台。

@@ -48,6 +48,12 @@ class Agent
     /** @var AI */
     protected $ai;
 
+    /** @var \Ai\Agent\Tools\DelegateTool|null 模型驱动委派工具（modelDrivenTools 装配） */
+    protected $delegateTool = null;
+
+    /** @var \Ai\Agent\Tools\UpdatePlanTool|null 模型驱动计划工具（modelDrivenTools 装配） */
+    protected $planTool = null;
+
     /** @var AgentRuntime */
     protected $runtime;
 
@@ -1010,6 +1016,10 @@ class Agent
      */
     public function task($task, array $context = [])
     {
+        // 与 run() 一样，委派额度按每次任务重置——task() 不走 run()，得各自重置一次
+        if ($this->delegateTool !== null) {
+            $this->delegateTool->reset();
+        }
         return $this->orchestrator()->handle((string) $task, $context);
     }
 
@@ -1050,6 +1060,82 @@ class Agent
     public function taskStatus($taskId)
     {
         return $this->orchestrator()->dispatcher()->status((string) $taskId);
+    }
+
+    /**
+     * 挂上「让模型自己做决定」的两个工具
+     *
+     * `update_plan`——模型自己拆计划、自己改计划、自己标完成。
+     * `delegate`——模型自己判断哪段工作值得开一个隔离上下文交给子 Agent。
+     *
+     * 这两件事原先都在循环外由 `StrategySelector` 用关键词决定：任务描述里出现
+     * 「重构」就先拆计划，碰巧撞上某个子 Agent 的 description 就派给它。可这类判断
+     * 必须看懂任务才能做——关键词看不懂任务。做成工具之后，模型能在拿到真实结果
+     * 之后再改主意：读了三个文件发现项目里已经有现成的基础类，就直接把计划改掉。
+     *
+     * ```php
+     * $agent = Agent::create($ai)->workdir(__DIR__)
+     *     ->tools($tools)
+     *     ->setPlanManager(new PlanManager())
+     *     ->setSubAgentManager($sam)
+     *     ->modelDrivenTools();
+     * ```
+     *
+     * 依赖没挂就不注册对应的工具——注册一个必然报错的工具，只会让模型白调一轮。
+     * 已有入口 `run()` / `task()` / `dispatch()` 的行为不受影响：不调用本方法的
+     * 用户，工具集与改动前完全一致。
+     *
+     * @param array<string, mixed> $options maxItems（计划步骤上限）/ maxDelegations（委派次数上限）
+     * @return $this
+     */
+    public function modelDrivenTools(array $options = [])
+    {
+        $tools = [];
+
+        $pm = $this->runtime->getPlanManager();
+        if ($pm !== null) {
+            $runtime = $this->runtime;
+            $planTool = new \Ai\Agent\Tools\UpdatePlanTool($pm, [
+                'planId'   => $runtime->getPlanId(),
+                'maxItems' => isset($options['maxItems']) ? (int) $options['maxItems'] : 40,
+                // 计划 ID 绑回运行时，下一轮的 system 注入才会带上这份计划。
+                // 少了这一步，模型写完计划下一轮就看不见它，只会反复重写
+                'onChange' => function ($plan) use ($runtime) {
+                    $runtime->setPlanId($plan->getId());
+                },
+            ]);
+            $tools['update_plan'] = $planTool;
+            $this->planTool = $planTool;
+        }
+
+        $sam = $this->runtime->getSubAgentManager();
+        if ($sam !== null && $sam->all()) {
+            $delegateTool = new \Ai\Agent\Tools\DelegateTool($sam, [
+                'maxDelegations' => isset($options['maxDelegations'])
+                    ? (int) $options['maxDelegations']
+                    : 8,
+            ]);
+            $tools['delegate'] = $delegateTool;
+            $this->delegateTool = $delegateTool;
+        }
+
+        if (!$tools) {
+            return $this;
+        }
+
+        $this->tools($tools);
+
+        // 这两个工具不能进父工具集：声明了 tools 的子 Agent 拿不到它们，但**没声明
+        // tools 的子 Agent 会继承父工具集的全部**（见 SubAgentManager::resolveTools）。
+        // 那样子 Agent 就能再派子 Agent，一层套一层没有底；`update_plan` 同理——
+        // 子 Agent 有自己的任务，不该改写主 Agent 的计划。
+        if ($sam !== null) {
+            $parentTools = $this->runtime->getToolRegistry()->all();
+            unset($parentTools['delegate'], $parentTools['update_plan']);
+            $sam->setParentTools($parentTools);
+        }
+
+        return $this;
     }
 
     /**
@@ -1114,6 +1200,12 @@ class Agent
 
         // 项目指令（CLAUDE.md / AGENTS.md）
         $this->loadInstructions($workdir);
+
+        // 计划管理器和六个子 Agent 都已经装好了，不给模型用没有道理——
+        // 装了却只在循环外由关键词调度，等于把最该由模型做的判断留给了词表
+        if (empty($options['noModelDrivenTools'])) {
+            $this->modelDrivenTools($options);
+        }
 
         return $this;
     }
@@ -1731,6 +1823,12 @@ class Agent
      */
     public function run(array $messages)
     {
+        // 委派次数上限是**每次运行**的预算，不是这个 Agent 对象一辈子的额度。
+        // 不重置的话，同一个实例跑第二个任务时额度已经被上一个任务花光了
+        if ($this->delegateTool !== null) {
+            $this->delegateTool->reset();
+        }
+
         // 委托给 AgentRuntime 执行
         $result = $this->runtime->run($messages);
 

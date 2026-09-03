@@ -51,6 +51,50 @@ class Text
     }
 
     /**
+     * 按**字节**截断，保留**尾部**
+     *
+     * 与 `cutBytes()` 相反，丢头留尾。用于失败输出：PHPUnit 的失败汇总、
+     * PHP 的 Fatal error、依赖冲突的结论都出现在末尾，头部往往是无关的启动日志。
+     * 从头截会恰好把唯一有用的那几行丢掉。
+     *
+     * @param string $text
+     * @param int $maxBytes 上限字节数，<= 0 时原样返回
+     * @return string
+     */
+    public static function cutBytesTail($text, $maxBytes)
+    {
+        $text = (string) $text;
+        $maxBytes = (int) $maxBytes;
+
+        if ($maxBytes <= 0 || strlen($text) <= $maxBytes) {
+            return $text;
+        }
+        // 走到这里 strlen($text) > $maxBytes > 0，起点必然落在串内，substr 拿得到字符串
+        return self::trimBrokenHead((string) substr($text, -$maxBytes));
+    }
+
+    /**
+     * 去掉开头半个多字节字符
+     *
+     * 从中间切出来的片段，头部可能是某个汉字的后半截。UTF-8 的续字节形如
+     * 10xxxxxx，逐个丢掉直到落在一个字符的起始字节上——否则整个请求体
+     * 会因为非法 UTF-8 被协议层拒掉。
+     *
+     * @param string $text
+     * @return string
+     */
+    protected static function trimBrokenHead($text)
+    {
+        $len = strlen($text);
+        $i = 0;
+        // 续字节最多 3 个，多于 3 个说明本来就不是合法 UTF-8，不再往下啃
+        while ($i < $len && $i < 4 && (ord($text[$i]) & 0xC0) === 0x80) {
+            $i++;
+        }
+        return $i > 0 ? (string) substr($text, $i) : $text;
+    }
+
+    /**
      * 按**字符**截断
      *
      * 用于给人看的摘要、日志行——那里关心的是「显示多长」而不是字节数。

@@ -238,24 +238,82 @@ class ToolExecutor
      */
     protected function truncateOutput(ToolResult $result)
     {
-        if (!$result->isSuccess() || $this->maxOutputBytes <= 0) {
+        if ($this->maxOutputBytes <= 0) {
             return $result;
         }
+
+        return $result->isSuccess()
+            ? $this->truncateSuccess($result)
+            : $this->truncateError($result);
+    }
+
+    /**
+     * 截断成功输出——保留**头部**
+     *
+     * 读文件、列目录这类结果的开头就是要的东西，后面可以让模型用 offset/limit 再取。
+     *
+     * @param ToolResult $result
+     * @return ToolResult
+     */
+    protected function truncateSuccess(ToolResult $result)
+    {
         $content = $result->getContent();
         if (!is_string($content) || strlen($content) <= $this->maxOutputBytes) {
             return $result;
         }
+        $omitted = strlen($content) - $this->maxOutputBytes;
         $truncated = Text::cutBytes($content, $this->maxOutputBytes)
             . "\n\n[Output truncated at " . $this->maxOutputBytes . " bytes, "
-            . (strlen($content) - $this->maxOutputBytes) . " bytes omitted. Use offset/limit to read more.]";
+            . $omitted . " bytes omitted. Use offset/limit to read more.]";
 
         $metadata = $result->getMetadata();
-        $metadata['truncated_bytes'] = strlen($content) - $this->maxOutputBytes;
+        $metadata['truncated_bytes'] = $omitted;
         $metadata['original_bytes'] = strlen($content);
 
         return new ToolResult([
             'success'    => true,
             'content'    => $truncated,
+            'metadata'   => $metadata,
+            'is_partial' => true,
+            'display'    => $result->getDisplay() . ' (truncated)',
+        ]);
+    }
+
+    /**
+     * 截断失败输出——保留**尾部**
+     *
+     * 失败结果原先被整段跳过不截，恰好截反了：最长的输出几乎总是失败输出
+     * （PHPUnit 的失败详情、PHP 的 stack trace、依赖冲突的完整解算过程），
+     * 一次几百 KB 直接灌进上下文，把后面几轮的空间全挤掉。
+     *
+     * 留尾不留头：结论（Fatal error、失败断言汇总、最终的冲突原因）在末尾，
+     * 头部通常是无关的启动日志。模型要的是结论。
+     *
+     * 失败结果回填给模型的是 `'ERROR: ' . $error`（见 `ToolResult::__toString`），
+     * 所以要截的是 `error` 而不是 `content`。
+     *
+     * @param ToolResult $result
+     * @return ToolResult
+     */
+    protected function truncateError(ToolResult $result)
+    {
+        $error = $result->getError();
+        if (!is_string($error) || strlen($error) <= $this->maxOutputBytes) {
+            return $result;
+        }
+        $omitted = strlen($error) - $this->maxOutputBytes;
+        $truncated = "[Error output truncated: leading " . $omitted
+            . " bytes omitted, showing the last " . $this->maxOutputBytes . " bytes.]\n\n"
+            . Text::cutBytesTail($error, $this->maxOutputBytes);
+
+        $metadata = $result->getMetadata();
+        $metadata['truncated_bytes'] = $omitted;
+        $metadata['original_bytes'] = strlen($error);
+
+        return new ToolResult([
+            'success'    => false,
+            'content'    => $result->getContent(),
+            'error'      => $truncated,
             'metadata'   => $metadata,
             'is_partial' => true,
             'display'    => $result->getDisplay() . ' (truncated)',

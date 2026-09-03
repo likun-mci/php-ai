@@ -2716,6 +2716,49 @@ $artifacts->summarize('task_1', 'out.txt', $output, 5);
 
 Artifact names are guarded against path traversal, so `../../../etc/passwd` cannot get through.
 
+### Model-driven: let the model plan and delegate on its own
+
+The orchestration layer picks a strategy with rules **before the model ever sees the task** — the word "refactor" in the description triggers planning, a chance match against a sub-agent's description sends the work there. Rules are fast and reproducible, but they cannot read the task: the exploration that genuinely deserves delegation goes unrecognised, while a simple edit that happens to hit a keyword gets shipped off.
+
+`modelDrivenTools()` turns both of these into **tools**, so the model decides inside the loop:
+
+```php
+$agent = Agent::create($ai)
+    ->workdir(__DIR__)
+    ->tools($tools)
+    ->setPlanManager(new PlanManager())
+    ->setSubAgentManager($sam)
+    ->modelDrivenTools();      // ← installs update_plan and delegate
+
+$agent->run([['role' => 'user', 'content' => 'Add OAuth login to the project and get the tests passing']]);
+```
+
+`codeAgent()` installs both automatically (it already wires up a PlanManager and the six sub-agents); pass `['noModelDrivenTools' => true]` to turn that off.
+
+| Tool | What the model uses it for |
+|---|---|
+| `update_plan` | Write down the intended approach, mark each step `completed` as it lands, and rewrite the whole table when the original plan turns out to be wrong |
+| `delegate` | Hand exploration that needs many files read to a sub-agent working in an **isolated context**, and take back only the summary |
+
+**A plan is state, not a script.** The point is that the model can change its mind once it has real results — after reading three files it discovers the project already ships an `AuthProvider` base class, so it rewrites the plan instead of marching through a table fixed before any work began:
+
+```php
+$agent->onEvent(function ($e) {
+    if ($e['type'] === 'plan_updated') {
+        echo "Plan now at version {$e['version']}, {$e['steps']} steps, {$e['progress']}% done\n";
+    }
+});
+```
+
+Every version prior to a rewrite is snapshotted (`PlanManager::versions()`) — "what was the original plan, and why did it become this" is the key thread when tracing an Agent that went off course, and overwriting in place destroys it. To do the same full-table rewrite from your own code, use `PlanManager::rewrite($planId, $steps, $reason)`.
+
+A few boundaries:
+
+- Neither tool enters the sub-agents' tool set. A sub-agent that declares no `tools` inherits the parent set wholesale; handed `delegate`, it could spawn sub-agents of its own, nesting without a floor.
+- Nothing is registered without its dependency: no `PlanManager` means no `update_plan`, no sub-agents means no `delegate`. Registering a tool that is guaranteed to fail only wastes a model round.
+- The delegation cap (8 by default) is a **per-run** budget, reset at the start of `run()` and `task()`.
+- Code that calls neither `modelDrivenTools()` nor `codeAgent()` sees exactly the same tool set and behaviour as before.
+
 ### Orchestration layer (AgentOrchestrator)
 
 `AgentRuntime` answers "how do I run one iteration"; the orchestration layer answers **"how should this work be done"** — call tools directly, break it into a plan first, delegate to a sub-agent, fan out in parallel, or push it to the background.

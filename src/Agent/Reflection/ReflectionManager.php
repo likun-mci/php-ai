@@ -42,6 +42,21 @@ class ReflectionManager
     /** @var callable|null 自定义反思策略 function(array $messages, string $goal): ReflectionResult */
     protected $strategy = null;
 
+    /** @var int 超过这个字符数就不再算「推迟性发言」，见 looksLikeDeferral() */
+    protected $deferralMaxChars = 80;
+
+    /**
+     * @var string[] 意图预告词——「我打算去做」而不是「我已经做完/答完」
+     *
+     * 只用于识别推迟，不参与任何流程决策：判错了最多是多推一轮，
+     * 不会改变 Agent 该调哪个工具。
+     */
+    protected static $deferralMarkers = [
+        '让我', '我来', '我将', '我会', '我这就', '我先', '接下来', '下面开始',
+        '首先我', '现在开始', '稍等', '正在', '准备',
+        "let me", "i'll", "i will", "let's", "first, i", "now i", "going to",
+    ];
+
     /**
      * @param array<string, mixed> $options
      */
@@ -52,6 +67,9 @@ class ReflectionManager
         }
         if (isset($options['maxRounds'])) {
             $this->maxRounds = (int) $options['maxRounds'];
+        }
+        if (isset($options['deferralMaxChars'])) {
+            $this->deferralMaxChars = max(1, (int) $options['deferralMaxChars']);
         }
         if (isset($options['strategy'])) {
             $this->strategy = $options['strategy'];
@@ -216,16 +234,61 @@ class ReflectionManager
             );
         }
 
-        // 3. 一个工具都没调过：首轮、或压根还没有 assistant 回合，说明还没开始干活
+        // 3. 一个工具都没调过，而且模型只是「打算去做」——推迟性发言，得推它一把
+        //
+        //    这条判据原先覆盖「所有没调工具的首轮回复」，把简单问答也扫了进去：
+        //    「PHP 怎么判断数组为空？」第一轮就答完了，却被判成尚未开始，答案被丢掉，
+        //    再拿「开始执行具体操作」多逼一轮。简单请求要能一轮结束——低延迟本身是目标。
+        //    所以判据收窄到它真正想拦的那一类：模型嘴上答应、实际没动手。
         if ($toolCallCount === 0 && (!empty($context['isFirstRound']) || $lastAssistant === null)) {
-            return ReflectionResult::continuing(
-                'Agent 尚未开始执行工具，需要继续',
-                '开始执行具体操作'
-            );
+            $lastText = $lastAssistant !== null ? $this->extractText($lastAssistant) : '';
+            if ($lastAssistant === null || $this->looksLikeDeferral($lastText)) {
+                return ReflectionResult::continuing(
+                    'Agent 尚未开始执行工具，需要继续',
+                    '开始执行具体操作'
+                );
+            }
         }
 
         // 4. 模型不再调工具，最后一批结果也没报错——这就是完成
         return ReflectionResult::completed('工具执行未报错，Agent 已停止调用工具');
+    }
+
+    /**
+     * 这段回复是「打算去做」还是「已经答完」
+     *
+     * 推迟性发言（`让我先分析一下` / `好的，我这就修复`）与实质回答长得不一样，
+     * 三个信号同时成立才判为推迟——任一不成立就按已答完处理，宁可少推一把：
+     * 误判成推迟会把一个正确答案丢掉重跑，误判成答完只是少一次纠正机会。
+     *
+     * 1. 出现明确的意图预告词
+     * 2. 篇幅短——实质回答通常远长于一句预告
+     * 3. 不含代码块——给了代码就是给了答案
+     *
+     * @param string $text
+     * @return bool
+     */
+    protected function looksLikeDeferral($text)
+    {
+        $text = trim((string) $text);
+        if ($text === '') {
+            // 既没调工具也没说话，那确实什么都没干
+            return true;
+        }
+        if (strpos($text, '```') !== false) {
+            return false;
+        }
+        if (Text::length($text) > $this->deferralMaxChars) {
+            return false;
+        }
+        $lower = function_exists('mb_strtolower') ? mb_strtolower($text, 'UTF-8') : strtolower($text);
+        foreach (self::$deferralMarkers as $marker) {
+            $needle = function_exists('mb_strtolower') ? mb_strtolower($marker, 'UTF-8') : strtolower($marker);
+            if (strpos($lower, $needle) !== false) {
+                return true;
+            }
+        }
+        return false;
     }
 
     /**

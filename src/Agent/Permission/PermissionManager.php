@@ -61,8 +61,8 @@ class PermissionManager
     /** @var string[] 持久写工具：非文件编辑但有持久副作用，manual 模式默认询问（如记忆写入，见 dev.md 14.2） */
     protected static $writeTools = ['remember', 'forget'];
 
-    /** @var string[] 外呼工具：访问网络，manual 模式默认询问（见 dev.md v2.1 §1.3） */
-    protected static $networkTools = ['web_fetch', 'web_search'];
+    /** @var string[] 外呼工具：访问网络，manual 模式默认询问（见 dev.md v2.1 §1.3 / §1.5） */
+    protected static $networkTools = ['web_fetch', 'web_search', 'translate'];
 
     /** @var array<string, PermissionRequest> 待处理的权限请求 */
     protected $requests = [];

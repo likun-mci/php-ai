@@ -66,6 +66,7 @@ class ClaudeCodeTools
         return [
             'web_fetch'  => new WebFetchTool(),
             'web_search' => new WebSearchTool(),
+            'translate'  => new TranslateTool(),
         ];
     }
 

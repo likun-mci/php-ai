@@ -1654,6 +1654,9 @@ $agent->setTools(ClaudeCodeTools::all([
 $agent->setTools(ClaudeCodeTools::readOnly([
     'workdir' => '/var/www/project',
 ]));
+
+// 联网工具（默认不装配，需显式启用）：web_fetch / web_search / translate
+$agent->tools(ClaudeCodeTools::web());
 ```
 
 六个内置工具详情：
@@ -1662,12 +1665,40 @@ $agent->setTools(ClaudeCodeTools::readOnly([
 |------|------|---------|
 | `read_file` | 读取文件，支持 offset/limit 分页 | ✅ |
 | `write_file` | 创建或覆盖文件，自动创建目录 | ❌ |
-| `edit_file` | 精确局部替换，str_replace 语义 | ❌ |
-| `glob` | 按 glob 模式匹配文件路径 | ✅ |
-| `grep` | 按模式搜索文件内容 | ✅ |
+| `edit_file` | 精确局部替换（str_replace 语义）；`edits` 数组可**批量原子编辑**（全成功才落盘） | ❌ |
+| `glob` | 按 glob 模式匹配文件路径（可靠递归 `**`，**尊重 `.gitignore`**） | ✅ |
+| `grep` | 按模式搜索内容；探测到 `ripgrep` 自动加速，支持 `ignore_case` / 上下文行 / `output_mode` | ✅ |
 | `bash` | 执行 shell 命令，超时自动终止 | ❌ |
 
 所有文件工具都受 `PathSafety` 沙箱保护，无法逃逸 workdir 范围。
+
+#### 联网工具（web_fetch / web_search / translate）
+
+自 v2.1 起，`ClaudeCodeTools::web()` 提供三个**默认不装配**的联网工具，需显式 `->tools(...)` 启用（避免给所有 Agent 平白开外网）。它们属外呼，默认经 `PermissionManager` 把关（`manual` 询问，`dont_ask` / `bypass` / `auto` 放行）：
+
+| 工具 | 说明 |
+|------|------|
+| `web_fetch` | 抓取网页正文（HTML 自动转纯文本），复用 `Ai\Tools\HttpFetch` 做 SSRF 安全防护（拒内网/回环/云元数据，逐跳重校验重定向） |
+| `web_search` | 关键词网页搜索，返回标题/链接/摘要（DuckDuckGo Lite，免费无密钥） |
+| `translate` | 文本翻译（Edge 免费接口，无需密钥） |
+
+**渐进增强**：`grep` 探测到 `rg`（ripgrep）、`glob` 探测到 `git` 就自动用它们换取性能/精度，探测不到则回退纯 PHP 实现——外部二进制只是可选增强，不是依赖。
+
+#### 文本翻译（Translate helper）
+
+`Ai\Helpers\Translate` 可直接翻译文本，Edge 免费接口为主、库自带 LLM 兜底：
+
+```php
+use Ai\Helpers\Translate;
+
+// 数组入参返回数组，字符串入参返回字符串
+$en = Translate::to('项目使用 CodeIgniter 3', 'en', ['from' => 'zh-Hans']);
+
+// Edge 不可用时用库自带 LLM 兜底
+$en = Translate::to($texts, 'en', ['from' => 'zh-Hans', 'ai' => $ai]);
+```
+
+配套脚本 `php bin/translate-readme.php README.md > README-en.draft.md` 可把中文 Markdown 按段落翻成英文**初稿**（代码围栏原样保留），平台名/模型名/端点 URL 需人工校对后再落地。
 
 #### 输出截断：Text 助手
 

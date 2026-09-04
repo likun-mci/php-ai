@@ -1642,6 +1642,9 @@ $agent->setTools(ClaudeCodeTools::all([
 $agent->setTools(ClaudeCodeTools::readOnly([
     'workdir' => '/var/www/project',
 ]));
+
+// Network tools (not assembled by default; opt in explicitly): web_fetch / web_search / translate
+$agent->tools(ClaudeCodeTools::web());
 ```
 
 The six built-in tools:
@@ -1650,12 +1653,40 @@ The six built-in tools:
 |------|-------------|---------------|
 | `read_file` | Read a file, with offset/limit pagination | ✅ |
 | `write_file` | Create or overwrite a file, auto-creates directories | ❌ |
-| `edit_file` | Precise local replacement using str_replace semantics | ❌ |
-| `glob` | Match file paths by glob pattern | ✅ |
-| `grep` | Search file contents by pattern | ✅ |
+| `edit_file` | Precise local replacement (str_replace semantics); the `edits` array enables **atomic batch edits** (written only if all succeed) | ❌ |
+| `glob` | Match file paths by glob pattern (reliable `**` recursion, **respects `.gitignore`**) | ✅ |
+| `grep` | Search contents by pattern; auto-accelerated when `ripgrep` is present, supports `ignore_case` / context lines / `output_mode` | ✅ |
 | `bash` | Execute a shell command, auto-terminates on timeout | ❌ |
 
 All file tools are protected by the `PathSafety` sandbox — they cannot escape the workdir.
+
+#### Network tools (web_fetch / web_search / translate)
+
+Since v2.1, `ClaudeCodeTools::web()` provides three **not-assembled-by-default** network tools that you enable explicitly via `->tools(...)` (so you don't open the network for every Agent). They are outbound calls and gated by `PermissionManager` by default (`manual` asks; `dont_ask` / `bypass` / `auto` allow):
+
+| Tool | Description |
+|------|-------------|
+| `web_fetch` | Fetch a page body (HTML auto-converted to text); reuses `Ai\Tools\HttpFetch` for SSRF protection (rejects intranet/loopback/cloud-metadata, re-validates each redirect hop) |
+| `web_search` | Keyword web search returning title/URL/snippet (DuckDuckGo Lite, free, no key) |
+| `translate` | Text translation (Edge free endpoint, no key) |
+
+**Progressive enhancement**: `grep` uses `rg` (ripgrep) and `glob` uses `git` when detected, for speed/accuracy, and falls back to pure PHP otherwise — external binaries are optional enhancements, not dependencies.
+
+#### Text translation (the Translate helper)
+
+`Ai\Helpers\Translate` translates text directly — Edge's free endpoint first, the library's own LLM as fallback:
+
+```php
+use Ai\Helpers\Translate;
+
+// Array in → array out; string in → string out
+$en = Translate::to('项目使用 CodeIgniter 3', 'en', ['from' => 'zh-Hans']);
+
+// Fall back to the library's own LLM when Edge is unavailable
+$en = Translate::to($texts, 'en', ['from' => 'zh-Hans', 'ai' => $ai]);
+```
+
+The companion script `php bin/translate-readme.php README.md > README-en.draft.md` turns a Chinese Markdown file into an English **draft** paragraph by paragraph (code fences kept verbatim); platform/model names and endpoint URLs must be proofread before landing.
 
 #### Output truncation: the Text helper
 

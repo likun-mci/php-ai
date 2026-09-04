@@ -1668,9 +1668,43 @@ $agent->tools(ClaudeCodeTools::web());
 | `edit_file` | 精确局部替换（str_replace 语义）；`edits` 数组可**批量原子编辑**（全成功才落盘） | ❌ |
 | `glob` | 按 glob 模式匹配文件路径（可靠递归 `**`，**尊重 `.gitignore`**） | ✅ |
 | `grep` | 按模式搜索内容；探测到 `ripgrep` 自动加速，支持 `ignore_case` / 上下文行 / `output_mode` | ✅ |
-| `bash` | 执行 shell 命令，超时自动终止 | ❌ |
+| `bash` | 执行 shell 命令，超时自动终止；`run_in_background=true` 可**后台跑长任务** | ❌ |
+| `bash_output` | 读取后台命令的增量输出（`action=read/kill/list`） | ❌ |
 
 所有文件工具都受 `PathSafety` 沙箱保护，无法逃逸 workdir 范围。
+
+**二进制防护**：`read_file` 读到图片/PDF/压缩包时不会把原始字节回传（那会产生非法 UTF-8，
+让下一次请求的 `json_encode()` 失败、整个 Agent 运行中断），而是给出类型、大小、图片宽高等
+结构化说明；`grep` 同样跳过二进制文件。
+
+#### 后台长任务（bash + bash_output）
+
+构建、测试、装依赖这类长任务不该把 Agent 阻塞在一次工具调用里：
+
+```php
+// 模型侧：bash(command: "composer install", run_in_background: true)
+//        → 立刻拿到句柄 id，继续干别的
+// 之后：  bash_output(bash_id: "bg_1_ab12cd")   → 取增量输出
+//        bash_output(action: "list")            → 列出全部后台任务
+//        bash_output(bash_id: "...", action: "kill")  → 结束
+```
+
+`bash_output` 每次只返回**上次之后的新输出**，适合轮询进度；进程结束后带上退出码。
+
+#### Notebook 编辑（notebook_edit，按需启用）
+
+`.ipynb` 是 JSON，用 `read_file` 整份读会把 `outputs` 里的 base64 图片全灌进上下文。
+`Ai\Agent\Tools\NotebookEditTool` 按 cell 读写，输出只给摘要：
+
+```php
+use Ai\Agent\Tools\NotebookEditTool;
+use Ai\Agent\Tools\PathSafety;
+
+$agent->tools(['notebook_edit' => new NotebookEditTool(new PathSafety('/var/www/project'))]);
+// action=read 列出各 cell；replace / insert / delete 按 cell_index 改动
+```
+
+它**不在** `all()` 里——工具 schema 每次请求都占 token，notebook 在 PHP 项目里属小众，按需注册即可。
 
 #### 联网工具（web_fetch / web_search / translate）
 
@@ -1699,6 +1733,19 @@ $en = Translate::to($texts, 'en', ['from' => 'zh-Hans', 'ai' => $ai]);
 ```
 
 配套脚本 `php bin/translate-readme.php README.md > README-en.draft.md` 可把中文 Markdown 按段落翻成英文**初稿**（代码围栏原样保留），平台名/模型名/端点 URL 需人工校对后再落地。
+
+#### 上下文：文件读取去重与自定义 tokenizer
+
+长任务里模型常为"再确认一下"重复读同一个文件，每次全文都再进一次上下文——token 白烧，
+旧内容还可能与改动后的现状矛盾。`ContextManager` 会在压缩前先折叠重复读取，同一文件只留最新一份
+（只改 `tool_result` 的内容字符串，不动 `tool_use_id`，不破坏配对）：
+
+```php
+$cm->dedupeFileReads();          // 返回被折叠的份数；compact() 内部会先自动调用
+
+// 内置 token 数是字符估算；各模型分词规则不同，可注入精确计数器
+$cm->setTokenizer(function ($text) { return my_tokenizer_count($text); });
+```
 
 #### 输出截断：Text 助手
 

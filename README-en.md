@@ -1656,9 +1656,40 @@ The six built-in tools:
 | `edit_file` | Precise local replacement (str_replace semantics); the `edits` array enables **atomic batch edits** (written only if all succeed) | ❌ |
 | `glob` | Match file paths by glob pattern (reliable `**` recursion, **respects `.gitignore`**) | ✅ |
 | `grep` | Search contents by pattern; auto-accelerated when `ripgrep` is present, supports `ignore_case` / context lines / `output_mode` | ✅ |
-| `bash` | Execute a shell command, auto-terminates on timeout | ❌ |
+| `bash` | Execute a shell command, auto-terminates on timeout; `run_in_background=true` runs **long tasks in the background** | ❌ |
+| `bash_output` | Read incremental output from a background command (`action=read/kill/list`) | ❌ |
 
 All file tools are protected by the `PathSafety` sandbox — they cannot escape the workdir.
+
+**Binary guard**: when `read_file` hits an image/PDF/archive it does not return the raw bytes (those would be invalid UTF-8, making the next request's `json_encode()` fail and aborting the whole Agent run). It returns structured info instead — type, size, image dimensions; `grep` likewise skips binary files.
+
+#### Long-running tasks in the background (bash + bash_output)
+
+Builds, test suites and dependency installs should not block the Agent inside a single tool call:
+
+```php
+// Model side: bash(command: "composer install", run_in_background: true)
+//             → returns a handle id immediately and moves on
+// Later:      bash_output(bash_id: "bg_1_ab12cd")           → incremental output
+//             bash_output(action: "list")                   → list all background tasks
+//             bash_output(bash_id: "...", action: "kill")   → terminate
+```
+
+`bash_output` returns only **what is new since the last read**, which suits progress polling; once the process exits it also reports the exit code.
+
+#### Notebook editing (notebook_edit, opt-in)
+
+`.ipynb` is JSON — reading it whole with `read_file` dumps the base64 images inside `outputs` into your context. `Ai\Agent\Tools\NotebookEditTool` reads and writes per cell and only summarizes outputs:
+
+```php
+use Ai\Agent\Tools\NotebookEditTool;
+use Ai\Agent\Tools\PathSafety;
+
+$agent->tools(['notebook_edit' => new NotebookEditTool(new PathSafety('/var/www/project'))]);
+// action=read lists the cells; replace / insert / delete operate by cell_index
+```
+
+It is **not** part of `all()` — a tool schema costs tokens on every request, and notebooks are niche in PHP projects, so register it only when you need it.
 
 #### Network tools (web_fetch / web_search / translate)
 
@@ -1687,6 +1718,17 @@ $en = Translate::to($texts, 'en', ['from' => 'zh-Hans', 'ai' => $ai]);
 ```
 
 The companion script `php bin/translate-readme.php README.md > README-en.draft.md` turns a Chinese Markdown file into an English **draft** paragraph by paragraph (code fences kept verbatim); platform/model names and endpoint URLs must be proofread before landing.
+
+#### Context: file-read de-duplication and a custom tokenizer
+
+In long sessions the model often re-reads the same file "just to be sure", and each full copy enters the context again — wasted tokens, and the stale copy may even contradict the current state. `ContextManager` collapses repeated reads before compacting, keeping only the newest copy of each file (it only rewrites the `tool_result` content string, never the `tool_use_id`, so pairing stays intact):
+
+```php
+$cm->dedupeFileReads();          // returns how many were collapsed; compact() calls it first automatically
+
+// The built-in token count is a character-based estimate; tokenizers differ per model, so you can inject an exact one
+$cm->setTokenizer(function ($text) { return my_tokenizer_count($text); });
+```
 
 #### Output truncation: the Text helper
 

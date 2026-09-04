@@ -4,20 +4,21 @@ namespace Ai\Agent\Tools;
 use Ai\Agent\Tool\AgentToolInterface;
 use Ai\Agent\Tool\ToolContext;
 use Ai\Agent\Tool\ToolResult;
+use Ai\Helpers\Path;
 
 /**
- * 文件编辑工具——精确替换
+ * 文件编辑工具——精确替换（支持批量原子编辑 MultiEdit）
  *
  * 对已存在文件做局部替换，而不是覆盖整个文件。
  * 采用 str_replace 语义：模型给出 old_string（被替换的原文片段）和 new_string（替换后的内容），
  * 工具在原文件里做精确匹配。这样避免了 AI 重写整文件时可能引入的副作用。
  *
- * 执行流程：
- * 1. 读取原文件
- * 2. 匹配 old_string（必须唯一）
- * 3. 替换为 new_string
- * 4. 写回文件
- * 5. 返回 diff 摘要
+ * 两种用法（见 dev.md v2.1 §1.2）：
+ * - 单次：old_string / new_string / replace_all
+ * - 批量：edits: [{old_string, new_string, replace_all?}, ...]，**按顺序应用、全部成功才落盘**，
+ *   任一失败整体不写（原子），并报第几条失败。第 N 条在第 N-1 条的结果上匹配。
+ *
+ * 执行流程：读原文 → 逐条匹配替换（内存）→ 全成功后 atomicWrite 一次落盘 → 返回 diff 摘要。
  */
 class EditFileTool implements AgentToolInterface
 {
@@ -41,6 +42,7 @@ class EditFileTool implements AgentToolInterface
     {
         return '对文件做精确局部替换。用 old_string 定位原文片段，用 new_string 替换。'
             . 'old_string 必须与文件现有内容完全一致且唯一。'
+            . '一次改多处用 edits 数组（按顺序应用、全部成功才落盘，任一失败整体不写）。'
             . '适合修补 bug、修改配置等局部改动。'
             . '新建文件请用 write_file，删除文件请用 bash rm。';
     }
@@ -56,7 +58,7 @@ class EditFileTool implements AgentToolInterface
                 ],
                 'old_string' => [
                     'type'        => 'string',
-                    'description' => '被替换的原文片段（必须逐字一致且唯一，含缩进）',
+                    'description' => '被替换的原文片段（必须逐字一致且唯一，含缩进）。批量编辑时用 edits 代替。',
                 ],
                 'new_string' => [
                     'type'        => 'string',
@@ -67,23 +69,50 @@ class EditFileTool implements AgentToolInterface
                     'description' => '如果 old_string 出现多次是否全部替换',
                     'default'     => false,
                 ],
+                'edits' => [
+                    'type'        => 'array',
+                    'description' => '批量编辑：[{old_string, new_string, replace_all?}, ...]，按顺序应用、原子落盘。给了 edits 就忽略顶层 old_string/new_string。',
+                    'items'       => [
+                        'type'       => 'object',
+                        'properties' => [
+                            'old_string'  => ['type' => 'string'],
+                            'new_string'  => ['type' => 'string'],
+                            'replace_all' => ['type' => 'boolean', 'default' => false],
+                        ],
+                        'required'   => ['old_string', 'new_string'],
+                    ],
+                ],
             ],
-            'required' => ['path', 'old_string', 'new_string'],
+            'required' => ['path'],
         ];
     }
 
     public function execute(array $input, ToolContext $context)
     {
-        $path       = isset($input['path']) ? (string) $input['path'] : '';
-        $oldString  = isset($input['old_string']) ? (string) $input['old_string'] : '';
-        $newString  = isset($input['new_string']) ? (string) $input['new_string'] : '';
-        $replaceAll = !empty($input['replace_all']);
-
+        $path = isset($input['path']) ? (string) $input['path'] : '';
         if ($path === '') {
             return ToolResult::error('参数 path 不能为空');
         }
-        if ($oldString === '') {
-            return ToolResult::error('参数 old_string 不能为空');
+
+        // 规整编辑列表：优先 edits 数组，否则退回单次 old_string/new_string
+        $edits = [];
+        if (isset($input['edits']) && is_array($input['edits']) && $input['edits']) {
+            foreach ($input['edits'] as $e) {
+                if (!is_array($e)) {
+                    return ToolResult::error('edits 每一项必须是对象');
+                }
+                $edits[] = [
+                    'old' => isset($e['old_string']) ? (string) $e['old_string'] : '',
+                    'new' => isset($e['new_string']) ? (string) $e['new_string'] : '',
+                    'all' => !empty($e['replace_all']),
+                ];
+            }
+        } else {
+            $edits[] = [
+                'old' => isset($input['old_string']) ? (string) $input['old_string'] : '',
+                'new' => isset($input['new_string']) ? (string) $input['new_string'] : '',
+                'all' => !empty($input['replace_all']),
+            ];
         }
 
         try {
@@ -102,37 +131,69 @@ class EditFileTool implements AgentToolInterface
         }
 
         // 统一换行符（\r\n → \n），避免匹配失败
-        $normalized = str_replace(["\r\n", "\r"], "\n", $content);
-        $oldNorm    = str_replace(["\r\n", "\r"], "\n", $oldString);
+        $working = str_replace(["\r\n", "\r"], "\n", $content);
 
-        $count = substr_count($normalized, $oldNorm);
-        if ($count === 0) {
-            return ToolResult::error('old_string 未在文件中找到，无法定位。请确认原文内容（含缩进和换行）完全一致。');
+        $isMulti = count($edits) > 1 || (isset($input['edits']) && is_array($input['edits']) && $input['edits']);
+        $totalReplaced = 0;
+        $oldLines = 0;
+        $newLines = 0;
+        // 逐条在内存里应用；任一失败直接返回错误，绝不落盘（原子）
+        foreach ($edits as $i => $edit) {
+            $label = $isMulti ? ('edits[' . $i . '] ') : '';
+            $res = $this->applyOneEdit($working, $edit['old'], $edit['new'], $edit['all'], $label);
+            if ($res['error'] !== '') {
+                return ToolResult::error($res['error']);
+            }
+            $working = $res['content'];
+            $totalReplaced += $res['replaced'];
+            $oldLines += count(explode("\n", str_replace(["\r\n", "\r"], "\n", $edit['old'])));
+            $newLines += count(explode("\n", $edit['new']));
         }
-        if ($count > 1 && !$replaceAll) {
-            return ToolResult::error("old_string 匹配到 {$count} 处，不唯一。请补充更多上下文或设置 replace_all=true。");
-        }
 
-        $result = $replaceAll
-            ? str_replace($oldNorm, $newString, $normalized)
-            : $this->strReplaceFirst($normalized, $oldNorm, $newString);
-
-        $bytes = file_put_contents($absPath, $result);
-        if ($bytes === false) {
+        // 全部成功，一次性原子落盘
+        if (!Path::atomicWrite($absPath, $working)) {
             return ToolResult::error('写入文件失败：' . $path);
         }
 
-        // 生成 diff 摘要
-        $oldLines = explode("\n", $oldNorm);
-        $newLines = explode("\n", $newString);
-
-        return ToolResult::success('已编辑文件：' . $path, [
-            'path'       => $path,
-            'replaced'   => $count,
-            'old_lines'  => count($oldLines),
-            'new_lines'  => count($newLines),
-            'diff'       => '替换 ' . $count . ' 处，-' . count($oldLines) . ' +' . count($newLines) . ' 行',
+        $editCount = count($edits);
+        return ToolResult::success('已编辑文件：' . $path . '（' . $editCount . ' 处编辑，替换 ' . $totalReplaced . ' 次）', [
+            'path'      => $path,
+            'edits'     => $editCount,
+            'replaced'  => $totalReplaced,
+            'old_lines' => $oldLines,
+            'new_lines' => $newLines,
+            'diff'      => $editCount . ' 处编辑，替换 ' . $totalReplaced . ' 次，-' . $oldLines . ' +' . $newLines . ' 行',
         ]);
+    }
+
+    /**
+     * 在内存字符串上应用一条编辑；成功返回 [content, replaced]，失败返回 [error]
+     *
+     * @param string $content 当前内容（已规整换行）
+     * @param string $oldString
+     * @param string $newString
+     * @param bool $replaceAll
+     * @param string $label 报错前缀（批量时形如 "edits[2] "，单次为空）
+     * @return array{content: string, replaced: int, error: string}
+     */
+    protected function applyOneEdit($content, $oldString, $newString, $replaceAll, $label = '')
+    {
+        $label = (string) $label;
+        $oldNorm = str_replace(["\r\n", "\r"], "\n", (string) $oldString);
+        if ($oldNorm === '') {
+            return ['content' => '', 'replaced' => 0, 'error' => $label . 'old_string 不能为空'];
+        }
+        $count = substr_count($content, $oldNorm);
+        if ($count === 0) {
+            return ['content' => '', 'replaced' => 0, 'error' => $label . 'old_string 未在文件中找到，无法定位。请确认原文内容（含缩进和换行）完全一致。'];
+        }
+        if ($count > 1 && !$replaceAll) {
+            return ['content' => '', 'replaced' => 0, 'error' => $label . 'old_string 匹配到 ' . $count . ' 处，不唯一。请补充更多上下文或设置 replace_all=true。'];
+        }
+        $result = $replaceAll
+            ? str_replace($oldNorm, (string) $newString, $content)
+            : $this->strReplaceFirst($content, $oldNorm, (string) $newString);
+        return ['content' => $result, 'replaced' => $count, 'error' => ''];
     }
 
     /**

@@ -168,11 +168,18 @@ class McpStdioTransport implements McpTransportInterface
                 $chunk = @fread($this->stdout, 65536);
                 if ($chunk !== false && $chunk !== '') {
                     $this->buffer .= $chunk;
+                }
+                // 把缓冲里**所有**能解析的消息都取出来，直到解不动为止。
+                // 只解析一条会踩坑：服务器常把通知（progress/log）与响应放在同一次
+                // 读取里返回，消费掉通知后响应仍留在缓冲，而下一轮只在「有新数据」时
+                // 才会再解析——服务器已经说完了，于是干等到超时。
+                do {
+                    $before = strlen($this->buffer);
                     $message = $this->tryParseMessage($expectedId);
                     if ($message !== null) {
                         return $message;
                     }
-                }
+                } while (strlen($this->buffer) < $before);   // 有消费就继续尝试
             }
             usleep(50000);
         }

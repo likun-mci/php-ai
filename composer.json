@@ -120,6 +120,7 @@
             "php tests/agent_notebook_test.php",
             "php tests/agent_lsp_test.php",
             "php tests/agent_llm_reflection_test.php",
+            "php tests/agent_ast_index_test.php",
             "php tests/agent_storage_test.php",
             "php tests/agent_jsonl_session_test.php",
             "php tests/agent_phase41_test.php",
@@ -145,11 +146,13 @@
     },
     "require-dev": {
         "dealerdirect/phpcodesniffer-composer-installer": "^1.0",
+        "nikic/php-parser": "^4.19",
         "phpcompatibility/php-compatibility": "^9.3",
         "phpstan/phpstan": "^1.10",
         "squizlabs/php_codesniffer": "^3.7"
     },
     "suggest": {
-        "ext-openssl": "使用 WebSocket 语音接口（wss://，如讯飞 TTS/ASR）时必需；对话、图像、HTTP 语音等其余能力不需要"
+        "ext-openssl": "使用 WebSocket 语音接口（wss://，如讯飞 TTS/ASR）时必需；对话、图像、HTTP 语音等其余能力不需要",
+        "nikic/php-parser": "装了它 code_index 会自动改走 AST 解析（类名全限定、闭包内调用不漏）；不装则维持 token 级解析，功能不受影响"
     }
 }

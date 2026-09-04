@@ -27,6 +27,9 @@ class CodeAnalyzer
     /** @var FileAnalyzer */
     protected $fileAnalyzer;
 
+    /** @var AstFileAnalyzer|null 装了 nikic/php-parser 时的精度增强解析器（可选依赖） */
+    protected $astAnalyzer = null;
+
     /** @var ClassAnalyzer */
     protected $classAnalyzer;
 
@@ -57,6 +60,11 @@ class CodeAnalyzer
     public function __construct(array $options = [])
     {
         $this->fileAnalyzer = new FileAnalyzer();
+        // 渐进增强：装了 nikic/php-parser 就走 AST（类名全限定、结构不会漏配对），
+        // 没装则维持 token 级解析——本库零运行时依赖的承诺不变
+        if (AstFileAnalyzer::isAvailable()) {
+            $this->astAnalyzer = new AstFileAnalyzer();
+        }
         $this->classAnalyzer = new ClassAnalyzer($this->fileAnalyzer);
         $this->functionAnalyzer = new FunctionAnalyzer($this->fileAnalyzer);
         $this->callGraph = new CallGraph();
@@ -101,7 +109,14 @@ class CodeAnalyzer
     public function analyzeFile($path)
     {
         $path = (string) $path;
-        $analysis = $this->fileAnalyzer->analyze($path);
+        // AST 解析失败（语法错误、不支持的新语法）时回退 token 版，绝不因此丢掉整个文件
+        $analysis = null;
+        if ($this->astAnalyzer !== null) {
+            $analysis = $this->astAnalyzer->analyze($path);
+        }
+        if ($analysis === null) {
+            $analysis = $this->fileAnalyzer->analyze($path);
+        }
         if ($analysis === null) {
             return null;
         }

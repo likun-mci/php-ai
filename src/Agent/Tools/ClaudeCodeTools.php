@@ -4,7 +4,7 @@ namespace Ai\Agent\Tools;
 /**
  * Claude Code 风格内置工具工厂
  *
- * 一键创建 Agent 的完整内置工具集（Read/Write/Edit/Glob/Grep/Bash），
+ * 一键创建 Agent 的完整内置工具集（Read/Write/Edit/Glob/Grep/Bash/BashOutput），
  * 这些工具与 Claude Code CLI 默认工具集对齐，让 Agent 具备结构化文件操作能力。
  *
  * 用法：
@@ -49,6 +49,8 @@ class ClaudeCodeTools
         $bashTool = new BashTool($bashTimeout);
         $bashTool->setWorkdir($workdir);
         $tools['bash'] = $bashTool;
+        // 与 bash 的 run_in_background 配套：没有它后台任务就取不回输出
+        $tools['bash_output'] = new BashOutputTool();
 
         return $tools;
     }

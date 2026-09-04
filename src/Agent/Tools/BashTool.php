@@ -59,7 +59,8 @@ class BashTool implements AgentToolInterface
         return '执行 shell 命令。支持管道、重定向等标准 shell 语法。'
             . '命令已在 ' . $cwd . ' 下执行，相对路径直接写即可，不要自行 cd 到别处。'
             . '超时 ' . $this->timeout . ' 秒自动终止，'
-            . '输出超过 ' . $this->maxOutputBytes . ' 字节时会截断。';
+            . '输出超过 ' . $this->maxOutputBytes . ' 字节时会截断。'
+            . '长任务（构建/测试/装依赖）传 run_in_background=true 后台跑，再用 bash_output 取输出。';
     }
 
     public function schema()
@@ -81,6 +82,11 @@ class BashTool implements AgentToolInterface
                     'description' => '命令超时（秒），默认 ' . $this->timeout,
                     'default'     => $this->timeout,
                 ],
+                'run_in_background' => [
+                    'type'        => 'boolean',
+                    'description' => '后台运行：立刻返回句柄 id 并继续，之后用 bash_output 读增量输出。适合构建、测试、装依赖等长任务',
+                    'default'     => false,
+                ],
             ],
             'required' => ['command'],
         ];
@@ -100,6 +106,21 @@ class BashTool implements AgentToolInterface
         // 确定工作目录
         $cd = $this->workdir ?: $context->workdir();
         $cd = $cd !== '' ? $cd : null;
+
+        // 后台运行：立刻返回句柄，长任务不阻塞 Agent 主循环（见 dev.md 第二梯队 1）
+        if (!empty($input['run_in_background'])) {
+            $bgId = BackgroundShells::start($command, $cd, $this->maxOutputBytes);
+            if ($bgId === '') {
+                return ToolResult::error('后台启动失败');
+            }
+            return new ToolResult([
+                'success'  => true,
+                'content'  => '已在后台启动，句柄 id: ' . $bgId
+                    . "\n用 bash_output 读取输出（bash_id 传该 id），或 action=kill 结束。",
+                'metadata' => ['bash_id' => $bgId, 'background' => true, 'command' => $command],
+                'display'  => 'Bash(后台): ' . mb_substr($command, 0, 60),
+            ]);
+        }
 
         $descriptors = [
             0 => ['pipe', 'r'],  // stdin

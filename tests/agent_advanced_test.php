@@ -127,7 +127,7 @@ check($r->isSuccess() && trim($r->getContent()) === '3', 'bash 执行命令', tr
 
 // ClaudeCodeTools 工厂
 $tools = ClaudeCodeTools::all(['workdir' => $workdir]);
-check(count($tools) === 6, 'ClaudeCodeTools::all() 返回 6 个工具');
+check(count($tools) === 7, 'ClaudeCodeTools::all() 返回 7 个工具（含 bash_output）');
 $roTools = ClaudeCodeTools::readOnly(['workdir' => $workdir]);
 check(count($roTools) === 3 && !isset($roTools['bash']), 'ClaudeCodeTools::readOnly() 不含 bash');
 

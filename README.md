@@ -1691,6 +1691,53 @@ $agent->tools(ClaudeCodeTools::web());
 
 `bash_output` 每次只返回**上次之后的新输出**，适合轮询进度；进程结束后带上退出码。
 
+#### 精确代码导航（lsp，按需启用）
+
+`code_index` 是**词法级**的，自述「callers 可能不准，当作重构唯一依据不行」；语言服务器有完整类型系统，
+改接口找全部实现、跳定义、看真实签名只有它做得准。`Ai\Agent\Tools\LspTool` 把它接给模型：
+
+```php
+use Ai\Agent\Tools\LspTool;
+use Ai\Agent\Tools\PathSafety;
+
+$agent->tools(['lsp' => new LspTool(
+    new PathSafety('/var/www/project'),
+    'intelephense', ['--stdio'],              // PHP；其它语言换 gopls / typescript-language-server 等
+    ['rootPath' => '/var/www/project']
+)]);
+// action：definition 跳定义 / references 找引用 / hover 看签名 / symbols 列符号
+// line 从 1 起（与 read_file、grep 一致），character 从 0 起（LSP 原生列号）
+```
+
+语言服务器是**可选**外部程序，不进 composer 依赖；探测不到时工具会明确提示改用 `grep` / `code_index`，
+而不是静默给错答案。传输复用 `McpStdioTransport`——LSP 与 MCP 同为「Content-Length 分帧 + JSON-RPC over stdio」。
+
+分工：**精确导航走 `lsp`，快速缩小范围走 `code_index`/`grep`。**
+
+#### code_index 的可选 AST 增强
+
+装了 `nikic/php-parser`（`composer require --dev nikic/php-parser`）后，`code_index` 自动改走 AST 解析：
+类名解析成全限定名（分组 `use`、别名、`implements`、参数类型、静态调用都拿到 FQN），闭包内部的调用也不会漏。
+没装则维持 token 级解析，功能不受影响——**零运行时依赖的承诺不变**。
+
+> AST 只给语法结构、给不了类型：`$obj->save()` 的接收者类型推断仍需 `lsp`。
+
+#### 模型驱动的反思（LlmReflectionStrategy）
+
+默认反思靠固定关键词表判「任务完成没有」，换个措辞、说中文就判不出来。可换成让模型自己判：
+
+```php
+use Ai\Agent\Reflection\ReflectionManager;
+use Ai\Agent\Reflection\LlmReflectionStrategy;
+
+$rm = new ReflectionManager();
+// 强烈建议接上兜底：模型判不出来时退回内置判据，而不是直接停
+$rm->setStrategy(new LlmReflectionStrategy($ai, ['fallback' => $rm->defaultStrategy()]));
+```
+
+模型按 `{"done":…,"reason":…,"next":…}` 的 JSON 契约作答；请求异常或返回不可解析时走 `fallback`，
+没给 `fallback` 则保守判「完成」并写明原因——判官坏了就停下让人看到，好过在循环里空转烧钱。
+
 #### Notebook 编辑（notebook_edit，按需启用）
 
 `.ipynb` 是 JSON，用 `read_file` 整份读会把 `outputs` 里的 base64 图片全灌进上下文。

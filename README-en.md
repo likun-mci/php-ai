@@ -1677,6 +1677,48 @@ Builds, test suites and dependency installs should not block the Agent inside a 
 
 `bash_output` returns only **what is new since the last read**, which suits progress polling; once the process exits it also reports the exit code.
 
+#### Precise code navigation (lsp, opt-in)
+
+`code_index` is **lexical** and says so itself ("callers may be imprecise — don't treat it as the sole basis for a refactor"). A language server has a full type system, so finding every implementation of an interface, jumping to a definition or reading a real signature is something only it gets right. `Ai\Agent\Tools\LspTool` wires one in:
+
+```php
+use Ai\Agent\Tools\LspTool;
+use Ai\Agent\Tools\PathSafety;
+
+$agent->tools(['lsp' => new LspTool(
+    new PathSafety('/var/www/project'),
+    'intelephense', ['--stdio'],              // PHP; use gopls / typescript-language-server / … for other languages
+    ['rootPath' => '/var/www/project']
+)]);
+// actions: definition / references / hover / symbols
+// line is 1-based (consistent with read_file and grep); character is 0-based (LSP's native column)
+```
+
+The language server is an **optional** external program and never a Composer dependency; when it isn't found the tool says so explicitly and points the model back to `grep` / `code_index` rather than silently returning a wrong answer. Transport reuses `McpStdioTransport` — LSP and MCP are both "Content-Length framing + JSON-RPC over stdio".
+
+Division of labour: **`lsp` for precise navigation, `code_index` / `grep` for quickly narrowing the search.**
+
+#### Optional AST upgrade for code_index
+
+Install `nikic/php-parser` (`composer require --dev nikic/php-parser`) and `code_index` automatically switches to AST parsing: class names resolve to fully-qualified names (group `use`, aliases, `implements`, parameter types and static calls all get FQNs) and calls inside closures are no longer missed. Without it, lexical token parsing continues to work exactly as before — **the zero-runtime-dependency promise is unchanged**.
+
+> An AST gives you syntax, not types: inferring the receiver type of `$obj->save()` still needs `lsp`.
+
+#### Model-driven reflection (LlmReflectionStrategy)
+
+The default reflection decides "is the task done?" from a fixed keyword list — reword the sentence, or write it in Chinese, and it stops recognising completion. You can let the model judge instead:
+
+```php
+use Ai\Agent\Reflection\ReflectionManager;
+use Ai\Agent\Reflection\LlmReflectionStrategy;
+
+$rm = new ReflectionManager();
+// Strongly recommended: give it a fallback, so an unusable judge falls back to the built-in heuristics instead of just stopping
+$rm->setStrategy(new LlmReflectionStrategy($ai, ['fallback' => $rm->defaultStrategy()]));
+```
+
+The model answers under a strict `{"done":…,"reason":…,"next":…}` JSON contract. If the request fails or the reply can't be parsed it uses `fallback`; with no `fallback` it conservatively reports "done" and states why — a broken judge should stop and be seen, rather than spin in the loop burning tokens.
+
 #### Notebook editing (notebook_edit, opt-in)
 
 `.ipynb` is JSON — reading it whole with `read_file` dumps the base64 images inside `outputs` into your context. `Ai\Agent\Tools\NotebookEditTool` reads and writes per cell and only summarizes outputs:

@@ -111,6 +111,13 @@ class ReadFileTool implements AgentToolInterface, ParallelSafeToolInterface
             return ToolResult::error('读取文件失败：' . $path);
         }
 
+        // 二进制文件（图片/PDF/压缩包等）绝不能把原始字节灌进上下文：
+        // 非法 UTF-8 会让下一次请求的 json_encode() 直接失败，整个 Agent 运行中断。
+        // 这里给出结构化说明，让模型换用别的手段（如让应用层以附件形式传给多模态模型）。
+        if ($this->isBinary($content)) {
+            return $this->binaryResult($path, $absPath, $content, (int) $filesize);
+        }
+
         $lines = explode("\n", $content);
         $totalLines = count($lines);
 
@@ -155,6 +162,73 @@ class ReadFileTool implements AgentToolInterface, ParallelSafeToolInterface
             'metadata'   => $metadata,
             'is_partial' => $isPartial,
             'display'    => "Read {$path} (" . ($isPartial ? 'partial, ' : '') . "{$metadata['returned_lines']} lines)",
+        ]);
+    }
+    /**
+     * 是否二进制内容——含 NUL 字节或不是合法 UTF-8
+     *
+     * @param string $content
+     * @return bool
+     */
+    protected function isBinary($content)
+    {
+        if ($content === '') {
+            return false;
+        }
+        // 只看前 8KB 足够判定，避免大文件全量扫描
+        $head = substr($content, 0, 8192);
+        if (strpos($head, "\0") !== false) {
+            return true;
+        }
+        return !mb_check_encoding($head, 'UTF-8');
+    }
+
+    /**
+     * 二进制文件的结构化说明（不含原始字节）
+     *
+     * @param string $path 相对路径
+     * @param string $absPath 绝对路径
+     * @param string $content 原始内容（仅用于探测，不回传）
+     * @param int $filesize
+     * @return ToolResult
+     */
+    protected function binaryResult($path, $absPath, $content, $filesize)
+    {
+        $ext = strtolower((string) pathinfo($path, PATHINFO_EXTENSION));
+        $kind = '二进制文件';
+        $hint = '本工具只读文本；如需处理请改用 bash（如 file/strings/pdftotext）等外部手段。';
+        $meta = [
+            'path'      => $path,
+            'size'      => $filesize,
+            'binary'    => true,
+            'extension' => $ext,
+        ];
+
+        if (in_array($ext, ['png', 'jpg', 'jpeg', 'gif', 'webp', 'bmp', 'svg', 'ico'], true)
+            || strpos($content, "\x89PNG") === 0 || strpos($content, "\xFF\xD8\xFF") === 0) {
+            $kind = '图片';
+            $hint = '工具结果无法携带图像（各平台 tool_result 不统一支持）；'
+                . '需要视觉理解请由应用层把该文件作为附件传给多模态模型。';
+            if (function_exists('getimagesize')) {
+                $size = @getimagesize($absPath);
+                if (is_array($size)) {
+                    $meta['width'] = (int) $size[0];
+                    $meta['height'] = (int) $size[1];
+                    $meta['mime'] = (string) $size['mime'];
+                }
+            }
+        } elseif ($ext === 'pdf' || strpos($content, '%PDF-') === 0) {
+            $kind = 'PDF';
+            $meta['mime'] = 'application/pdf';
+            $hint = '需要正文请用 bash 调 pdftotext 等工具转成文本后再读。';
+        }
+
+        $dim = isset($meta['width']) ? ('，' . $meta['width'] . '×' . $meta['height']) : '';
+        return new ToolResult([
+            'success'  => true,
+            'content'  => $kind . '：' . $path . '（' . $filesize . ' 字节' . $dim . '）' . "\n" . $hint,
+            'metadata' => $meta,
+            'display'  => 'Read（' . $kind . '）: ' . $path,
         ]);
     }
 }

@@ -260,6 +260,11 @@ class GrepTool implements AgentToolInterface, ParallelSafeToolInterface
             if ($lines === false) {
                 continue;
             }
+            // 跳过二进制文件：命中后回传的字节可能是非法 UTF-8，会让后续
+            // json_encode() 失败而中断整个 Agent 运行（ripgrep 同样默认跳过二进制）
+            if ($this->isBinaryLines($lines)) {
+                continue;
+            }
             if (count($lines) > 5000) {
                 $lines = array_slice($lines, 0, 5000);
             }
@@ -564,5 +569,23 @@ class GrepTool implements AgentToolInterface, ParallelSafeToolInterface
             $files[] = $path;
         }
         return $files;
+    }
+    /**
+     * 是否二进制文件——取前若干行探测 NUL 字节与非法 UTF-8
+     *
+     * @param string[] $lines
+     * @return bool
+     */
+    protected function isBinaryLines(array $lines)
+    {
+        $head = implode("\n", array_slice($lines, 0, 32));
+        if ($head === '') {
+            return false;
+        }
+        $head = substr($head, 0, 8192);
+        if (strpos($head, "\0") !== false) {
+            return true;
+        }
+        return !mb_check_encoding($head, 'UTF-8');
     }
 }

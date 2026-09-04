@@ -26,7 +26,9 @@ jobs:
         uses: shivammathur/setup-php@v2
         with:
           php-version: ${{ matrix.php }}
-          extensions: curl, json, mbstring
+          # pdo_sqlite / sqlite3 是默认 SqliteToolRegistry（Agent Tool Registry）要用的；
+          # 库本身不硬依赖它（可退回 MemoryToolRegistry），但 CI 要覆盖默认那条路
+          extensions: curl, json, mbstring, pdo_sqlite, sqlite3
           coverage: none
 
       - name: 校验 composer.json
@@ -58,7 +60,7 @@ jobs:
         run: |
           set -u
           fail=0
-          for t in smoke compat stream tools lib cli cli_session ssrf task embedding image audio websocket video platform; do
+          for t in smoke compat stream tools lib cli cli_session ssrf task embedding image audio websocket video platform agent_tool_registry agent_tool_execution; do
             echo "::group::tests/${t}_test.php"
             if php "tests/${t}_test.php" > "/tmp/${t}.out" 2>&1; then
               cat "/tmp/${t}.out"

@@ -23,6 +23,7 @@ Every example in this document is taken from a real production system (a CodeIgn
 - 🤖 **Claude Code CLI** — drive the local `claude` binary directly (`Ai\Cli\ClaudeCode`): file I/O, tool execution, session resumption, structured output, with automatic path detection and caching
 - 📊 **CLI introspection** — read version, login state, model list, quota usage and rate limits, effective settings and MCP status without starting a conversation
 - 🔌 **Persistent duplex session** — `Ai\Cli\ClaudeCodeSession` mirrors the official IDE plugin's process model: multi-turn conversation in a long-lived process, tool-permission callbacks decided in PHP, graceful interruption, and new requests accepted mid-turn
+- 🗂️ **Agent Tool Registry** — add a few `@agent-tool` comment lines to your existing Controllers / Services, run `php-ai index` to scan them into SQLite (with FTS5 full-text search that handles CJK), and the Agent searches and loads schemas on demand; execution goes back through your application's **existing Controller entry permission check**, with no second permission system
 - 📝 **Code-editing protocol** — structured editing context plus verifiable edit actions, with plan / review / auto-apply modes
 - 🛡️ **Safe fetching** — `HttpFetch` guards against SSRF, DNS rebinding, private addresses and protocol escapes
 - 📄 **Multimodal attachments** — images and other attachments are adapted to each platform's format automatically
@@ -4229,6 +4230,320 @@ Get the stop reason via `$result->getStopReason()`:
 
 ---
 
+## Agent Tool standard and Tool Registry
+
+Turn the business capabilities a traditional PHP application **already has, already permission-controlled**, into Tools an Agent can discover and call — without rewriting business logic and without inventing a second permission system.
+
+```text
+Controller / Service + @agent-tool annotations
+        ↓  php-ai index
+SQLite Tool Registry (FTS5 full-text index)
+        ↓  search_app_tools / get_app_tool
+Agent loads Tool schemas on demand
+        ↓  call_app_tool
+Your existing Controller entry permission check   ← the only security boundary
+        ↓
+Controller / Service → business database
+```
+
+One principle: **let the AI discover what the application can do, but never let it decide whether it is allowed to do it.**
+
+### Why you need this
+
+Wiring an Agent into a business system usually goes one of two bad ways:
+
+- stuff thousands of capabilities into the prompt — tokens burn and the model still picks wrong;
+- hand the Agent an "execute arbitrary SQL" tool — bypassing permissions, cache invalidation, moderation state, audit logs, webhooks, and the rest of the business logic.
+
+This design takes a third path: the capability catalogue lives in a database, the model searches and loads on demand, and execution goes back through the application's existing Controller entry.
+
+### Three-step integration
+
+```php
+use Ai\Agent\Indexer\ToolIndexer;
+use Ai\Agent\Registry\SqliteToolRegistry;
+use Ai\Agent\Registry\CallableControllerGateway;
+use Ai\Agent\Discovery\RegistryToolBridge;
+use Ai\Agent\Registry\ToolSearchContext;
+
+// 1. Release stage: scan the application and write the Registry (CLI equivalent: php-ai index)
+$registry = new SqliteToolRegistry(APP_PATH . '/.ai/registry.sqlite');
+(new ToolIndexer($registry))->scan([APP_PATH . '/Controller', APP_PATH . '/Service']);
+
+// 2. Runtime: tell php-ai how to reach your existing Controller entry
+$gateway = new CallableControllerGateway(function ($path, array $args, array $ctx) {
+    // ⚠️ Your existing permission check MUST run here — this is the final security boundary
+    if (!$auth->check($ctx['user_id'], $path)) {
+        throw new \RuntimeException('Access denied: ' . $path);
+    }
+    return $router->dispatch($path, $args);
+});
+
+// 3. Plug it into the Agent
+$bridge = new RegistryToolBridge($registry, $gateway);
+$bridge->setContext(new ToolSearchContext([
+    'user_id'     => $user->id,
+    'permissions' => $auth->permissionsOf($user),   // optional: candidate filtering at discovery time
+]));
+
+$agent->tools($bridge->tools());
+```
+
+A complete runnable demo lives in `examples_tool_registry.php` (it generates its own sample application and temporary database, cleans up afterwards, and needs no API key).
+
+### The PHPDoc annotation standard
+
+Add a few comment lines to the Controller / Service methods you **already have** — not a single line of business code changes:
+
+```php
+/**
+ * Update an article
+ *
+ * @agent-tool article.update
+ * @agent-description Update the title, summary and body of a given article
+ * @agent-controller article/update
+ * @agent-risk medium
+ * @agent-confirm false
+ * @agent-keywords article,edit,title
+ *
+ * @param int $id Article ID
+ * @param string|null $title Article title
+ * @param string|null $content Article body
+ * @return array The updated article
+ */
+public function update($id, $title = null, $content = null)
+{
+    // existing business logic, unchanged
+}
+```
+
+| Tag | Required | Meaning |
+|-----|----------|---------|
+| `@agent-tool` | ✅ | Tool name; prefer `resource.action` (`article.update`) over class/method names — renaming a class then never changes the Agent-facing name |
+| `@agent-controller` | ✅ | The existing Controller entry path it maps to; **both permission and execution go through it** |
+| `@agent-description` | no | Description the model sees; falls back to the first line of the docblock |
+| `@agent-risk` | no | `low` / `medium` / `high` / `critical`, defaults to `low` |
+| `@agent-confirm` | no | `true` / `false`, overrides the confirmation requirement derived from the risk level |
+| `@agent-permission` | no | May appear multiple times; used only for discovery-time filtering, **not** an authorization source |
+| `@agent-keywords` | no | Comma-separated extra search terms (synonyms are especially useful) |
+| `@agent-enabled` | no | `false` takes a capability offline temporarily |
+| `@agent-version` | no | Tool version |
+| `@param` / `@return` | no | Supply the **descriptions** Reflection cannot see, plus more precise types |
+
+**A public method without `@agent-tool` never enters the Registry.** Internal APIs, helpers and admin methods cannot be exposed by accident — that is a hard rule, not a config option.
+
+### PHP 8 Attributes (optional)
+
+PHP 8+ projects can use an Attribute instead, so a misspelled tag name is caught by the IDE and static analysis right away:
+
+```php
+use Ai\Agent\Attribute\AgentTool;
+
+#[AgentTool(name: 'article.update', description: 'Update an article', controller: 'article/update', risk: 'medium')]
+public function update(int $id, ?string $title = null): array
+{
+}
+```
+
+Field precedence: **Attribute > PHPDoc > Reflection inference**. Fields the Attribute omits still come from PHPDoc, and the two can be mixed. On PHP 7 the Attribute is just a comment, so indexing falls back to PHPDoc alone without any error.
+
+### Automatic parameter schemas
+
+Reflection supplies types, required-ness and defaults; PHPDoc supplies descriptions. The two merge into a JSON Schema:
+
+```json
+{
+  "type": "object",
+  "properties": {
+    "id":      { "type": "integer", "description": "Article ID" },
+    "title":   { "type": ["string", "null"], "description": "Article title" },
+    "status":  { "type": "string", "description": "Status", "enum": ["draft", "published"] },
+    "page":    { "type": "integer", "description": "Page number", "default": 1 }
+  },
+  "required": ["id"]
+}
+```
+
+Supported: `int` / `float` / `string` / `bool` / `array` / `object` / nullable `?T` / PHP 8 union types / PHP 8.1 backed enums, plus docblock forms such as `int[]`, `array<int, string>` and literal unions `'draft'|'published'` (which become an `enum`).
+
+### Indexing and CLI
+
+```bash
+php-ai index                            # scan per configuration and write the Registry
+php-ai index --path=app/Controller      # explicit directory (repeatable)
+php-ai index --clear                    # clear first, then full scan
+php-ai index --check                    # check only; exit code 1 when the index is stale
+php-ai index --force                    # ignore file hashes, rescan everything
+php-ai tools                            # list every Tool
+php-ai tools:search "article update"    # search Tools
+php-ai tools:show article.update        # print the full definition and schema
+php-ai tools:remove article.update      # remove it from the Registry
+```
+
+Common options: `--db=PATH` (defaults to `.ai/registry.sqlite`), `--config=PATH`, `--bootstrap=PATH` (load your application's own autoloader first), `--json`, `--quiet`.
+
+Paths can also live in a config file so that plain `php-ai index` is enough:
+
+```php
+// .ai/config.php
+return ['agent' => ['index' => [
+    'paths'    => [APP_PATH . '/Controller', APP_PATH . '/Service'],
+    'excludes' => ['vendor', 'tests'],
+    'db'       => APP_PATH . '/.ai/registry.sqlite',
+]]];
+```
+
+Put `php-ai index` in the release pipeline so the first Agent request never triggers a full scan:
+
+```text
+Git Push → CI/CD → composer install → php-ai index → application starts
+```
+
+In CI, `php-ai index --check` verifies that the index is in sync with the code (exit code 1 when stale).
+
+### Incremental scanning
+
+Each source file's content hash is stored in the Registry; unchanged files are skipped, so 12 changed files out of ten thousand mean 12 files re-parsed. When a file is deleted, or its annotations are removed, the Tools it produced are cleared automatically.
+
+The scanner also has two safeguards:
+
+1. If a file's contents contain neither `@agent-tool` nor `AgentTool`, it is **never included** — top-level side effects in business code (opening database connections, registering routes) are not triggered by an indexing run;
+2. Class names are extracted lexically via `token_get_all`; your own autoloader gets the first chance, and `require_once` happens only if the class still cannot be loaded.
+
+> ⚠️ A PHP process reads any given class only once. Editing source and calling `scan()` again within the same execution still reflects the definition loaded earlier. Normal usage is unaffected — `php-ai index` is a fresh process every time.
+
+### On-demand discovery: three tools, not thousands
+
+`RegistryToolBridge` produces three runtime tools, and those are all the model sees initially:
+
+| Tool | Purpose |
+|------|---------|
+| `search_app_tools` | Search business capabilities in natural language, returns candidate summaries (name / description / risk) |
+| `get_app_tool` | Fetch the full JSON Schema of one capability |
+| `call_app_tool` | Call it (through the Controller entry and your existing permission check) |
+
+A typical interaction:
+
+```text
+User: cut the price of yesterday's best-selling product by 5%
+
+search_app_tools("product sales price")
+  → product.sales.stats / product.update_price
+get_app_tool("product.sales.stats") → execute
+get_app_tool("product.update_price") → execute
+```
+
+The tool names deliberately avoid `ToolDiscovery`'s `search_tools`: that one searches the Agent's own runtime tools (read_file / bash …), while these search the application's business capabilities — two different things.
+
+### Full-text search, including CJK
+
+SQLite's `unicode61` tokenizer treats a run of Chinese characters as a single token, so "修改文章的标题" is one word and searching for "文章" finds nothing. What goes into the FTS5 index is therefore a normalized token stream — CJK runs are split into **single characters plus adjacent bigrams**, ASCII is split on separators and lowercased:
+
+```text
+article.update 修改文章
+  → article update 修 改 文 章 修改 改文 文章
+```
+
+Queries are normalized the same way so both sides line up. Single characters preserve recall, bigrams preserve precision. When FTS5 is unavailable (not compiled in), search falls back to a `LIKE` scan plus pure-PHP scoring — the feature never breaks.
+
+### Choosing a Registry implementation
+
+`ToolRegistryInterface` is not bound to SQLite; SQLite is merely the default:
+
+| Scenario | Recommendation |
+|----------|----------------|
+| Demo / unit tests | `MemoryToolRegistry` (zero dependencies, no extension required) |
+| Regular PHP site / mid-size single server | `SqliteToolRegistry` (default) |
+| Multiple PHP instances / SaaS | Write a MySQL / PostgreSQL implementation; nothing above the Agent layer changes |
+
+The Registry is **independent of the business database** by default: it is application metadata, can be rebuilt at any time, deleting it affects no business data, and different deployments can carry different registries.
+
+Tables: `agent_tools` / `agent_tool_parameters` / `agent_tool_permissions` / `agent_index_files` / `agent_tools_fts`.
+
+### Risk levels and human confirmation
+
+**Risk is not permission**; the two are independent. Even when the permission check passes, `article.delete` can still require the user to confirm because `risk = high`.
+
+| Level | Default behavior |
+|-------|------------------|
+| `low` | Execute directly |
+| `medium` | Execute directly (permission is the Controller's job) |
+| `high` | Confirmation required |
+| `critical` | Confirmation required, and the threshold **cannot** bypass it |
+
+```php
+use Ai\Agent\Registry\RiskPolicy;
+use Ai\Agent\Tool\ToolDefinition;
+
+$policy = new RiskPolicy();
+$policy->setThreshold(ToolDefinition::RISK_MEDIUM);   // confirm from medium risk upwards
+$policy->setOverride('article.delete', false);        // exempt one specific Tool
+
+$bridge = new RegistryToolBridge($registry, $gateway, ['risk_policy' => $policy]);
+```
+
+Without confirmation, `call_app_tool` returns a failure result whose `metadata` carries `requires_confirmation`, `forced`, `risk` and the validated arguments; relay the prompt to the user and retry with `confirmed => true` once they agree.
+
+The forced confirmation on `critical` is the last gate: neither `setThreshold` nor `setOverride` gets around it — only an explicit `allowCriticalWithoutConfirm(true)` turns it off.
+
+### Argument validation: the model's arguments are untrusted
+
+Before execution, `ArgumentValidator` does three things:
+
+1. **Undeclared arguments are dropped**, never forwarded to the Controller. Letting the model push arbitrary fields into a Controller hands the input whitelist to the model;
+2. **Missing required arguments fail outright** rather than being papered over with defaults;
+3. **Only unambiguous coercions happen** — `"123"` → `123` and `"true"` → `true` repair JSON transport losses, but `"abc"` → `0`, which would turn "the model filled it in wrong" into "the Controller received 0", is always rejected.
+
+Values outside a declared enum are rejected the same way.
+
+### Three security rules
+
+1. **Discovery-time permission filtering is an optimization, not a security boundary.**
+   Both `ToolSearchContext`'s `permissions` and the gateway's `can()` run while the model has not yet chosen a Tool; results may be cached, may be stale, and may be incomplete because of object-level rules ("only articles you wrote"). Authorization happens in exactly one place: your own check inside `ControllerGatewayInterface::dispatch()`.
+   **Skipping the permission check inside `dispatch()` is the one fatal misuse of this design.**
+
+2. **A Tool without `@agent-controller` is refused execution.**
+   No Controller entry means no permission boundary. Such a Tool is still indexed (it can be found, and indexing emits a warning), but execution is refused outright — it never falls back to "reflect on class/method and call directly".
+
+3. **The Agent never touches the business database.**
+   `registry.sqlite` holds Tool metadata only. Business data always goes through Controller / Service, because updating an article is rarely just one UPDATE: there is the permission check, cache invalidation, search index updates, audit logs, webhooks, moderation state and CDN purging. All of that belongs to the existing Service.
+
+### Auditing
+
+Every execution (success / failure / refusal / pending confirmation) fires one callback:
+
+```php
+$bridge->executor()->onExecuted(function (array $record) use ($logger) {
+    $logger->info('agent_tool', $record);
+    // tool / controller / risk / success / error / metadata / user_id / time
+});
+```
+
+### API reference
+
+| Class | Purpose |
+|---|---|
+| `Ai\Agent\Tool\ToolDefinition` | Tool metadata value object; `schema()` produces the JSON Schema |
+| `Ai\Agent\Tool\ToolParameter` | A single parameter |
+| `Ai\Agent\Attribute\AgentTool` | PHP 8 Attribute |
+| `Ai\Agent\Indexer\ToolIndexer` | Scan orchestration: `scan()` / `check()` / `scanClass()` / `clear()` |
+| `Ai\Agent\Indexer\PhpDocParser` | Parses `@agent-*` and `@param` |
+| `Ai\Agent\Indexer\ReflectionSchemaBuilder` | Reflection → parameter schema |
+| `Ai\Agent\Registry\ToolRegistryInterface` | `search()` / `get()` / `register()` / `remove()` |
+| `Ai\Agent\Registry\SqliteToolRegistry` | Default implementation, SQLite + FTS5 |
+| `Ai\Agent\Registry\MemoryToolRegistry` | In-memory implementation, zero dependencies |
+| `Ai\Agent\Registry\ToolSearchContext` | Search context and candidate filtering |
+| `Ai\Agent\Registry\ControllerGatewayInterface` | **The only interface your application must implement** |
+| `Ai\Agent\Registry\CallableControllerGateway` | Closure-based implementation, ready for small apps and tests |
+| `Ai\Agent\Registry\ControllerToolExecutor` | Execution chain: validation → risk → gateway |
+| `Ai\Agent\Registry\RiskPolicy` | Risk level → confirmation requirement |
+| `Ai\Agent\Discovery\ToolSearcher` | Search + permission filtering + summaries |
+| `Ai\Agent\Discovery\RegistryToolBridge` | Produces the three Agent runtime tools |
+
+`SqliteToolRegistry` needs the `pdo_sqlite` extension (bundled with virtually every PHP distribution); without it, use `MemoryToolRegistry` or implement `ToolRegistryInterface` yourself.
+
+---
+
 ## Editor: AI code editing
 
 `Ai\Editor\*` provides a complete protocol for letting an AI edit code: the editor's situation (current file, cursor, selection, open files, workspace conventions) is structured and handed to the model, which returns verifiable, executable edit actions.
@@ -4627,6 +4942,9 @@ php-ai/
 ├── src/                    # source (PSR-4 namespace Ai\)
 │   ├── AI.php              # main entry: config, model resolution, chat, streaming, callbacks
 │   ├── Agent/              # Agent loop + long-term memory
+│   │   ├── Registry/       # Tool Registry: SQLite(FTS5) / Memory / executor / risk policy / Controller gateway
+│   │   ├── Indexer/        # Scanner: PHPDoc / Attribute parsing, Reflection schema, incremental index
+│   │   └── Discovery/      # On-demand discovery: search, permission filtering, the three runtime tools
 │   ├── Cli/                # ClaudeCode one-shot / ClaudeCodeSession persistent duplex + response objects
 │   ├── Contracts/          # interfaces: Model / Protocol / Transport / AIResponse
 │   ├── Editor/             # AI code editing: context / protocol / action / executor / workspace
@@ -4657,6 +4975,7 @@ php-ai/
 │   ├── lib_test.php        # concurrent batching / Memory concurrency safety / pricing / log injection
 │   ├── cli_test.php        # CLI flag rendering and command-injection protection
 │   └── ssrf_test.php       # every known SSRF bypass vector
+├── bin/php-ai              # CLI: Agent Tool indexing and lookup (php-ai index / tools / tools:search)
 ├── examples*.php           # usage examples (examples_platforms.php covers multi-platform setup)
 ├── LICENSE
 ├── README.md

@@ -1,0 +1,53 @@
+#!/usr/bin/env php
+<?php
+/**
+ * php-ai —— Agent Tool 索引与查询命令行
+ *
+ * 把应用 Controller / Service 里带 `@agent-tool` 标注的方法扫进 SQLite Tool Registry，
+ * 供 Agent 在运行时按需搜索与调用（见 .claude/php-ai-agent-tool-registry-design-v3.md）。
+ *
+ * 用法：
+ *   php-ai index                          按配置扫描并写库
+ *   php-ai index --path=app/Controller    指定目录（可重复）
+ *   php-ai index --clear                  先清空再全量扫描
+ *   php-ai index --check                  只检查是否需要重建（stale 时退出码 1）
+ *   php-ai index --force                  忽略文件 hash，全部重扫
+ *   php-ai tools                          列出全部 Tool
+ *   php-ai tools:search "文章 修改"        搜索 Tool
+ *   php-ai tools:show article.update      打印某个 Tool 的完整定义
+ *   php-ai tools:remove article.update    从 Registry 删除某个 Tool
+ *
+ * 公共选项：
+ *   --db=PATH          Registry 文件，默认 .ai/registry.sqlite
+ *   --config=PATH      配置文件，默认按 .ai/config.php → ai.config.php → composer.json 探测
+ *   --bootstrap=PATH   先 require 这个文件（应用自己的 autoloader）
+ *   --json             机器可读输出
+ *   --quiet            只输出错误
+ *   --help             显示帮助
+ *
+ * 退出码：0 成功；1 索引过期（--check）或执行出错；2 用法错误。
+ */
+
+// 定位 autoload：支持「装进 vendor」与「仓库内直接跑」两种布局
+$autoloads = [
+    __DIR__ . '/../autoload.php',            // 仓库内
+    __DIR__ . '/../../../autoload.php',      // 装进别人 vendor/likun-mci/php-ai/bin
+    __DIR__ . '/../vendor/autoload.php',     // composer 自动加载
+];
+$loaded = false;
+foreach ($autoloads as $a) {
+    if (is_file($a)) {
+        require $a;
+        $loaded = true;
+        break;
+    }
+}
+if (!$loaded) {
+    fwrite(STDERR, "找不到 autoload.php\n");
+    exit(2);
+}
+
+use Ai\Cli\ToolRegistryCommand;
+
+$command = new ToolRegistryCommand();
+exit($command->run(array_slice($argv, 1)));

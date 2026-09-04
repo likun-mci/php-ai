@@ -23,6 +23,7 @@
 - 🤖 **Claude Code CLI**：直接调用本机 claude 程序（`Ai\Cli\ClaudeCode`），文件读写 / 工具执行 / 会话续接 / 结构化输出，路径自动检测并缓存
 - 📊 **CLI 信息查询**：不发起对话即可读取版本、登录态、模型列表、额度用量与限流、生效设置、MCP 状态
 - 🔌 **常驻双工会话**：`Ai\Cli\ClaudeCodeSession` 复刻官方 IDE 插件的进程模式，长驻进程多轮对话 + 工具权限实时回调 PHP 决策 + 优雅中断 + 处理过程中继续提需求
+- 🗂️ **Agent Tool Registry**：给现有 Controller / Service 加几行 `@agent-tool` 注释，`php-ai index` 扫进 SQLite（FTS5 中文全文检索），Agent 按需搜索、按需加载 Schema；执行回到应用**原有的 Controller 入口权限校验**，不新建第二套权限系统
 - 📝 **代码编辑协议**：结构化编辑上下文 + 可校验的编辑动作，支持规划/审核/自动执行三种模式
 - 🛡️ **安全抓取**：`HttpFetch` 内置 SSRF、DNS rebinding、内网地址、协议逃逸防护
 - 📄 **多模态附件**：图片等附件按各平台格式自动适配
@@ -4266,6 +4267,320 @@ Agent 停止时可通过 `$result->getStopReason()` 获取原因：
 
 ---
 
+## Agent Tool 标准与 Tool Registry
+
+把传统 PHP 应用**已有的、已经受权限控制的业务能力**标准化成 Agent 可以发现和调用的 Tool——不重写业务逻辑，不新建一套权限系统。
+
+```text
+Controller / Service + @agent-tool 标注
+        ↓  php-ai index
+SQLite Tool Registry（FTS5 全文索引）
+        ↓  search_app_tools / get_app_tool
+Agent 按需加载 Tool Schema
+        ↓  call_app_tool
+应用现有 Controller 入口权限校验   ← 唯一的安全边界
+        ↓
+Controller / Service → 业务数据库
+```
+
+一句话原则：**让 AI 能够发现应用有什么能力，但永远不能自行决定这些能力是否有权执行。**
+
+### 为什么需要它
+
+Agent 接业务系统时通常有两条路，都不好走：
+
+- 把几千个业务能力全塞进 prompt——token 烧光，模型还挑不准；
+- 给 Agent 一个「执行任意 SQL」的工具——绕过了权限、缓存清理、审核状态、日志、Webhook 等一整套业务逻辑。
+
+这套方案走第三条：能力目录进数据库，模型按需搜索、按需加载，执行时回到应用原有的 Controller 入口。
+
+### 三行接入
+
+```php
+use Ai\Agent\Indexer\ToolIndexer;
+use Ai\Agent\Registry\SqliteToolRegistry;
+use Ai\Agent\Registry\CallableControllerGateway;
+use Ai\Agent\Discovery\RegistryToolBridge;
+use Ai\Agent\Registry\ToolSearchContext;
+
+// 1. 发布阶段：扫描应用，写入 Registry（也可以用 CLI: php-ai index）
+$registry = new SqliteToolRegistry(APP_PATH . '/.ai/registry.sqlite');
+(new ToolIndexer($registry))->scan([APP_PATH . '/Controller', APP_PATH . '/Service']);
+
+// 2. 运行时：告诉 php-ai 怎么走你现有的 Controller 入口
+$gateway = new CallableControllerGateway(function ($path, array $args, array $ctx) {
+    // ⚠️ 这里必须跑你现有的权限校验，它是最终安全边界
+    if (!$auth->check($ctx['user_id'], $path)) {
+        throw new \RuntimeException('无权访问 ' . $path);
+    }
+    return $router->dispatch($path, $args);
+});
+
+// 3. 接进 Agent
+$bridge = new RegistryToolBridge($registry, $gateway);
+$bridge->setContext(new ToolSearchContext([
+    'user_id'     => $user->id,
+    'permissions' => $auth->permissionsOf($user),   // 可选：Discovery 阶段的候选过滤
+]));
+
+$agent->tools($bridge->tools());
+```
+
+完整可运行的演示见 `examples_tool_registry.php`（自带样本应用与临时数据库，跑完自清理，不需要 API Key）。
+
+### PHPDoc 标注标准
+
+在**已有的** Controller / Service 方法上加几行注释即可，业务代码一行不用改：
+
+```php
+/**
+ * 修改文章
+ *
+ * @agent-tool article.update
+ * @agent-description 修改指定文章的标题、摘要和正文
+ * @agent-controller article/update
+ * @agent-risk medium
+ * @agent-confirm false
+ * @agent-keywords 文章,编辑,标题
+ *
+ * @param int $id 文章 ID
+ * @param string|null $title 文章标题
+ * @param string|null $content 文章正文
+ * @return array 修改后的文章
+ */
+public function update($id, $title = null, $content = null)
+{
+    // 原有业务逻辑，不用改
+}
+```
+
+| 标签 | 必需 | 说明 |
+|------|------|------|
+| `@agent-tool` | ✅ | Tool 名，推荐 `资源.动作`（`article.update`）而不是类名方法名——类改名不会影响 Agent |
+| `@agent-controller` | ✅ | 映射到的现有 Controller 入口路径，**权限与执行都走它** |
+| `@agent-description` | 否 | 给模型看的能力描述；不写则取 docblock 首行摘要 |
+| `@agent-risk` | 否 | `low` / `medium` / `high` / `critical`，默认 `low` |
+| `@agent-confirm` | 否 | `true` / `false`，覆盖风险等级推导出的确认要求 |
+| `@agent-permission` | 否 | 可多次出现；仅用于 Discovery 候选过滤，**不是**授权依据 |
+| `@agent-keywords` | 否 | 逗号分隔的补充搜索词（中文同义词很有用） |
+| `@agent-enabled` | 否 | `false` 可临时下线某个能力 |
+| `@agent-version` | 否 | Tool 版本 |
+| `@param` / `@return` | 否 | 补充 Reflection 拿不到的**描述**与更精确的类型 |
+
+**没有 `@agent-tool` 的 public 方法不会进 Registry。** 内部 API、辅助方法、管理方法不会被误暴露——这一点是硬规则，不是配置项。
+
+### PHP 8 Attribute（可选）
+
+PHP 8+ 项目可以改用 Attribute，拼错标签名会被 IDE 和静态分析当场发现：
+
+```php
+use Ai\Agent\Attribute\AgentTool;
+
+#[AgentTool(name: 'article.update', description: '修改文章', controller: 'article/update', risk: 'medium')]
+public function update(int $id, ?string $title = null): array
+{
+}
+```
+
+字段优先级：**Attribute > PHPDoc > Reflection 推断**。Attribute 没给的字段仍从 PHPDoc 取，两者可以混用。PHP 7 环境下 Attribute 被当成注释忽略，自动只走 PHPDoc，不会报错。
+
+### 参数 Schema 自动生成
+
+Reflection 负责类型、必填、默认值，PHPDoc 负责描述，两边合并成 JSON Schema：
+
+```json
+{
+  "type": "object",
+  "properties": {
+    "id":      { "type": "integer", "description": "文章 ID" },
+    "title":   { "type": ["string", "null"], "description": "文章标题" },
+    "status":  { "type": "string", "description": "状态", "enum": ["draft", "published"] },
+    "page":    { "type": "integer", "description": "页码", "default": 1 }
+  },
+  "required": ["id"]
+}
+```
+
+支持 `int` / `float` / `string` / `bool` / `array` / `object` / 可空 `?T` / PHP 8 联合类型 / PHP 8.1 backed enum，以及 docblock 里的 `int[]`、`array<int, string>`、字面量联合 `'draft'|'published'`（自动变成 `enum`）。
+
+### 索引与 CLI
+
+```bash
+php-ai index                            # 按配置扫描并写库
+php-ai index --path=app/Controller      # 指定目录（可重复）
+php-ai index --clear                    # 先清空再全量扫描
+php-ai index --check                    # 只检查是否需要重建，过期时退出码 1
+php-ai index --force                    # 忽略文件 hash，全部重扫
+php-ai tools                            # 列出全部 Tool
+php-ai tools:search "文章 修改"          # 搜索 Tool
+php-ai tools:show article.update        # 打印完整定义与 Schema
+php-ai tools:remove article.update       # 从 Registry 删除
+```
+
+公共选项：`--db=PATH`（默认 `.ai/registry.sqlite`）、`--config=PATH`、`--bootstrap=PATH`（先加载应用自己的 autoloader）、`--json`、`--quiet`。
+
+路径也可以写进配置文件，之后直接 `php-ai index`：
+
+```php
+// .ai/config.php
+return ['agent' => ['index' => [
+    'paths'    => [APP_PATH . '/Controller', APP_PATH . '/Service'],
+    'excludes' => ['vendor', 'tests'],
+    'db'       => APP_PATH . '/.ai/registry.sqlite',
+]]];
+```
+
+推荐把 `php-ai index` 放进发布流程，避免第一次 Agent 请求时才做全量扫描：
+
+```text
+Git Push → CI/CD → composer install → php-ai index → 应用启动
+```
+
+CI 里可以用 `php-ai index --check` 校验索引是否跟代码同步（过期返回退出码 1）。
+
+### 增量扫描
+
+每个源文件的内容 hash 存在 Registry 里，hash 没变就跳过，一万个文件里改了 12 个就只重新解析这 12 个。文件被删除、或标注被拿掉时，其名下的 Tool 会被自动清除。
+
+扫描器还做了两层保护：
+
+1. 文件内容里既没有 `@agent-tool` 也没有 `AgentTool` 时，**连 include 都不做**——业务代码里的顶层副作用（连数据库、注册路由）不会因为一次索引被跑起来；
+2. 类名靠 `token_get_all` 词法提取，先给应用自己的 autoloader 机会，实在加载不到才 `require_once`。
+
+> ⚠️ 一个 PHP 进程里同一个类只会被读到一次。同一次执行里改了源码再 `scan()`，Reflection 拿到的仍是先前载入的定义。正常用法（`php-ai index` 每次都是新进程）不受影响。
+
+### 按需发现：三个工具，而不是几千个
+
+`RegistryToolBridge` 产出三个运行时工具，模型初始只看到它们：
+
+| 工具 | 作用 |
+|------|------|
+| `search_app_tools` | 用自然语言搜业务能力，返回候选摘要（名称 / 简介 / 风险） |
+| `get_app_tool` | 拉某个能力的完整 JSON Schema |
+| `call_app_tool` | 调用它（经 Controller 入口 + 应用现有权限校验） |
+
+一次典型交互：
+
+```text
+用户：把昨天销量最高的商品价格降低 5%
+
+search_app_tools("商品 销量 价格")
+  → product.sales.stats / product.update_price
+get_app_tool("product.sales.stats") → 执行
+get_app_tool("product.update_price") → 执行
+```
+
+工具名刻意避开了 `ToolDiscovery` 的 `search_tools`：那个搜的是 Agent 自己的运行时工具（read_file / bash…），这里搜的是应用的业务能力，两者不是一回事。
+
+### 中文全文搜索
+
+SQLite 的 `unicode61` 分词器把连续汉字当成一个 token，「修改文章的标题」整段是一个词，搜「文章」一无所获。因此写进 FTS5 索引的是归一化后的 token 串——汉字切成**单字 + 相邻二元组**，英文按分隔符切开并小写：
+
+```text
+article.update 修改文章
+  → article update 修 改 文 章 修改 改文 文章
+```
+
+查询串走同一套切法，两边才对得上。单字保召回，二元组保精度。FTS5 不可用（编译期没开）时自动降级到 `LIKE` 扫描 + 纯 PHP 打分，功能不中断。
+
+### Registry 实现选择
+
+`ToolRegistryInterface` 不绑定 SQLite，SQLite 只是默认实现：
+
+| 场景 | 建议 |
+|------|------|
+| Demo / 单元测试 | `MemoryToolRegistry`（零依赖，不需要任何扩展） |
+| 普通 PHP 网站 / 中型单服务器 | `SqliteToolRegistry`（默认） |
+| 多 PHP 实例 / SaaS | 自行实现 MySQL / PostgreSQL 版，Agent 上层逻辑不用改 |
+
+Registry 与业务数据库**默认独立**：它属于应用元数据，可以随时删掉重建，删了不影响任何业务数据，不同部署环境也可以有不同的 Registry。
+
+表结构：`agent_tools` / `agent_tool_parameters` / `agent_tool_permissions` / `agent_index_files` / `agent_tools_fts`。
+
+### 风险等级与人工确认
+
+**风险不是权限**，两者独立。`article.delete` 即使权限校验通过，也可以因为 `risk = high` 而要求用户先确认一下。
+
+| 等级 | 默认行为 |
+|------|---------|
+| `low` | 直接执行 |
+| `medium` | 直接执行（权限由 Controller 把关） |
+| `high` | 需要确认 |
+| `critical` | 需要确认，且**不能**被阈值绕过 |
+
+```php
+use Ai\Agent\Registry\RiskPolicy;
+use Ai\Agent\Tool\ToolDefinition;
+
+$policy = new RiskPolicy();
+$policy->setThreshold(ToolDefinition::RISK_MEDIUM);   // 中风险起就要确认
+$policy->setOverride('article.delete', false);        // 单个 Tool 免确认
+
+$bridge = new RegistryToolBridge($registry, $gateway, ['risk_policy' => $policy]);
+```
+
+未确认时 `call_app_tool` 返回失败结果，`metadata` 里带 `requires_confirmation`、`forced`、`risk` 与已校验的参数；把提示转达用户，得到同意后带 `confirmed => true` 重试即可。
+
+`critical` 的强制确认是最后一道闸：`setThreshold` 和 `setOverride` 都绕不过它，只有显式调用 `allowCriticalWithoutConfirm(true)` 才能关掉。
+
+### 参数校验：模型给的参数不可信
+
+执行前 `ArgumentValidator` 会做三件事：
+
+1. **未声明的参数一律丢弃**，不透传给 Controller。让模型能往 Controller 塞任意字段，等于把入参白名单交给模型决定；
+2. **必填缺失直接失败**，不用默认值蒙混过去；
+3. **只做无歧义的类型收敛**——`"123"` → `123`、`"true"` → `true` 这类 JSON 传输损耗要修，但 `"abc"` → `0` 这种会把「模型填错了」变成「Controller 收到 0」的转换一律拒绝。
+
+枚举取值不在允许范围时同样拒绝执行。
+
+### 三条安全红线
+
+1. **Discovery 的权限过滤只是优化，不是安全边界。**
+   `ToolSearchContext` 的 `permissions` 与网关的 `can()` 都跑在「模型还没决定用哪个 Tool」的时候，结果可能被缓存、可能过期，也可能因为对象级规则（「只能改自己写的文章」）而不完整。真正的授权只有一个地方：`ControllerGatewayInterface::dispatch()` 里应用自己的那套校验。
+   **`dispatch()` 里不做权限校验，是这套方案唯一的致命误用。**
+
+2. **没有 `@agent-controller` 的 Tool 拒绝执行。**
+   没有 Controller 入口就没有权限边界。这种 Tool 仍会被索引（能被搜到，索引时会给出警告），但执行阶段直接拒绝——绝不退回「拿 class/method 反射直调」那条路。
+
+3. **Agent 不碰业务数据库。**
+   `registry.sqlite` 只存 Tool 元数据。业务数据永远走 Controller / Service，因为改一篇文章通常不只是一条 UPDATE：还有权限检查、缓存清理、搜索索引更新、修改日志、Webhook、审核状态、CDN 清理。这些都该由原有 Service 负责。
+
+### 审计
+
+每次执行（成功 / 失败 / 被拒 / 待确认）都会回调一次：
+
+```php
+$bridge->executor()->onExecuted(function (array $record) use ($logger) {
+    $logger->info('agent_tool', $record);
+    // tool / controller / risk / success / error / metadata / user_id / time
+});
+```
+
+### API 速查
+
+| 类 | 作用 |
+|---|---|
+| `Ai\Agent\Tool\ToolDefinition` | Tool 元数据值对象，`schema()` 产出 JSON Schema |
+| `Ai\Agent\Tool\ToolParameter` | 单个参数 |
+| `Ai\Agent\Attribute\AgentTool` | PHP 8 Attribute |
+| `Ai\Agent\Indexer\ToolIndexer` | 扫描编排：`scan()` / `check()` / `scanClass()` / `clear()` |
+| `Ai\Agent\Indexer\PhpDocParser` | `@agent-*` 与 `@param` 解析 |
+| `Ai\Agent\Indexer\ReflectionSchemaBuilder` | Reflection → 参数 Schema |
+| `Ai\Agent\Registry\ToolRegistryInterface` | `search()` / `get()` / `register()` / `remove()` |
+| `Ai\Agent\Registry\SqliteToolRegistry` | 默认实现，SQLite + FTS5 |
+| `Ai\Agent\Registry\MemoryToolRegistry` | 内存实现，零依赖 |
+| `Ai\Agent\Registry\ToolSearchContext` | 搜索上下文与候选过滤 |
+| `Ai\Agent\Registry\ControllerGatewayInterface` | **应用唯一需要实现的接口** |
+| `Ai\Agent\Registry\CallableControllerGateway` | 闭包实现，小应用与测试直接可用 |
+| `Ai\Agent\Registry\ControllerToolExecutor` | 执行链：校验 → 风险 → 网关 |
+| `Ai\Agent\Registry\RiskPolicy` | 风险 → 是否需要确认 |
+| `Ai\Agent\Discovery\ToolSearcher` | 搜索 + 权限过滤 + 摘要 |
+| `Ai\Agent\Discovery\RegistryToolBridge` | 产出三个 Agent 运行时工具 |
+
+`SqliteToolRegistry` 需要 `pdo_sqlite` 扩展（绝大多数 PHP 发行版默认自带）；没有它时可以用 `MemoryToolRegistry` 或自行实现 `ToolRegistryInterface`。
+
+---
+
 ## Editor：AI 代码编辑
 
 `Ai\Editor\*` 提供一套「让 AI 改代码」的完整协议：把编辑器现场（当前文件、光标、选区、已打开文件、工作区规范）结构化后交给模型，模型返回可校验、可执行的编辑动作。
@@ -4653,6 +4968,9 @@ php-ai/
 ├── src/                    # 源代码（PSR-4 命名空间 Ai\）
 │   ├── AI.php              # 主入口：配置、模型解析、对话、流式、回调
 │   ├── Agent/              # Agent 循环 + 长期记忆
+│   │   ├── Registry/       # Tool Registry：SQLite(FTS5) / Memory / 执行器 / 风险策略 / Controller 网关
+│   │   ├── Indexer/        # 扫描器：PHPDoc / Attribute 解析、Reflection Schema、增量索引
+│   │   └── Discovery/      # 按需发现：搜索、权限过滤、接进 Agent 的三个运行时工具
 │   ├── Cli/                # ClaudeCode 一次性调用 / ClaudeCodeSession 常驻双工会话 + 响应对象
 │   ├── Contracts/          # 接口定义：Model / Protocol / Transport / AIResponse
 │   ├── Editor/             # AI 代码编辑：上下文 / 协议 / 动作 / 执行器 / 工作区
@@ -4683,6 +5001,7 @@ php-ai/
 │   ├── lib_test.php        # 并发批量 / Memory 并发安全 / 计价 / 日志注入
 │   ├── cli_test.php        # CLI 参数渲染与命令注入防护
 │   └── ssrf_test.php       # SSRF 防护的全部已知绕过向量
+├── bin/php-ai              # CLI：Agent Tool 索引与查询（php-ai index / tools / tools:search）
 ├── examples*.php           # 使用示例（examples_platforms.php 为多平台接入示例）
 ├── LICENSE
 ├── README.md

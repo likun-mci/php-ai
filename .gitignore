@@ -30,3 +30,6 @@ credentials*
 *.log
 tmp/
 temp/
+
+# Agent Tool Registry（部署时由 php-ai index 生成，不入库）
+.ai/

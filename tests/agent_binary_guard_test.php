@@ -65,6 +65,14 @@ $r = $read->execute(['path' => 'doc.pdf'], $ctx);
 test('PDF 识别为 PDF', $r->isSuccess() && strpos($r->getContent(), 'PDF') !== false);
 test('PDF 内容合法 UTF-8', mb_check_encoding($r->getContent(), 'UTF-8'));
 
+// 残缺/损坏的图片：getimagesize 会读出垃圾宽高，不能报给模型（实测发现）
+file_put_contents($base . '/broken.png', "\x89PNG\r\n\x1a\n\x00\x00\xff\xfe truncated");
+$r = $read->execute(['path' => 'broken.png'], $ctx);
+$bm = $r->getMetadata();
+test('损坏图片仍识别为图片', $r->isSuccess() && !empty($bm['binary']));
+test('损坏图片不报垃圾宽高', !isset($bm['width']) || ($bm['width'] > 0 && $bm['width'] <= 100000));
+test('损坏图片内容合法 UTF-8', mb_check_encoding($r->getContent(), 'UTF-8'));
+
 $r = $read->execute(['path' => 'blob.bin'], $ctx);
 test('通用二进制被拦', $r->isSuccess() && !empty($r->getMetadata()['binary']));
 test('通用二进制内容合法 UTF-8', mb_check_encoding($r->getContent(), 'UTF-8'));

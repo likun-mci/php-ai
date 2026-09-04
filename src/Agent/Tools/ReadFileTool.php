@@ -212,8 +212,15 @@ class ReadFileTool implements AgentToolInterface, ParallelSafeToolInterface
             if (function_exists('getimagesize')) {
                 $size = @getimagesize($absPath);
                 if (is_array($size)) {
-                    $meta['width'] = (int) $size[0];
-                    $meta['height'] = (int) $size[1];
+                    // getimagesize 不校验损坏/截断的图片，会把 IHDR 之后的字节当宽高读出来
+                    // （实测残缺 PNG 得到 1634892064×1280264009 这种垃圾值）。
+                    // 给模型报这种数字是误导，超出常理就干脆不报。
+                    $w = (int) $size[0];
+                    $h = (int) $size[1];
+                    if ($w > 0 && $h > 0 && $w <= 100000 && $h <= 100000) {
+                        $meta['width'] = $w;
+                        $meta['height'] = $h;
+                    }
                     $meta['mime'] = (string) $size['mime'];
                 }
             }

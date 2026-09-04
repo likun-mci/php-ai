@@ -119,6 +119,7 @@
             "php tests/agent_context_dedupe_test.php",
             "php tests/agent_notebook_test.php",
             "php tests/agent_lsp_test.php",
+            "php tests/agent_llm_reflection_test.php",
             "php tests/agent_storage_test.php",
             "php tests/agent_jsonl_session_test.php",
             "php tests/agent_phase41_test.php",

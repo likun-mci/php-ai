@@ -442,6 +442,37 @@ class ReflectionManager
     }
 
     /**
+     * 把内置判据包成 callable，供自定义策略当兜底用
+     *
+     * 典型用法（模型判不出来时退回内置判据，而不是直接停）：
+     * ```php
+     * $rm->setStrategy(new LlmReflectionStrategy($ai, ['fallback' => $rm->defaultStrategy()]));
+     * ```
+     *
+     * @return callable function(array $messages, string $goal, array $context): ReflectionResult
+     */
+    public function defaultStrategy()
+    {
+        $self = $this;
+        return function (array $messages, $goal, array $context = []) use ($self) {
+            return $self->reflectDefault($messages, $goal, $context);
+        };
+    }
+
+    /**
+     * 内置判据的公开入口（defaultStrategy 的闭包经由它调用）
+     *
+     * @param array<int, array<string, mixed>> $messages
+     * @param string $goal
+     * @param array<string, mixed> $context
+     * @return ReflectionResult
+     */
+    public function reflectDefault(array $messages, $goal, array $context = [])
+    {
+        return $this->defaultReflect($messages, $goal, $context);
+    }
+
+    /**
      * 从消息中提取文本内容
      *
      * @param array<string, mixed> $message

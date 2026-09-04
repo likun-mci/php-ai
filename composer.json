@@ -111,6 +111,7 @@
             "php tests/agent_memory3_test.php",
             "php tests/agent_grep2_test.php",
             "php tests/agent_multiedit_test.php",
+            "php tests/agent_webtools_test.php",
             "php tests/agent_storage_test.php",
             "php tests/agent_jsonl_session_test.php",
             "php tests/agent_phase41_test.php",

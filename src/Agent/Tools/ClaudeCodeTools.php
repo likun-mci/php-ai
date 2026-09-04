@@ -54,6 +54,22 @@ class ClaudeCodeTools
     }
 
     /**
+     * 联网工具集（web_fetch / web_search）——默认不在 all() 里，需显式启用
+     *
+     * 联网属外呼、默认经权限把关；不塞进 all() 是为避免给所有 Agent 平白开外网。
+     * 用法：`$agent->tools(ClaudeCodeTools::web());`（见 dev.md v2.1 §1.3）
+     *
+     * @return array<string, object>
+     */
+    public static function web()
+    {
+        return [
+            'web_fetch'  => new WebFetchTool(),
+            'web_search' => new WebSearchTool(),
+        ];
+    }
+
+    /**
      * 只读工具集（适合 plan 模式）
      *
      * @param array<string, mixed> $options

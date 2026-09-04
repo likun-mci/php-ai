@@ -32,6 +32,9 @@ class ContextManager
     /** @var int 压缩后保留的最近消息条数 */
     protected $keepRecent = 10;
 
+    /** @var callable|null 自定义 token 计数器 function(string $text): int（未设则用内置估算） */
+    protected $tokenizer = null;
+
     /**
      * @param array<int, array<string, mixed>> $messages
      * @param array<string, mixed> $options maxTokens / threshold / keepRecent
@@ -82,9 +85,152 @@ class ContextManager
     {
         $total = 0;
         foreach ($this->messages as $msg) {
-            $total += self::estimateTokens(self::serializeMessage($msg));
+            $total += $this->countTokens(self::serializeMessage($msg));
         }
         return $total;
+    }
+
+    /**
+     * 注入精确的 token 计数器（不同模型分词规则不同，内置的只是估算）
+     *
+     * @param callable|null $tokenizer function(string $text): int
+     * @return $this
+     */
+    public function setTokenizer($tokenizer)
+    {
+        $this->tokenizer = is_callable($tokenizer) ? $tokenizer : null;
+        return $this;
+    }
+
+    /**
+     * 计算一段文本的 token 数：有自定义计数器就用它，否则用内置估算
+     *
+     * @param string $text
+     * @return int
+     */
+    protected function countTokens($text)
+    {
+        if ($this->tokenizer !== null) {
+            return max(0, (int) call_user_func($this->tokenizer, $text));
+        }
+        return self::estimateTokens($text);
+    }
+
+    /**
+     * 折叠重复的文件读取结果——同一文件被反复 read_file 时只保留最新一份
+     *
+     * 长任务里模型常为了"再确认一下"重复读同一个文件，每读一次全文就再进一次
+     * 上下文，token 白烧且旧内容还可能与改动后的现状矛盾。这里把**较早**的那几份
+     * 换成一行占位说明，保留最新一份。
+     *
+     * 只改 tool_result 的内容字符串，不动块结构与 tool_use_id，因此不会破坏
+     * tool_use/tool_result 配对。
+     *
+     * @return int 被折叠的份数
+     */
+    public function dedupeFileReads()
+    {
+        // 先扫一遍，记录每个文件路径最后一次出现的位置
+        $lastSeen = [];
+        foreach ($this->messages as $mi => $msg) {
+            foreach ($this->fileReadBlocks($msg) as $bi => $path) {
+                $lastSeen[$path] = $mi . ':' . $bi;
+            }
+        }
+
+        $collapsed = 0;
+        foreach ($this->messages as $mi => $msg) {
+            foreach ($this->fileReadBlocks($msg) as $bi => $path) {
+                if (isset($lastSeen[$path]) && $lastSeen[$path] === $mi . ':' . $bi) {
+                    continue;   // 最新的那份保留
+                }
+                $stub = '[该文件较早的读取内容已省略以节省上下文：' . $path
+                    . '（后文有最新一次读取的完整内容）]';
+                if ($this->replaceBlockContent($mi, $bi, $stub)) {
+                    $collapsed++;
+                }
+            }
+        }
+        return $collapsed;
+    }
+
+    /**
+     * 找出一条消息里属于 read_file 结果的块：返回 块下标 => 文件路径
+     *
+     * 识别 ReadFileTool 的输出头 `File: <path> (`。
+     *
+     * @param array<string, mixed> $msg
+     * @return array<int|string, string>
+     */
+    protected function fileReadBlocks(array $msg)
+    {
+        $found = [];
+        // OpenAI 原生：role=tool，content 是字符串
+        if (isset($msg['role']) && $msg['role'] === 'tool' && isset($msg['content']) && is_string($msg['content'])) {
+            $path = self::filePathOf($msg['content']);
+            if ($path !== '') {
+                $found['_'] = $path;
+            }
+            return $found;
+        }
+        if (!isset($msg['content']) || !is_array($msg['content'])) {
+            return $found;
+        }
+        foreach ($msg['content'] as $bi => $block) {
+            if (!is_array($block) || !isset($block['type']) || $block['type'] !== 'tool_result') {
+                continue;
+            }
+            if (!isset($block['content']) || !is_string($block['content'])) {
+                continue;
+            }
+            $path = self::filePathOf($block['content']);
+            if ($path !== '') {
+                $found[$bi] = $path;
+            }
+        }
+        return $found;
+    }
+
+    /**
+     * 从 read_file 输出里抽出文件路径；不是文件读取结果返回 ''
+     *
+     * @param string $content
+     * @return string
+     */
+    protected static function filePathOf($content)
+    {
+        if (strpos($content, 'File: ') !== 0) {
+            return '';
+        }
+        if (preg_match('/^File: (.+?) \(/', $content, $m)) {
+            return trim($m[1]);
+        }
+        return '';
+    }
+
+    /**
+     * 替换某条消息里指定块的内容
+     *
+     * @param int $mi 消息下标
+     * @param int|string $bi 块下标（'_' 表示 OpenAI 的整条 tool 消息）
+     * @param string $text
+     * @return bool
+     */
+    protected function replaceBlockContent($mi, $bi, $text)
+    {
+        $mi = (int) $mi;
+        if (!isset($this->messages[$mi])) {
+            return false;
+        }
+        if ($bi === '_') {
+            $this->messages[$mi]['content'] = $text;
+            return true;
+        }
+        if (!isset($this->messages[$mi]['content'][$bi])) {
+            return false;
+        }
+        $this->messages[$mi]['content'][$bi]['content'] = $text;
+        return true;
     }
 
     /**
@@ -180,6 +326,11 @@ class ContextManager
     public function compact($summarizer, $taskHint = '', $preserve = '')
     {
         $preserve = (string) $preserve;
+
+        // 先折叠重复的文件读取——同一文件读多次只留最新一份。
+        // 放在压缩最前面：省下的往往就够用，可能压根不必再劳烦模型做摘要。
+        $this->dedupeFileReads();
+
         $count = count($this->messages);
         if ($count <= $this->keepRecent) {
             return $this->messages;

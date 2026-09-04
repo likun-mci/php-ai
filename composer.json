@@ -116,6 +116,7 @@
             "php tests/translate_test.php",
             "php tests/agent_bash_bg_test.php",
             "php tests/agent_binary_guard_test.php",
+            "php tests/agent_context_dedupe_test.php",
             "php tests/agent_storage_test.php",
             "php tests/agent_jsonl_session_test.php",
             "php tests/agent_phase41_test.php",

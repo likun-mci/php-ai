@@ -79,6 +79,12 @@ class AgentRuntime
     /** @var ContextManager|null */
     protected $contextManager = null;
 
+    /** @var \Ai\Agent\Media\MediaResolver|null 请求边界的媒体解析器 */
+    protected $mediaResolver = null;
+
+    /** @var array<string, bool>|null 当前模型支持的输入模态；null 表示用上下文的默认值 */
+    protected $mediaSupport = null;
+
     /** @var string */
     protected $workdir = '';
 
@@ -1258,12 +1264,51 @@ class AgentRuntime
         $context->setCheckpointManager($this->checkpointManager);
         $context->setCancellation($this->cancellation);
         $context->setToolDiscovery($this->toolDiscovery);
+        // 媒体：Conversation 里存的是 media://<id>，解析器只在请求边界用到
+        if ($this->mediaResolver !== null) {
+            $context->setMediaResolver($this->mediaResolver);
+        }
+        if ($this->mediaSupport !== null) {
+            $context->setMediaSupport($this->mediaSupport);
+        }
         if ($this->taskId !== null) {
             $context->setCheckpointId($this->taskId);
         } elseif ($this->sessionId !== null) {
             $context->setCheckpointId($this->sessionId);
         }
         return $context;
+    }
+
+    /**
+     * 挂上媒体解析器（由 Agent::chat() 在真的用到附件时调用）
+     *
+     * @param \Ai\Agent\Media\MediaResolver|null $resolver
+     * @return $this
+     */
+    public function setMediaResolver($resolver)
+    {
+        $this->mediaResolver = $resolver instanceof \Ai\Agent\Media\MediaResolver ? $resolver : null;
+        return $this;
+    }
+
+    /**
+     * @return \Ai\Agent\Media\MediaResolver|null
+     */
+    public function getMediaResolver()
+    {
+        return $this->mediaResolver;
+    }
+
+    /**
+     * 声明当前模型支持哪些输入模态
+     *
+     * @param array<string, bool>|null $support ['image' => bool, 'pdf' => bool]
+     * @return $this
+     */
+    public function setMediaSupport($support)
+    {
+        $this->mediaSupport = is_array($support) ? $support : null;
+        return $this;
     }
 
     /**

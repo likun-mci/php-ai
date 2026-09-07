@@ -121,8 +121,33 @@ class Conversation
      */
     public static function appendUserText(array $messages, $text)
     {
+        return self::appendUserParts($messages, $text, []);
+    }
+
+    /**
+     * 接一句用户的话 + 若干媒体块
+     *
+     * 与 `appendUserText()` 共用同一套悬空 `tool_use` 处理——这一点很重要：
+     * 带附件的消息同样可能出现在「上一轮停在等授权」之后，如果因为它带了媒体
+     * 就绕过补 `tool_result` 那段，下一次请求照样 400。所以媒体只是多挂几个块，
+     * 拼接规则一个字都不改。
+     *
+     * @param array<int, array<string, mixed>> $messages
+     * @param string $text
+     * @param array<int, array<string, mixed>> $mediaBlocks agent_media 块
+     * @return array<int, array<string, mixed>>
+     */
+    public static function appendUserParts(array $messages, $text, array $mediaBlocks)
+    {
         $messages = array_values($messages);
         $text     = (string) $text;
+
+        $media = [];
+        foreach ($mediaBlocks as $block) {
+            if (MessagePart::isMedia($block) && isset($block['ref']) && $block['ref'] !== '') {
+                $media[] = $block;
+            }
+        }
 
         $dangling = self::danglingToolUses($messages);
         if ($dangling) {
@@ -138,21 +163,32 @@ class Conversation
             if (trim($text) !== '') {
                 $blocks[] = ['type' => 'text', 'text' => $text];
             }
+            foreach ($media as $block) {
+                $blocks[] = $block;
+            }
             $messages[] = ['role' => 'user', 'content' => $blocks];
             return $messages;
         }
 
-        if (trim($text) === '') {
+        if (trim($text) === '' && $media === []) {
             return $messages;
         }
 
         $last = count($messages) - 1;
         if ($last >= 0 && is_array($messages[$last]) && (isset($messages[$last]['role']) ? $messages[$last]['role'] : '') === 'user') {
-            $messages[$last] = self::mergeUserText($messages[$last], $text);
+            if (trim($text) !== '') {
+                $messages[$last] = self::mergeUserText($messages[$last], $text);
+            }
+            if ($media !== []) {
+                $messages[$last]['content'] = MessagePart::append(
+                    isset($messages[$last]['content']) ? $messages[$last]['content'] : '',
+                    $media
+                );
+            }
             return $messages;
         }
 
-        $messages[] = ['role' => 'user', 'content' => $text];
+        $messages[] = ['role' => 'user', 'content' => MessagePart::compose($text, $media)];
         return $messages;
     }
 
@@ -207,7 +243,7 @@ class Conversation
         $out = [];
         foreach ($input as $msg) {
             if (is_array($msg) && isset($msg['role'])) {
-                $out[] = $msg;
+                $out[] = self::sanitizeMedia($msg);
             }
         }
         return $out;
@@ -220,6 +256,37 @@ class Conversation
      * @param string $text
      * @return array<string, mixed>
      */
+    /**
+     * 剔除残缺的 agent_media 块
+     *
+     * 没有 `ref` 的媒体块解析不出任何东西，留着只会在翻译层变成一句
+     * 「文件已不在存储中」的噪音。调用方手工拼消息时拼错了，就在入口挡掉。
+     *
+     * @param array<string, mixed> $msg
+     * @return array<string, mixed>
+     */
+    protected static function sanitizeMedia(array $msg)
+    {
+        if (!isset($msg['content']) || !is_array($msg['content'])) {
+            return $msg;
+        }
+        $clean   = [];
+        $changed = false;
+        foreach ($msg['content'] as $block) {
+            if (MessagePart::isMedia($block)
+                && (!isset($block['ref']) || (string) $block['ref'] === '')
+            ) {
+                $changed = true;
+                continue;
+            }
+            $clean[] = $block;
+        }
+        if ($changed) {
+            $msg['content'] = $clean;
+        }
+        return $msg;
+    }
+
     protected static function mergeUserText(array $msg, $text)
     {
         $content = isset($msg['content']) ? $msg['content'] : '';

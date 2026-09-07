@@ -93,6 +93,15 @@ class Agent
     /** @var \Ai\Agent\Orchestrator\ModelRouter|null 模型路由器 */
     protected $modelRouter = null;
 
+    /** @var \Ai\Agent\Media\MediaManager|null 附件的校验/存储/解析门面，首次用到时惰性建 */
+    protected $mediaManager = null;
+
+    /** @var array<string, mixed> media() 传进来的配置，等到惰性构造时才用 */
+    protected $mediaOptions = [];
+
+    /** @var \Ai\Agent\Media\MediaStoreInterface|null 应用自定义的存储（接对象存储时用） */
+    protected $mediaStore = null;
+
     /** @var \Ai\Agent\Tool\ToolGroup|null 工具分组 */
     protected $toolGroups = null;
 
@@ -2233,17 +2242,47 @@ class Agent
      *
      * 注意别给 `$ai` 开 `rounds`：上下文由 chat() 自己管，AI 层再拼一份会翻倍。
      *
+     * **带附件**：第二个参数收图片/PDF。附件会被校验、存进 MediaStore，
+     * 并以 `media://<id>` 的形式**写进对话历史**——所以第 3 轮再问「刚才那张图
+     * 里的数字是多少」它还在，会话恢复之后也还在。历史里存的是引用不是 base64，
+     * 多图长会话不会把会话文件撑爆。
+     *
+     * ```php
+     * $agent->chat('这张图里有什么', [
+     *     Attachment::fromPath('/uploads/a.png'),
+     *     'https://example.com/b.jpg',        // 字符串也行，自动识别路径/URL
+     * ]);
+     * ```
+     *
      * @param string|array<mixed> $input 一句话，或一条/一批消息
+     * @param array<int, mixed> $attachments Attachment 实例、路径字符串或 ['path'=>..]/['url'=>..]
      * @return AgentResult
      */
-    public function chat($input = '')
+    public function chat($input = '', array $attachments = [])
     {
         $this->ensurePersistence();
         $this->registerMemoryTools();
-        $messages = \Ai\Agent\Context\Conversation::append(
-            $this->getConversation(),
-            \Ai\Agent\Context\Conversation::normalize($input)
-        );
+
+        $mediaBlocks = $attachments === [] ? [] : $this->mediaManager()->ingest($attachments);
+        $this->wireMediaResolver();
+
+        if ($mediaBlocks !== [] && (is_string($input) || $input === '')) {
+            // 字符串输入 + 附件：走媒体感知的拼接（悬空 tool_use 的处理一并沿用）
+            $messages = \Ai\Agent\Context\Conversation::appendUserParts(
+                $this->getConversation(),
+                (string) $input,
+                $mediaBlocks
+            );
+        } else {
+            $messages = \Ai\Agent\Context\Conversation::append(
+                $this->getConversation(),
+                \Ai\Agent\Context\Conversation::normalize($input)
+            );
+            if ($mediaBlocks !== []) {
+                // 调用方自己拼了消息数组又同时传了附件：挂到最后一条 user 消息上
+                $messages = $this->attachToLastUser($messages, $mediaBlocks);
+            }
+        }
 
         // 上一轮挂着的授权请求就此了结——用户没点批准，而是给了新指示
         $this->settlePendingPermission();
@@ -2427,6 +2466,11 @@ class Agent
     {
         $this->ensurePersistence();
         $this->registerMemoryTools();
+        // run() 不收附件参数，媒体由 messages 里的 agent_media 块承载（设计文档 §24）。
+        // 只在真有媒体时才装配解析器——否则每次 run 都会为此建一个存储目录出来
+        if (\Ai\Agent\Context\MessagePart::messagesHaveMedia($messages)) {
+            $this->wireMediaResolver();
+        }
         // 委派次数上限是**每次运行**的预算，不是这个 Agent 对象一辈子的额度。
         // 不重置的话，同一个实例跑第二个任务时额度已经被上一个任务花光了
         if ($this->delegateTool !== null) {
@@ -2440,6 +2484,109 @@ class Agent
         $this->lastText = $result->getText();
         $this->rememberMessages($messages);
         $this->maybeConsolidate($result);
+    }
+
+    /**
+     * 配置附件处理
+     *
+     * ```php
+     * $agent->media([
+     *     'max_attachment_bytes'        => 5242880,   // 单文件 5 MB
+     *     'max_message_bytes'           => 10485760,  // 单条消息全部附件之和
+     *     'max_attachments_per_message' => 8,
+     *     'max_request_bytes'           => 20971520,  // 单次模型请求的媒体总量
+     *     'allowed_paths'               => [APP_PATH . '/uploads'],
+     *     'store'                       => $myS3Store, // 自定义 MediaStoreInterface
+     * ]);
+     * ```
+     *
+     * 一个总限制是不够的：5 MB 单文件很合理，但十个一起发就是必然失败的请求，
+     * 而且失败发生在平台侧、错误信息通常很难懂。
+     *
+     * @param array<string, mixed> $options
+     * @return $this
+     */
+    public function media(array $options = [])
+    {
+        if (isset($options['store']) && $options['store'] instanceof \Ai\Agent\Media\MediaStoreInterface) {
+            $this->mediaStore = $options['store'];
+            unset($options['store']);
+        }
+        $this->mediaOptions = array_merge($this->mediaOptions, $options);
+        // 配置变了就丢掉已建好的，下次用到时按新配置重建
+        $this->mediaManager = null;
+        return $this;
+    }
+
+    /**
+     * 媒体门面（惰性构造）
+     *
+     * 存储位置沿用 `AgentHome` 的双根与 userId 隔离——媒体是会话的附属物，
+     * 就该跟会话同一套隔离规则，另建平行目录会让两个用户的附件混在一起。
+     *
+     * @return \Ai\Agent\Media\MediaManager
+     */
+    public function mediaManager()
+    {
+        if ($this->mediaManager !== null) {
+            return $this->mediaManager;
+        }
+
+        $store = $this->mediaStore;
+        if ($store === null) {
+            $home   = $this->agentHome();
+            $userId = $this->userId !== '' ? $this->userId : null;
+            $store  = new \Ai\Agent\Media\FileMediaStore($home->mediaDir($userId));
+        }
+
+        $this->mediaManager = new \Ai\Agent\Media\MediaManager($store, $this->mediaOptions);
+        return $this->mediaManager;
+    }
+
+    /**
+     * 把媒体解析器挂到运行时上下文
+     *
+     * 只在真的用到附件时才挂——没有附件的 Agent 不该因为这个功能多建一个
+     * 存储目录出来。
+     *
+     * @return void
+     */
+    protected function wireMediaResolver()
+    {
+        // 上下文是每次 run 时才建的，所以挂在 runtime 上，由 buildContext() 转交
+        $this->runtime->setMediaResolver($this->mediaManager()->resolver());
+    }
+
+    /**
+     * 把媒体块挂到最后一条 user 消息上（追加，不覆盖）
+     *
+     * @param array<int, array<string, mixed>> $messages
+     * @param array<int, array<string, mixed>> $mediaBlocks
+     * @return array<int, array<string, mixed>>
+     */
+    protected function attachToLastUser(array $messages, array $mediaBlocks)
+    {
+        $messages = array_values($messages);
+        for ($i = count($messages) - 1; $i >= 0; $i--) {
+            if (!is_array($messages[$i])) {
+                continue;
+            }
+            $role = isset($messages[$i]['role']) ? (string) $messages[$i]['role'] : '';
+            if ($role !== 'user') {
+                continue;
+            }
+            $messages[$i]['content'] = \Ai\Agent\Context\MessagePart::append(
+                isset($messages[$i]['content']) ? $messages[$i]['content'] : '',
+                $mediaBlocks
+            );
+            return $messages;
+        }
+        // 一条 user 消息都没有：自己造一条，总比把附件丢了强
+        $messages[] = [
+            'role'    => 'user',
+            'content' => \Ai\Agent\Context\MessagePart::compose('', $mediaBlocks),
+        ];
+        return $messages;
     }
 
     /**

@@ -415,7 +415,19 @@ class LoopController
         $attempt = 0;
         while (true) {
             try {
-                return $ai->chat($params);
+                // 媒体翻译上下文：Conversation 里是 media://<id>，这里才换成实际字节。
+                // 每次尝试都重新 begin —— 它会重置单次请求的媒体配额，否则重试
+                // 几次之后会因为累计量而误报「媒体总量超限」
+                \Ai\Helpers\MediaTranslator::begin(
+                    $context->getMediaResolver(),
+                    $context->getMediaSupport()
+                );
+                try {
+                    return $ai->chat($params);
+                } finally {
+                    // 不清的话，下一次没装配就发起的请求会沿用这次的 resolver
+                    \Ai\Helpers\MediaTranslator::end();
+                }
             } catch (\Throwable $e) {
                 $attempt++;
                 if ($attempt > $this->modelRetries || !$this->isRetryableModelError($e)) {

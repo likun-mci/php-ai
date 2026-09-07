@@ -28,6 +28,12 @@ use Ai\Agent\Checkpoint\CheckpointManager;
  */
 class AgentContext
 {
+    /** @var \Ai\Agent\Media\MediaResolver|null 请求边界的媒体解析器 */
+    protected $mediaResolver = null;
+
+    /** @var array<string, bool> 当前模型支持的输入模态 */
+    protected $mediaSupport = ['image' => true, 'pdf' => true];
+
     /** @var array<int, array<string, mixed>> */
     protected $messages = [];
 
@@ -152,6 +158,58 @@ class AgentContext
     }
 
     /* ---------- 预算管理 ---------- */
+
+    /**
+     * 挂上媒体解析器
+     *
+     * 只在**请求边界**用：Conversation 里存的是 `media://<id>`，
+     * 发请求前才由它换成实际字节。挂空则消息里的媒体块会被明确降级
+     * （告诉模型「有图但我看不到」），而不是静默消失。
+     *
+     * @param \Ai\Agent\Media\MediaResolver|null $resolver
+     * @return $this
+     */
+    public function setMediaResolver($resolver)
+    {
+        $this->mediaResolver = $resolver instanceof \Ai\Agent\Media\MediaResolver ? $resolver : null;
+        return $this;
+    }
+
+    /**
+     * @return \Ai\Agent\Media\MediaResolver|null
+     */
+    public function getMediaResolver()
+    {
+        return $this->mediaResolver;
+    }
+
+    /**
+     * 当前模型支持哪些输入模态
+     *
+     * 形如 `['image' => true, 'pdf' => false]`。P5 的 CapabilityResolver
+     * 会算出准确值填进来；在那之前默认乐观（与 `CustomModel` 的既有默认一致），
+     * 也就是「发出去，让平台自己说不行」——这比谎称看不到更诚实，
+     * 错误也看得见。
+     *
+     * @param array<string, bool> $support
+     * @return $this
+     */
+    public function setMediaSupport(array $support)
+    {
+        $this->mediaSupport = [
+            'image' => !empty($support['image']),
+            'pdf'   => !empty($support['pdf']),
+        ];
+        return $this;
+    }
+
+    /**
+     * @return array<string, bool>
+     */
+    public function getMediaSupport()
+    {
+        return $this->mediaSupport;
+    }
 
     /**
      * @param BudgetManager $bm

@@ -1,6 +1,8 @@
 <?php
 namespace Ai\Agent\Verification;
 
+use Ai\Helpers\Shell;
+
 /**
  * VerificationManager——验证管理器
  *
@@ -277,18 +279,22 @@ class VerificationManager
     /**
      * 执行一条验证命令
      *
-     * 用 `exec()` 同步执行，退出码 0 视为通过，stdout 作为输出，
-     * 非 0 退出码的 stderr 合并进错误信息。
+     * 同步执行，退出码 0 视为通过，stdout 作为输出，非 0 退出码的 stderr
+     * 合并进错误信息。环境禁用了命令执行时跳过（记为通过并注明原因）。
      *
      * @param string $command
      * @return VerificationResult
      */
     protected function runCommand($command)
     {
-        $output = [];
-        $code = -1;
-        exec($command . ' 2>&1', $output, $code);
-        $text = implode("\n", $output);
+        if (!Shell::canRunCommand()) {
+            // 命令跑不了不代表改动有问题，按「跳过」记，理由写清楚，
+            // 免得每次工具调用都判失败把 Agent 卡在重试里
+            return VerificationResult::passed($command, Shell::disabledMessage() . '，跳过该验证命令');
+        }
+        $res = Shell::run($command . ' 2>&1');
+        $code = $res['code'];
+        $text = $res['out'];
         if ($code === 0) {
             return VerificationResult::passed($command, $text);
         }

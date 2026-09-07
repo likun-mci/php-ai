@@ -1,6 +1,8 @@
 <?php
 namespace Ai\Agent\Mcp;
 
+use Ai\Helpers\Shell;
+
 /**
  * McpStdioTransport——stdio 子进程传输
  *
@@ -90,6 +92,12 @@ class McpStdioTransport implements McpTransportInterface
 
         $cwd = $this->cwd !== '' && is_dir($this->cwd) ? $this->cwd : null;
         $env = $this->env ? $this->env : null;
+
+        if (!Shell::canProcOpen()) {
+            throw new \RuntimeException(
+                Shell::disabledMessage('proc_open') . "，无法启动 MCP 服务器：{$this->command}"
+            );
+        }
 
         $proc = @proc_open($cmd, $descriptors, $pipes, $cwd, $env);
         if ($proc === false) {

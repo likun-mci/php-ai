@@ -145,6 +145,7 @@
             "php tests/agent_model_driven_test.php",
             "php tests/agent_production_test.php",
             "php tests/agent_hardening_test.php",
+            "php tests/agent_disabled_exec_test.php",
             "php tests/agent_tool_registry_test.php",
             "php tests/agent_tool_execution_test.php",
             "php tests/agent_media_test.php",

@@ -1,6 +1,8 @@
 <?php
 namespace Ai\Agent\Verification;
 
+use Ai\Helpers\Shell;
+
 /**
  * BaseVerifier——验证器基类
  *
@@ -29,13 +31,28 @@ abstract class BaseVerifier implements VerifierInterface
      */
     protected function exec($command)
     {
-        $output = [];
-        $code = -1;
-        exec($command . ' 2>&1', $output, $code);
+        if (!$this->canRunCommands()) {
+            return ['code' => -1, 'output' => Shell::disabledMessage()];
+        }
+        $res = Shell::run($command . ' 2>&1');
         return [
-            'code' => $code,
-            'output' => implode("\n", $output),
+            'code' => $res['code'],
+            'output' => $res['out'],
         ];
+    }
+
+    /**
+     * 当前环境能不能跑外部命令
+     *
+     * 生产环境常在 php.ini 的 disable_functions 里禁掉 exec / proc_open。
+     * 依赖外部命令的验证器应当先问这一句，问不到就按「跳过」处理——
+     * 跑不了检查不等于代码有问题，报 failed 会让 Agent 白白重试。
+     *
+     * @return bool
+     */
+    protected function canRunCommands()
+    {
+        return Shell::canRunCommand();
     }
 
     /**

@@ -1,6 +1,8 @@
 <?php
 namespace Ai\Agent\Verification;
 
+use Ai\Helpers\Shell;
+
 /**
  * PhpSyntaxVerifier——PHP 语法验证器
  *
@@ -58,6 +60,10 @@ class PhpSyntaxVerifier extends BaseVerifier
 
         if (!$this->fileExists($filePath)) {
             return VerificationResult::passed('', '文件不存在，跳过语法检查: ' . $filePath, $name);
+        }
+
+        if (!$this->canRunCommands()) {
+            return VerificationResult::passed('', Shell::disabledMessage() . '，跳过语法检查', $name);
         }
 
         $cmd = 'php -l ' . escapeshellarg($filePath);

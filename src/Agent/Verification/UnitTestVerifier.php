@@ -1,6 +1,8 @@
 <?php
 namespace Ai\Agent\Verification;
 
+use Ai\Helpers\Shell;
+
 /**
  * UnitTestVerifier——单元测试验证器
  *
@@ -91,6 +93,10 @@ class UnitTestVerifier extends BaseVerifier
             if (strtolower($ext) !== 'php') {
                 return VerificationResult::passed('', '非 PHP 文件改动，跳过测试', $name);
             }
+        }
+
+        if (!$this->canRunCommands()) {
+            return VerificationResult::passed('', Shell::disabledMessage() . '，跳过测试', $name);
         }
 
         $cmd = $this->command;

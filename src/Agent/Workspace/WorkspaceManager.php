@@ -1,6 +1,8 @@
 <?php
 namespace Ai\Agent\Workspace;
 
+use Ai\Helpers\Shell;
+
 /**
  * WorkspaceManager——工作区管理器
  *
@@ -262,13 +264,13 @@ class WorkspaceManager
         if ($cwd === '' || !is_dir($cwd)) {
             return '';
         }
-        $output = [];
-        $code = -1;
-        $cmd = 'cd ' . escapeshellarg($cwd) . ' && ' . $command;
-        exec($cmd, $output, $code);
-        if ($code !== 0) {
+        // 生产环境常在 disable_functions 里禁掉 exec/proc_open。Shell::run 两条路
+        // 都被禁时返回 code = -1，这里当成「拿不到 git 信息」处理：
+        // isGitRepo 归 false，上下文里只剩 workdir，Agent 照常跑。
+        $res = Shell::run($command, $cwd);
+        if ($res['code'] !== 0) {
             return '';
         }
-        return implode("\n", $output);
+        return $res['out'];
     }
 }

@@ -5734,6 +5734,46 @@ class MyProtocol implements ProtocolInterface
 
 ---
 
+## 受限 PHP 环境：禁用了 exec / proc_open
+
+生产环境（宝塔 / cPanel 面板的默认配置、共享主机）常在 php.ini 的 `disable_functions`
+里禁掉 `exec`、`shell_exec`、`proc_open`。被禁的函数是**从函数表里消失**，调用时报的是：
+
+```
+Fatal error: Uncaught Error: Call to undefined function Ai\Agent\Workspace\exec()
+```
+
+`@` 抑制符挡不住，`try/catch` 也接不到。所以库里每个要跑外部命令的地方都先探测再调用，
+探测不到就降级——**功能少一块，但 Agent 照常跑完**：
+
+| 能力 | 被禁后的行为 |
+|------|-------------|
+| git 工作区上下文（`WorkspaceManager`） | 退化成「非 git 仓库」，上下文里只剩 `cwd` |
+| 工作区快照（`WorkspaceSnapshot`） | 仍靠 `.git` 目录认仓库，分支 / 提交 / diff 取不到而留空 |
+| `bash` 工具（含后台模式） | 返回带原因的失败 `ToolResult`，不抛异常 |
+| 验证器（`php -l` / 单测 / git diff） | 记为**跳过**（通过 + 注明原因），不判失败——跑不了检查不等于代码有问题，判失败只会让 Agent 白白重试 |
+| MCP stdio 传输 | `open()` 抛 `RuntimeException` 并说明原因 |
+| 浏览器工具 | `isAvailable()` 与 `launch()` 均返回 false |
+| 后台派发（`BackgroundDispatcher`） | 从 `fork` 档退回 `sync` 同步执行 |
+| `rg` / `git` 二进制探测（`Shell::hasBinary`） | 一律 false，走纯 PHP 回退实现 |
+
+自己的代码要判断时用 `Ai\Helpers\Shell`：
+
+```php
+use Ai\Helpers\Shell;
+
+Shell::canExec();                  // exec() 能用吗
+Shell::canProcOpen();              // proc_open() 能用吗（管道、超时、后台进程都靠它）
+Shell::canRunCommand();            // 两条路通任意一条即可
+Shell::hasFunction('shell_exec');  // 任意函数：function_exists + disable_functions / suhosin 黑名单
+
+// 统一入口：exec / proc_open 哪个能用用哪个；两条都被禁时 code = -1、out = ''
+$res = Shell::run('git status --porcelain', '/path/to/repo');  // ['code' => int, 'out' => string]
+```
+
+唯一没有降级路径的是 `Ai\Cli\ClaudeCode`——它本身就是「跑本机的 claude 程序」。
+这类环境下请注入自定义执行器走 SSH，见上文「自定义执行器」。
+
 ## 已知限制
 
 - 会话历史存在内存里，进程退出即失，跨请求需用 `exportHistory()` / `importHistory()` 自行落库；

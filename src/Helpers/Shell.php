@@ -16,6 +16,131 @@ class Shell
     /** @var array<string, bool> 二进制存在性缓存 */
     protected static $binCache = [];
 
+    /** @var array<string, bool> 函数可用性缓存 */
+    protected static $fnCache = [];
+
+    /**
+     * 某个函数在当前 PHP 是否真的能调用
+     *
+     * 生产环境（尤其是共享主机、宝塔/cPanel 面板的默认配置）常在 php.ini 的
+     * `disable_functions` 里禁掉 exec / shell_exec / proc_open。被禁的函数直接
+     * 从函数表里消失，调用时报的是 **Call to undefined function**——@ 抑制符
+     * 挡不住，try/catch 也接不到（PHP 7 是 Fatal error，PHP 8 是 Error），
+     * 所以只能在调用前问一句。
+     *
+     * 一般 `function_exists()` 就够；但 suhosin 之类的补丁只拦截调用、函数照样
+     * "存在"，因此再核一遍黑名单。结果缓存——git 上下文每轮刷新都要问一次，
+     * 不必反复解析 ini。
+     *
+     * @param string $name 函数名，如 'exec' / 'proc_open'
+     * @return bool
+     */
+    public static function hasFunction($name)
+    {
+        $name = strtolower(trim((string) $name));
+        if ($name === '') {
+            return false;
+        }
+        if (isset(self::$fnCache[$name])) {
+            return self::$fnCache[$name];
+        }
+        $ok = function_exists($name);
+        if ($ok) {
+            $keys = ['disable_functions', 'suhosin.executor.func.blacklist'];
+            foreach ($keys as $key) {
+                $list = (string) @ini_get($key);
+                if ($list === '') {
+                    continue;
+                }
+                foreach (explode(',', $list) as $item) {
+                    if (strtolower(trim($item)) === $name) {
+                        $ok = false;
+                        break 2;
+                    }
+                }
+            }
+        }
+        return self::$fnCache[$name] = $ok;
+    }
+
+    /**
+     * exec() 是否可用
+     *
+     * @return bool
+     */
+    public static function canExec()
+    {
+        return self::hasFunction('exec');
+    }
+
+    /**
+     * proc_open() 是否可用（管道、超时、后台进程都靠它）
+     *
+     * @return bool
+     */
+    public static function canProcOpen()
+    {
+        return self::hasFunction('proc_open');
+    }
+
+    /**
+     * 本机到底能不能跑外部命令——两条路通任意一条即可
+     *
+     * @return bool
+     */
+    public static function canRunCommand()
+    {
+        return self::canProcOpen() || self::canExec();
+    }
+
+    /**
+     * 「函数被禁」的统一说法，给用户看的报错/跳过原因
+     *
+     * @param string $fn
+     * @return string
+     */
+    public static function disabledMessage($fn = 'exec/proc_open')
+    {
+        return '当前 PHP 环境禁用了 ' . $fn . '()（php.ini 的 disable_functions），无法执行外部命令';
+    }
+
+    /**
+     * 同步跑一条命令，拿 stdout 与退出码——exec / proc_open 哪个能用用哪个
+     *
+     * 供只关心「输出 + 退出码」的调用方（git 上下文、验证器）使用：
+     * 两条路都被禁时返回 code = -1、out = ''，让调用方自己降级，而不是崩掉。
+     *
+     * @param string $command 完整命令行（调用方已转义）
+     * @param string|null $cwd 工作目录；exec 那条路靠 `cd ... &&` 进入
+     * @param array<string, mixed> $opts 透传给 capture()（timeout / maxBytes 等）
+     * @return array{code: int, out: string}
+     */
+    public static function run($command, $cwd = null, array $opts = [])
+    {
+        $command = (string) $command;
+        $cwd = $cwd === null ? '' : (string) $cwd;
+        if ($cwd !== '' && !is_dir($cwd)) {
+            return ['code' => -1, 'out' => ''];
+        }
+
+        if (self::canExec()) {
+            $cmd = $cwd !== '' ? 'cd ' . escapeshellarg($cwd) . ' && ' . $command : $command;
+            $output = [];
+            $code = -1;
+            exec($cmd, $output, $code);
+            return ['code' => (int) $code, 'out' => implode("\n", $output)];
+        }
+
+        if (self::canProcOpen()) {
+            $opts['cwd'] = $cwd;
+            $res = self::capture($command, $opts);
+            // exec() 的输出数组不含末尾换行，两条路的返回值在这里对齐
+            return ['code' => $res['code'], 'out' => rtrim($res['out'], "\r\n")];
+        }
+
+        return ['code' => -1, 'out' => ''];
+    }
+
     /**
      * 探测某个二进制是否可用（结果缓存）
      *
@@ -30,6 +155,9 @@ class Shell
         }
         if (isset(self::$binCache[$name])) {
             return self::$binCache[$name];
+        }
+        if (!self::canProcOpen()) {
+            return self::$binCache[$name] = false;
         }
         $probe = Path::isWindows()
             ? 'where ' . escapeshellarg($name)
@@ -47,6 +175,7 @@ class Shell
     public static function resetCache()
     {
         self::$binCache = [];
+        self::$fnCache = [];
     }
 
     /**
@@ -72,6 +201,9 @@ class Shell
             2 => ['pipe', 'w'],
         ];
         $pipes = [];
+        if (!self::canProcOpen()) {
+            return ['code' => -1, 'out' => '', 'err' => self::disabledMessage('proc_open')];
+        }
         $process = @proc_open($command, $descriptors, $pipes, $cwd, null);
         if (!is_resource($process)) {
             return ['code' => -1, 'out' => '', 'err' => 'proc_open 失败'];

@@ -1,6 +1,8 @@
 <?php
 namespace Ai\Agent\Tools;
 
+use Ai\Helpers\Shell;
+
 /**
  * BrowserSession——Chrome DevTools Protocol 会话
  *
@@ -98,6 +100,9 @@ class BrowserSession
                 }
                 continue;
             }
+            if (!Shell::hasFunction('shell_exec')) {
+                continue;
+            }
             $found = @shell_exec('command -v ' . escapeshellarg($candidate) . ' 2>/dev/null');
             if (is_string($found) && trim($found) !== '') {
                 return trim($found);
@@ -113,7 +118,7 @@ class BrowserSession
      */
     public static function isAvailable()
     {
-        return self::detectBinary() !== '' && function_exists('proc_open');
+        return self::detectBinary() !== '' && Shell::canProcOpen();
     }
 
     /**
@@ -129,7 +134,7 @@ class BrowserSession
         if ($this->binary === '') {
             $this->binary = self::detectBinary();
         }
-        if ($this->binary === '' || !function_exists('proc_open')) {
+        if ($this->binary === '' || !Shell::canProcOpen()) {
             return false;
         }
         // 绝对路径先自己判一下：proc_open 对不存在的命令照样返回句柄，
@@ -435,7 +440,7 @@ class BrowserSession
         }
 
         if ($this->userDataDir !== '' && is_dir($this->userDataDir)) {
-            @exec('rm -rf ' . escapeshellarg($this->userDataDir));
+            Shell::run('rm -rf ' . escapeshellarg($this->userDataDir));
         }
     }
 

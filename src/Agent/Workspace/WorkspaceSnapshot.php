@@ -1,6 +1,8 @@
 <?php
 namespace Ai\Agent\Workspace;
 
+use Ai\Helpers\Shell;
+
 /**
  * WorkspaceSnapshot——工作区状态快照
  *
@@ -298,9 +300,9 @@ class WorkspaceSnapshot
      */
     protected static function git($dir, $args)
     {
-        $output = [];
-        $code = -1;
-        @exec('cd ' . escapeshellarg($dir) . ' && git ' . $args . ' 2>/dev/null', $output, $code);
-        return $code === 0 ? rtrim(implode("\n", $output)) : '';
+        // exec/proc_open 被 disable_functions 禁掉时 Shell::run 返回 code = -1，
+        // 快照退化成「没有 git 信息」而不是崩掉
+        $res = Shell::run('git ' . $args . ' 2>/dev/null', $dir);
+        return $res['code'] === 0 ? rtrim($res['out']) : '';
     }
 }

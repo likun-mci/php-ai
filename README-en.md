@@ -5646,6 +5646,48 @@ class MyProtocol implements ProtocolInterface
 
 ---
 
+## Restricted PHP environments: exec / proc_open disabled
+
+Production hosts (the default configuration of aaPanel / cPanel, shared hosting) commonly
+disable `exec`, `shell_exec` and `proc_open` through `disable_functions` in php.ini.
+A disabled function **disappears from the function table**, so calling it raises:
+
+```
+Fatal error: Uncaught Error: Call to undefined function Ai\Agent\Workspace\exec()
+```
+
+The `@` operator does not suppress that, and `try/catch` does not catch it. Every place in
+the library that runs an external command therefore probes first and degrades when the probe
+fails — **one capability is lost, the Agent still finishes its run**:
+
+| Capability | Behaviour when disabled |
+|------------|-------------------------|
+| Git workspace context (`WorkspaceManager`) | Degrades to "not a git repository"; the context keeps only `cwd` |
+| Workspace snapshot (`WorkspaceSnapshot`) | Still recognises the repository from the `.git` directory; branch / commit / diff stay empty |
+| The `bash` tool (background mode included) | Returns a failed `ToolResult` with the reason instead of throwing |
+| Verifiers (`php -l`, unit tests, git diff) | Recorded as **skipped** (passed, with the reason stated) rather than failed — being unable to run a check does not mean the code is broken, and failing would only make the Agent retry for nothing |
+| MCP stdio transport | `open()` throws a `RuntimeException` stating the reason |
+| Browser tool | `isAvailable()` and `launch()` both return false |
+| Background dispatch (`BackgroundDispatcher`) | Falls back from `fork` to synchronous `sync` |
+| `rg` / `git` binary detection (`Shell::hasBinary`) | Always false, so the pure-PHP fallbacks are used |
+
+Use `Ai\Helpers\Shell` when your own code needs to know:
+
+```php
+use Ai\Helpers\Shell;
+
+Shell::canExec();                  // is exec() available
+Shell::canProcOpen();              // is proc_open() available (pipes, timeouts, background processes need it)
+Shell::canRunCommand();            // either route is enough
+Shell::hasFunction('shell_exec');  // any function: function_exists + disable_functions / suhosin blacklist
+
+// One entry point: whichever of exec / proc_open works; code = -1 and out = '' when both are disabled
+$res = Shell::run('git status --porcelain', '/path/to/repo');  // ['code' => int, 'out' => string]
+```
+
+The one thing with no fallback is `Ai\Cli\ClaudeCode` — running the local claude binary *is*
+its job. On such hosts inject a custom runner over SSH; see "custom runner" above.
+
 ## Known limitations
 
 - Conversation history lives in memory and is lost when the process exits; persist it across requests yourself with `exportHistory()` / `importHistory()`.

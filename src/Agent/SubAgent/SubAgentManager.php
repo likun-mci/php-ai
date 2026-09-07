@@ -4,6 +4,7 @@ namespace Ai\Agent\SubAgent;
 use Ai\Agent\AgentRuntime;
 use Ai\Agent\Permission\PermissionManager;
 use Ai\AI;
+use Ai\Helpers\Shell;
 
 /**
  * 子 Agent 管理器
@@ -1171,18 +1172,14 @@ class SubAgentManager
         }
 
         $flag = $check ? ' --check' : '';
-        $output = [];
-        $code = -1;
-        @exec(
-            'cd ' . escapeshellarg($this->workdir) . ' && git apply' . $flag . ' '
-            . escapeshellarg($patch) . ' 2>&1',
-            $output,
-            $code
-        );
+        $res = Shell::run('git apply' . $flag . ' ' . escapeshellarg($patch) . ' 2>&1', $this->workdir);
         @unlink($patch);
 
-        if ($code !== 0) {
-            return ['applied' => false, 'reason' => 'apply_failed: ' . trim(implode(' ', $output))];
+        if ($res['code'] !== 0) {
+            if (!Shell::canRunCommand()) {
+                return ['applied' => false, 'reason' => 'exec_disabled'];
+            }
+            return ['applied' => false, 'reason' => 'apply_failed: ' . trim(str_replace("\n", ' ', $res['out']))];
         }
 
         if (!$check && isset($this->runs[$runId])) {
@@ -1231,11 +1228,10 @@ class SubAgentManager
         if ($cwd === '' || !is_dir($cwd)) {
             return '';
         }
-        $output = [];
-        $code = -1;
-        $cmd = 'cd ' . escapeshellarg($cwd) . ' && ' . $command;
-        exec($cmd, $output, $code);
-        return implode("\n", $output);
+        // exec/proc_open 被 disable_functions 禁掉时返回空串，
+        // 调用方一律按「命令没有输出」处理
+        $res = Shell::run($command, $cwd);
+        return $res['out'];
     }
 
     /**

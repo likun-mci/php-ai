@@ -4,6 +4,7 @@ namespace Ai\Agent\Tools;
 use Ai\Agent\Tool\AgentToolInterface;
 use Ai\Agent\Tool\ToolContext;
 use Ai\Agent\Tool\ToolResult;
+use Ai\Helpers\Shell;
 use Ai\Helpers\Text;
 
 /**
@@ -111,7 +112,9 @@ class BashTool implements AgentToolInterface
         if (!empty($input['run_in_background'])) {
             $bgId = BackgroundShells::start($command, $cd, $this->maxOutputBytes);
             if ($bgId === '') {
-                return ToolResult::error('后台启动失败');
+                return ToolResult::error(
+                    Shell::canProcOpen() ? '后台启动失败' : Shell::disabledMessage('proc_open')
+                );
             }
             return new ToolResult([
                 'success'  => true,
@@ -120,6 +123,10 @@ class BashTool implements AgentToolInterface
                 'metadata' => ['bash_id' => $bgId, 'background' => true, 'command' => $command],
                 'display'  => 'Bash(后台): ' . mb_substr($command, 0, 60),
             ]);
+        }
+
+        if (!Shell::canProcOpen()) {
+            return ToolResult::error(Shell::disabledMessage('proc_open'));
         }
 
         $descriptors = [

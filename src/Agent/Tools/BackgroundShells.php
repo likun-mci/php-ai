@@ -1,6 +1,8 @@
 <?php
 namespace Ai\Agent\Tools;
 
+use Ai\Helpers\Shell;
+
 /**
  * 后台命令进程注册表——`bash(run_in_background)` 与 `bash_output` 共用
  *
@@ -40,6 +42,11 @@ class BackgroundShells
             2 => ['pipe', 'w'],
         ];
         $pipes = [];
+        // proc_open 被 php.ini 的 disable_functions 禁掉时直接返回失败，
+        // 调用它才是 Call to undefined function
+        if (!Shell::canProcOpen()) {
+            return '';
+        }
         $proc = @proc_open((string) $command, $descriptors, $pipes, $cwd, null);
         if (!is_resource($proc)) {
             return '';

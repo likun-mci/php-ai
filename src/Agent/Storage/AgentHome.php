@@ -294,6 +294,30 @@ class AgentHome
         return $base;
     }
 
+    /**
+     * 媒体目录（与 sessions 同级）
+     *
+     * 沿用与会话完全相同的双根与身份隔离规则：传了 userId 落
+     * `users/<hash>/media/`，否则落 `projects/<slug>/media/`。
+     *
+     * 之所以不另建一套 `.agent/media`：那会和现有的项目隔离、userId 隔离
+     * 打架——同一台机器上两个用户的附件会混在一起。媒体是会话的附属物，
+     * 就该跟会话同一套隔离规则。
+     *
+     * 纯路径推导，不创建目录。
+     *
+     * @param string|null $userId
+     * @return string
+     */
+    public function mediaDir($userId = null)
+    {
+        $uid = $userId === null ? $this->userId : (string) $userId;
+        if ($uid !== '') {
+            return $this->userDir($uid) . '/media';
+        }
+        return $this->home() . '/projects/' . $this->projectSlug() . '/media';
+    }
+
     // ===== project 可写性（见 dev.md 第十二节） =====
 
     /**

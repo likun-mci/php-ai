@@ -37,6 +37,9 @@ class AgentContext
     /** @var \Ai\Agent\Media\MediaManager|null 媒体门面，供工具落库用 */
     protected $mediaManager = null;
 
+    /** @var \Ai\Agent\Capability\ModalityRouter|null 模态路由 */
+    protected $modalityRouter = null;
+
     /** @var array<int, array<string, mixed>> */
     protected $messages = [];
 
@@ -230,6 +233,24 @@ class AgentContext
     public function getMediaManager()
     {
         return $this->mediaManager;
+    }
+
+    /**
+     * @param \Ai\Agent\Capability\ModalityRouter|null $router
+     * @return $this
+     */
+    public function setModalityRouter($router)
+    {
+        $this->modalityRouter = $router instanceof \Ai\Agent\Capability\ModalityRouter ? $router : null;
+        return $this;
+    }
+
+    /**
+     * @return \Ai\Agent\Capability\ModalityRouter|null
+     */
+    public function getModalityRouter()
+    {
+        return $this->modalityRouter;
     }
 
     /**

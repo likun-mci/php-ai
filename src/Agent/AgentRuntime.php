@@ -88,6 +88,9 @@ class AgentRuntime
     /** @var \Ai\Agent\Media\MediaManager|null 媒体门面，供工具落库用 */
     protected $mediaManager = null;
 
+    /** @var \Ai\Agent\Capability\ModalityRouter|null 模态路由 */
+    protected $modalityRouter = null;
+
     /** @var string */
     protected $workdir = '';
 
@@ -1277,6 +1280,9 @@ class AgentRuntime
         if ($this->mediaManager !== null) {
             $context->setMediaManager($this->mediaManager);
         }
+        if ($this->modalityRouter !== null) {
+            $context->setModalityRouter($this->modalityRouter);
+        }
         if ($this->taskId !== null) {
             $context->setCheckpointId($this->taskId);
         } elseif ($this->sessionId !== null) {
@@ -1314,6 +1320,18 @@ class AgentRuntime
     public function setMediaManager($mm)
     {
         $this->mediaManager = $mm instanceof \Ai\Agent\Media\MediaManager ? $mm : null;
+        return $this;
+    }
+
+    /**
+     * 挂上模态路由
+     *
+     * @param \Ai\Agent\Capability\ModalityRouter|null $router
+     * @return $this
+     */
+    public function setModalityRouter($router)
+    {
+        $this->modalityRouter = $router instanceof \Ai\Agent\Capability\ModalityRouter ? $router : null;
         return $this;
     }
 

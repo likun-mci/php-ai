@@ -170,8 +170,20 @@ class MediaTranslator
     {
         $media = isset($block['media']) ? (string) $block['media'] : 'image';
 
-        // 模型不支持这个模态：明确说明,不假装
+        // 模型不支持这个模态
         if (empty(self::$supported[$media])) {
+            // 已经由视觉模型转成文字了（ModalityRouter 的 describe）——
+            // 那就把描述给它，并**注明来源**：这不是主模型自己看到的
+            $described = self::describedText($block);
+            if ($described !== '') {
+                self::$skipped[] = [
+                    'name'   => isset($block['name']) ? (string) $block['name'] : '',
+                    'media'  => $media,
+                    'ref'    => isset($block['ref']) ? (string) $block['ref'] : '',
+                    'reason' => 'described',
+                ];
+                return MessagePart::text($described);
+            }
             self::$skipped[] = [
                 'name'   => isset($block['name']) ? (string) $block['name'] : '',
                 'media'  => $media,
@@ -236,6 +248,32 @@ class MediaTranslator
             'type'      => 'image_url',
             'image_url' => ['url' => 'data:' . $mime . ';base64,' . $base64],
         ];
+    }
+
+    /**
+     * 媒体块里带的视觉模型描述 → 给主模型看的文字
+     *
+     * 措辞必须**注明来源**：这是另一个模型看图后写的描述，不是主模型自己看到的。
+     * 混淆这一点会让主模型把二手描述当作一手观察，在描述有偏差时给出过度自信的结论。
+     *
+     * @param array<string, mixed> $block
+     * @return string 没有描述时返回空串
+     */
+    protected static function describedText(array $block)
+    {
+        $text = isset($block['description']) ? trim((string) $block['description']) : '';
+        if ($text === '') {
+            return '';
+        }
+        $name  = isset($block['name']) && $block['name'] !== '' ? (string) $block['name'] : '未命名文件';
+        $media = isset($block['media']) ? (string) $block['media'] : 'image';
+        $label = $media === 'pdf' ? 'PDF 文件' : '图片';
+        $by    = isset($block['described_by']) && $block['described_by'] !== ''
+            ? (string) $block['described_by']
+            : '视觉模型';
+
+        return '[' . $label . '「' . $name . '」的内容描述 —— 由 ' . $by
+            . ' 查看后生成，当前模型无法直接查看该文件]' . "\n" . $text;
     }
 
     /**

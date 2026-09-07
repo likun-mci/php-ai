@@ -387,6 +387,44 @@ class LoopController
     }
 
     /**
+     * 取 AI 实例当前的模型名
+     *
+     * @param \Ai\AI $ai
+     * @return string
+     */
+    protected function modelNameOf($ai)
+    {
+        if (!method_exists($ai, 'model')) {
+            return '';
+        }
+        $model = $ai->model();
+        return $model === null ? '' : (string) $model->getName();
+    }
+
+    /**
+     * 取 AI 实例的协议家族
+     *
+     * 只决定**消息格式**，不用来推断模型能力（设计文档 §18）。
+     *
+     * @param \Ai\AI $ai
+     * @return string
+     */
+    protected function familyOf($ai)
+    {
+        if (!method_exists($ai, 'model')) {
+            return \Ai\Helpers\MediaTranslator::FAMILY_OPENAI;
+        }
+        $model = $ai->model();
+        if ($model === null) {
+            return \Ai\Helpers\MediaTranslator::FAMILY_OPENAI;
+        }
+        $protocol = (string) $model->getProtocol();
+        return (stripos($protocol, 'claude') !== false || stripos($protocol, 'anthropic') !== false)
+            ? \Ai\Helpers\MediaTranslator::FAMILY_ANTHROPIC
+            : \Ai\Helpers\MediaTranslator::FAMILY_OPENAI;
+    }
+
+    /**
      * 调一次模型，瞬时失败就重试
      *
      * 传输层已经重试 408/429/5xx，但**不重试 4xx**——一般来说这是对的，
@@ -725,6 +763,45 @@ class LoopController
                     if ($plan !== null) {
                         $systemPrompt .= "\n\n<plan>\n" . $plan->toSummary() . "\n</plan>";
                     }
+                    // ===== 模态路由 =====
+                    // 消息里有当前模型吃不下的媒体时，在这里决定怎么办：
+                    // 直发 / 先让视觉模型转成文字 / 本次调用换用视觉模型 / 明确告知不可用。
+                    // 放在这里而不是 Agent::chat()，是因为工具注入的媒体（read_file
+                    // 读到的图）同样要走这条路
+                    $callAi = $ai;
+                    $router = $context->getModalityRouter();
+                    if ($router !== null) {
+                        $routed = $router->route(
+                            $context->getMessages(),
+                            $this->modelNameOf($ai),
+                            ['family' => $this->familyOf($ai)]
+                        );
+                        if ($routed['decision'] !== \Ai\Agent\Capability\ModalityRouter::DECISION_NONE) {
+                            $context->emit('modality_route', [
+                                'decision' => $routed['decision'],
+                                'provider' => $routed['provider'],
+                                'notes'    => $routed['notes'],
+                            ]);
+                        }
+                        // describe 会往消息里写描述，要落回上下文——否则下一轮又要重描一遍
+                        if ($routed['messages'] !== $context->getMessages()) {
+                            $context->setMessages($routed['messages']);
+                        }
+                        $context->setMediaSupport($routed['support']);
+
+                        if ($routed['decision'] === \Ai\Agent\Capability\ModalityRouter::DECISION_SWITCH
+                            && $routed['provider'] !== ''
+                        ) {
+                            $switched = $router->providerAi($routed['provider']);
+                            if ($switched !== null) {
+                                // 只换这一次模型调用；tools / permissions / session /
+                                // memory / conversation 一律不动（设计文档 §11）
+                                $callAi = $switched;
+                                $context->setMediaSupport(['image' => true, 'pdf' => true]);
+                            }
+                        }
+                    }
+
                     $modelParams = [
                         'system'   => $systemPrompt,
                         'messages' => $context->getMessages(),
@@ -735,7 +812,7 @@ class LoopController
                     if ($hooks && $hooks->hasBeforeModel()) {
                         $modelParams = $hooks->triggerBeforeModel($modelParams);
                     }
-                    $resp = $this->chatWithRetry($ai, $modelParams, $context);
+                    $resp = $this->chatWithRetry($callAi, $modelParams, $context);
                     // after_model 钩子
                     if ($hooks && $hooks->hasAfterModel()) {
                         $resp = $hooks->triggerAfterModel($resp);

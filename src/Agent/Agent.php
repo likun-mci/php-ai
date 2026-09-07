@@ -116,6 +116,9 @@ class Agent
     /** @var array<string, mixed> multimodal() 的配置 */
     protected $multimodalOptions = [];
 
+    /** @var \Ai\Agent\Capability\ModalityRouter|null 模态路由，首次用到时惰性建 */
+    protected $modalityRouter = null;
+
     /** @var \Ai\Agent\Tool\ToolGroup|null 工具分组 */
     protected $toolGroups = null;
 
@@ -2581,6 +2584,37 @@ class Agent
     }
 
     /**
+     * 模态路由（惰性构造并缓存）
+     *
+     * 缓存而不是每次 `chat()` 重建：应用可能在它上面挂了自定义的 AI 工厂或
+     * 描述提示词，每次重建等于把这些定制静默丢掉。`multimodal()` 改配置时
+     * 才重建。
+     *
+     * ```php
+     * // 用自己的方式构造视觉模型的连接（比如走内网网关）
+     * $agent->modalityRouter()->setAiFactory(function ($model, $config) {
+     *     return new AI(['api_key' => $config['api_key'], 'model' => $model,
+     *                    'base_url' => 'http://gateway.internal/v1']);
+     * });
+     * ```
+     *
+     * @return \Ai\Agent\Capability\ModalityRouter
+     */
+    public function modalityRouter()
+    {
+        if ($this->modalityRouter === null) {
+            $this->modalityRouter = new \Ai\Agent\Capability\ModalityRouter(
+                $this->capabilities(),
+                $this->multimodalOptions
+            );
+        }
+        // 平台配置与解析器每次都刷新：platforms() / media() 可能在建好之后才调用
+        $this->modalityRouter->setPlatformConfigs($this->platformConfigs);
+        $this->modalityRouter->setResolver($this->mediaManager()->resolver());
+        return $this->modalityRouter;
+    }
+
+    /**
      * 配置多模态行为
      *
      * ```php
@@ -2598,8 +2632,9 @@ class Agent
     public function multimodal(array $options = [])
     {
         $this->multimodalOptions = array_merge($this->multimodalOptions, $options);
-        // 配置变了就重建解析器，下次用到时按新配置来
+        // 配置变了就重建，下次用到时按新配置来
         $this->capabilityResolver = null;
+        $this->modalityRouter = null;
         return $this;
     }
 
@@ -2640,6 +2675,9 @@ class Agent
 
         $flags = $this->capabilities()->supportFlags($model, ['family' => $family], true);
         $this->runtime->setMediaSupport($flags);
+
+        // 模态路由：主模型吃不下的媒体交给已配置的视觉模型
+        $this->runtime->setModalityRouter($this->modalityRouter());
     }
 
     /**

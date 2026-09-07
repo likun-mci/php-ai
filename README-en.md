@@ -23,6 +23,7 @@ Every example in this document is taken from a real production system (a CodeIgn
 - 🤖 **Claude Code CLI** — drive the local `claude` binary directly (`Ai\Cli\ClaudeCode`): file I/O, tool execution, session resumption, structured output, with automatic path detection and caching
 - 📊 **CLI introspection** — read version, login state, model list, quota usage and rate limits, effective settings and MCP status without starting a conversation
 - 🔌 **Persistent duplex session** — `Ai\Cli\ClaudeCodeSession` mirrors the official IDE plugin's process model: multi-turn conversation in a long-lived process, tool-permission callbacks decided in PHP, graceful interruption, and new requests accepted mid-turn
+- 🖼️ **Agent multimodal** — send images/PDFs in conversation, or let the Agent `read_file` them itself; attachments enter the conversation history as references (still there after later turns and session resume, with no base64 in the history); when the primary model has no vision the work is routed to a configured vision model automatically, and when nothing can see the image that is stated plainly rather than faked
 - 🗂️ **Agent Tool Registry** — add a few `@agent-tool` comment lines to your existing Controllers / Services, run `php-ai index` to scan them into SQLite (with FTS5 full-text search that handles CJK), and the Agent searches and loads schemas on demand; execution goes back through your application's **existing Controller entry permission check**, with no second permission system
 - 📝 **Code-editing protocol** — structured editing context plus verifiable edit actions, with plan / review / auto-apply modes
 - 🛡️ **Safe fetching** — `HttpFetch` guards against SSRF, DNS rebinding, private addresses and protocol escapes
@@ -4786,6 +4787,228 @@ Wrap it as an Agent tool and the model can browse on its own:
 
 ---
 
+## Agent multimodal input and attachments
+
+Let the Agent take images and PDFs: attachments a user uploads in conversation, and images the Agent reads itself via `read_file`, both reach the model for real. When the primary model has no vision, the work is handed to a configured vision model automatically — the user never notices.
+
+```php
+use Ai\Agent\Media\Attachment;
+
+$agent->chat('What error does this screenshot show?', [
+    Attachment::fromPath($_FILES['shot']['tmp_name']),
+]);
+```
+
+Three design rules, each one learned the hard way:
+
+1. **Conversation history stores a reference, not base64.** A 5 MB image is ~6.67 MB once base64-encoded; written into the session JSONL it would be hauled around on every load/save.
+2. **When the model cannot see an image, say so — never pretend.** No `[image: x.png]` placeholder: that reads like "the image is attached" and nudges the model into writing "as you can see in the image…".
+3. **Attachments really enter the conversation history.** Ask on turn 3 "what was the number in that image again" and it is still there — and still there after a session is resumed.
+
+### Quick start
+
+```php
+use Ai\AI;
+use Ai\Agent\Agent;
+use Ai\Agent\Media\Attachment;
+
+$ai    = new AI(['api_key' => $key, 'platform' => 'openai', 'model' => 'gpt-4o']);
+$agent = (new Agent($ai))->setWorkdir(APP_PATH);
+
+$result = $agent->chat('What is the four-digit number in this image?', [
+    Attachment::fromPath('/uploads/shot.png'),   // local file
+    'https://example.com/b.jpg',                 // a plain string works too — path vs URL is detected
+    ['path' => '/uploads/doc.pdf'],              // array form
+]);
+```
+
+`Attachment` has three factories:
+
+| Method | Use | Safety |
+|--------|-----|--------|
+| `fromPath($path)` | Local file | realpath resolution (blocks symlink escapes), optional directory allowlist, MIME content sniffing cross-checked against the extension |
+| `fromUrl($url)` | Remote file | **Always goes through `HttpFetch`**, reusing its SSRF / DNS-rebinding / private-and-metadata-address / per-hop redirect validation |
+| `fromBase64($data, $mime, $name)` | Bytes already in memory | Accepts raw binary, base64, or a full `data:` URI |
+
+Bytes are read **lazily**: `fromPath()` only records the path and reads from disk at the moment it is stored. Passing ten attachments at once does not pull ten files into memory just to construct the objects.
+
+Supported types: images (png / jpg / gif / webp / bmp) and PDF. Renaming a `.php` to `.png` and uploading it is caught by the MIME cross-check.
+
+### Where attachments live
+
+The conversation history holds only a reference:
+
+```json
+{
+  "type": "agent_media",
+  "media": "image",
+  "mime": "image/png",
+  "name": "screenshot.png",
+  "bytes": 20480,
+  "ref": "media://6a9e37f47d0572c332fb73b2"
+}
+```
+
+The real bytes belong to the `MediaStore`, by default under `AgentHome`'s media directory (a sibling of sessions, following the same project and userId isolation rules). `MediaResolver` turns the reference into base64 only at the moment a request goes out.
+
+To use object storage, implement `MediaStoreInterface`:
+
+```php
+$agent->media(['store' => new MyS3MediaStore($bucket)]);
+```
+
+**Cleaning up media files is the application's responsibility.** The library never garbage-collects automatically — it cannot know which other sessions still reference an id, and deleting is irreversible. Two explicit entry points:
+
+```php
+$agent->mediaManager()->prune(30);                       // drop anything older than 30 days
+$agent->mediaManager()->gcByMessages($liveMessages);     // keep only what is still referenced
+```
+
+### Limits and safety
+
+One overall limit is not enough: 5 MB per file is perfectly reasonable, but ten of them at once is a request that is guaranteed to fail — on the platform side, with an error message that is usually hard to read. Hence three levels:
+
+```php
+$agent->media([
+    'max_attachment_bytes'        => 5 * 1024 * 1024,   // per file
+    'max_message_bytes'           => 10 * 1024 * 1024,  // all attachments on one message
+    'max_attachments_per_message' => 8,                 // attachment count per message
+    'max_request_bytes'           => 20 * 1024 * 1024,  // total media in one model request
+    'allowed_paths'               => [APP_PATH . '/uploads'],   // optional directory allowlist
+]);
+```
+
+If any attachment is invalid the whole batch fails, so no orphaned files are left behind.
+
+### Workspace images: `read_file` reads pictures too
+
+```php
+$agent->setTools(['read_file' => new ReadFileTool(new PathSafety(APP_PATH))]);
+$agent->chat('Read error.png and tell me what the error is');
+```
+
+The tool only says "I found an image, here is the reference" — it does **not** decide what protocol format that image takes in the conversation; that belongs to the runtime and the protocol layer. `ReadFileTool` therefore never needs to know whether Claude or OpenAI is in play.
+
+Media is appended to the **same** user message, after the `tool_result` blocks. This holds for both protocol families: a Claude user message already allows image blocks after `tool_result` blocks, while for the OpenAI family the library splits them into "several `role:tool` messages plus one following `role:user`", so the image lands on the message that can accept it. Starting a *separate* user message is not an option — Anthropic rejects two consecutive messages with the same role.
+
+### Automatic modality routing
+
+When the primary model is text-only, configure a platform that can see images and the library handles the rest:
+
+```php
+$agent->platforms([
+    'gemini' => [
+        'api_key'    => $geminiKey,
+        'platform'   => 'gemini',
+        'model'      => 'gemini-2.5-flash',
+        'proxy'      => 'http://127.0.0.1:8993',   // when a proxy is required
+        'modalities' => ['vision'],
+    ],
+]);
+
+$agent->multimodal(['mode' => 'auto']);   // auto is the default; this line is optional
+
+$agent->chat('What is the four-digit number in the image?', ['/uploads/shot.png']);
+// → primary model cannot see images → Gemini turns it into text → primary model answers from that
+```
+
+Four modes:
+
+| Mode | Behavior |
+|------|----------|
+| `auto` (default) | Current model definitely supports it → send directly; unsupported or unknown → find a vision model and describe; none available → say clearly that it is unavailable |
+| `native` | Always send to the current model, never route |
+| `describe` | Always have a vision model turn the file into text first, then hand that to the primary model |
+| `switch` | Swap the model for **this one call**; tools / permissions / session / memory all stay put |
+
+`auto` rather than `describe` by default: when the primary model already has vision, describe wastes a call and downgrades the original image into someone else's prose.
+
+**The description is derived context, not a replacement for the image.** It is stored in the media block's `description` field while the original `ref` stays untouched. Two benefits: switching to a vision model later can still look at the original, and the same image is not described over and over on subsequent turns.
+
+**The source is stated when the text is fed back.** The primary model receives:
+
+```text
+[Content description of image "shot.png" — produced by gemini-2.5-flash after viewing it;
+the current model cannot view this file directly]
+A red rectangular button with SUBMIT in white capitals, and the black digits 7431 below it.
+```
+
+Without the attribution, the primary model treats a second-hand description as a first-hand observation and becomes overconfident whenever the description is slightly off.
+
+To build the vision model's connection your own way (through an internal gateway, say):
+
+```php
+$agent->modalityRouter()->setAiFactory(function ($model, $config) {
+    return new AI(['api_key' => $config['api_key'], 'model' => $model,
+                   'base_url' => 'http://gateway.internal/v1']);
+});
+```
+
+Routing decisions emit a `modality_route` event carrying `decision` / `provider` / `notes`.
+
+### The model capability table
+
+Deciding "can this model take images" uses a dedicated capability table, **not** `BaseModel::$features` — that data has both false positives (`CustomModel` optimistically claims vision for 39 platforms) and false negatives (`Gemini25Pro` only declares chat).
+
+Matching is by **model name**, never inferred from the protocol family: many of this library's 40 platforms are OpenAI-compatible relays and self-hosted gateways, so the same `/v1/chat/completions` may front GPT-4o or a text-only 7B model.
+
+```php
+// query
+$agent->capabilities()->supports('gpt-4o', 'image');          // true
+$agent->capabilities()->supports('deepseek-chat', 'image');    // false
+$agent->capabilities()->supports('my-private-vl', 'image');    // null — unknown
+
+// fill in your own
+$agent->multimodal(['capabilities' => [
+    'my-private-vl' => ['input' => ['image' => true]],
+    'vl-*'          => ['input' => ['image' => true]],   // wildcards supported
+]]);
+```
+
+**`null` and `false` are different things**: `null` means "unknown", `false` means "known not to support it". Conflating them causes two failure modes — sending an image to a model that cannot see it (and getting back a cryptic error code), or leaving a perfectly capable model unused. The built-in table only records entries we are confident about; anything uncertain stays `null`.
+
+Unknown capability is handled differently depending on the question being asked:
+
+- Should we **route to** a model whose capability is unknown? Conservative — no (`unknown_policy`, default `conservative`).
+- The current model's capability is unknown, but a model that definitely sees images **is** configured? Route to it; only fall back to sending optimistically when there is no alternative.
+
+That second rule came out of live testing: some platforms' text-only models answer an image with nothing but `HTTP 510 Model Request Error` — no indication of which field is wrong, or that the modality is unsupported.
+
+### What happens with no vision model
+
+Nothing is silently dropped and nothing is faked. The model receives a plain statement of fact:
+
+```text
+[System note] The user uploaded the image "shot.png", but the current model cannot view
+image content. Do not speculate about it; if needed, tell the user to switch to a model
+that supports this type.
+```
+
+In live testing the model answered "I cannot see this image. The current model cannot view image content." — nothing invented.
+
+### API reference
+
+| Class | Purpose |
+|---|---|
+| `Ai\Agent\Media\Attachment` | Attachment entry point: `fromPath` / `fromUrl` / `fromBase64` |
+| `Ai\Agent\Media\MediaReference` | The `media://<id>` value object and `agent_media` block |
+| `Ai\Agent\Media\MediaStoreInterface` | Storage interface — implement it for object storage |
+| `Ai\Agent\Media\FileMediaStore` | Default implementation: atomic writes, sidecar metadata, `prune`/`gc` |
+| `Ai\Agent\Media\MediaResolver` | Resolves references at the request boundary, enforces the per-request media budget |
+| `Ai\Agent\Media\MediaManager` | Validation / storage / resolution facade, three-level limits |
+| `Ai\Agent\Context\MessagePart` | Construction and detection of `text` / `agent_media` blocks |
+| `Ai\Helpers\MediaTranslator` | Internal block → Anthropic `image` / OpenAI `image_url` |
+| `Ai\Agent\Capability\Modalities` | Input modality constants TEXT / IMAGE / PDF |
+| `Ai\Agent\Capability\CapabilityRegistry` | Capability table: built-in + platform declarations + user overrides |
+| `Ai\Agent\Capability\CapabilityResolver` | Three-layer merge, strict `null` / `false` distinction |
+| `Ai\Agent\Capability\ModalityRouter` | Routing decisions and message rewriting for all four modes |
+| `Ai\Agent\Agent::media()` | Limits, allowlist, custom store |
+| `Ai\Agent\Agent::multimodal()` | Routing mode, capability overrides, `unknown_policy` |
+
+A runnable example lives in `examples_multimodal.php` (no network, no API key needed).
+
+---
+
 ## Memory: long-term Agent memory
 
 Treat a Markdown file as the Agent's persistent memory (much like `CLAUDE.md`). Your code decides where it lives; the library knows no specific path.
@@ -4942,6 +5165,8 @@ php-ai/
 ├── src/                    # source (PSR-4 namespace Ai\)
 │   ├── AI.php              # main entry: config, model resolution, chat, streaming, callbacks
 │   ├── Agent/              # Agent loop + long-term memory
+│   │   ├── Media/          # Attachments: Attachment / MediaStore / Resolver (history keeps references, not base64)
+│   │   ├── Capability/     # Input-modality capability table and routing (auto / native / describe / switch)
 │   │   ├── Registry/       # Tool Registry: SQLite(FTS5) / Memory / executor / risk policy / Controller gateway
 │   │   ├── Indexer/        # Scanner: PHPDoc / Attribute parsing, Reflection schema, incremental index
 │   │   └── Discovery/      # On-demand discovery: search, permission filtering, the three runtime tools

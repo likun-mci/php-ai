@@ -23,6 +23,7 @@
 - 🤖 **Claude Code CLI**：直接调用本机 claude 程序（`Ai\Cli\ClaudeCode`），文件读写 / 工具执行 / 会话续接 / 结构化输出，路径自动检测并缓存
 - 📊 **CLI 信息查询**：不发起对话即可读取版本、登录态、模型列表、额度用量与限流、生效设置、MCP 状态
 - 🔌 **常驻双工会话**：`Ai\Cli\ClaudeCodeSession` 复刻官方 IDE 插件的进程模式，长驻进程多轮对话 + 工具权限实时回调 PHP 决策 + 优雅中断 + 处理过程中继续提需求
+- 🖼️ **Agent 多模态**：对话里传图片/PDF，或让 Agent 自己 `read_file` 读图；附件以引用形式进对话历史（多轮与会话恢复后都还在，历史里不存 base64）；主模型不支持视觉时自动路由到已配置的视觉模型，看不了图时明确告知而非伪装
 - 🗂️ **Agent Tool Registry**：给现有 Controller / Service 加几行 `@agent-tool` 注释，`php-ai index` 扫进 SQLite（FTS5 中文全文检索），Agent 按需搜索、按需加载 Schema；执行回到应用**原有的 Controller 入口权限校验**，不新建第二套权限系统
 - 📝 **代码编辑协议**：结构化编辑上下文 + 可校验的编辑动作，支持规划/审核/自动执行三种模式
 - 🛡️ **安全抓取**：`HttpFetch` 内置 SSRF、DNS rebinding、内网地址、协议逃逸防护
@@ -4811,6 +4812,226 @@ if ($res['ok']) {
 
 ---
 
+## Agent 多模态与附件对话
+
+让 Agent 收得下图片和 PDF：用户在对话里上传的附件、Agent 自己 `read_file` 读到的图片，都能被模型真的看到。主模型不支持视觉时，自动交给已配置的视觉模型处理，用户无感。
+
+```php
+use Ai\Agent\Media\Attachment;
+
+$agent->chat('这张截图里报的是什么错？', [
+    Attachment::fromPath($_FILES['shot']['tmp_name']),
+]);
+```
+
+三条设计约定，都是踩过坑之后定下来的：
+
+1. **对话历史里存引用，不存 base64。** 一张 5 MB 的图 base64 后约 6.67 MB，写进会话 JSONL 之后每次 load/save 都要搬运这几 MB。
+2. **模型看不了图时明确告知，绝不伪装。** 不用 `[图片: x.png]` 这种占位符——它看起来像「图已附上」，会诱导模型写出「从图片可以看出……」。
+3. **附件真的进对话历史。** 第 3 轮再问「刚才那张图里的数字是多少」，图还在；会话恢复之后也还在。
+
+### 快速开始
+
+```php
+use Ai\AI;
+use Ai\Agent\Agent;
+use Ai\Agent\Media\Attachment;
+
+$ai    = new AI(['api_key' => $key, 'platform' => 'openai', 'model' => 'gpt-4o']);
+$agent = (new Agent($ai))->setWorkdir(APP_PATH);
+
+$result = $agent->chat('这张图里的四位数字是多少？', [
+    Attachment::fromPath('/uploads/shot.png'),   // 本地文件
+    'https://example.com/b.jpg',                 // 字符串也行，自动识别路径 / URL
+    ['path' => '/uploads/doc.pdf'],              // 数组写法
+]);
+```
+
+`Attachment` 三个工厂方法：
+
+| 方法 | 用途 | 安全策略 |
+|------|------|---------|
+| `fromPath($path)` | 本地文件 | realpath 解析（挡 symlink 逃逸）、可选目录白名单、MIME 内容嗅探 + 扩展名交叉校验 |
+| `fromUrl($url)` | 远程文件 | **强制走 `HttpFetch`**，复用其 SSRF / DNS rebinding / 私网与云元数据地址 / 重定向逐跳校验 |
+| `fromBase64($data, $mime, $name)` | 已在内存里的字节 | 接受原始二进制、base64、或完整 `data:` URI |
+
+字节是**惰性读取**的：`fromPath()` 只记路径，直到真要落库那一刻才读盘。一次传十个附件不会因为构造对象就把十个文件全读进内存。
+
+支持的类型：图片（png / jpg / gif / webp / bmp）与 PDF。把 `.php` 改名成 `.png` 传上来会在 MIME 交叉校验这关被拦下。
+
+### 附件存哪儿
+
+对话历史里只有引用：
+
+```json
+{
+  "type": "agent_media",
+  "media": "image",
+  "mime": "image/png",
+  "name": "screenshot.png",
+  "bytes": 20480,
+  "ref": "media://6a9e37f47d0572c332fb73b2"
+}
+```
+
+真实字节归 `MediaStore` 管，默认落在 `AgentHome` 的媒体目录（与 sessions 同级，沿用同一套项目隔离与 userId 隔离规则）。发请求的那一刻才由 `MediaResolver` 解析成 base64。
+
+要接对象存储就自己实现 `MediaStoreInterface`：
+
+```php
+$agent->media(['store' => new MyS3MediaStore($bucket)]);
+```
+
+**媒体文件的清理责任在应用。** 库不做自动 GC——它不知道同一个 ref 还被哪些会话引用，自动删是不可逆的。提供两个显式接口：
+
+```php
+$agent->mediaManager()->prune(30);                       // 清理 30 天前的
+$agent->mediaManager()->gcByMessages($liveMessages);     // 按还活着的引用回收
+```
+
+### 限额与安全
+
+一个总限制是不够的：5 MB 单文件很合理，但十个一起发就是必然失败的请求，而且失败发生在平台侧、错误信息通常很难懂。所以是三级：
+
+```php
+$agent->media([
+    'max_attachment_bytes'        => 5 * 1024 * 1024,   // 单文件
+    'max_message_bytes'           => 10 * 1024 * 1024,  // 单条消息全部附件之和
+    'max_attachments_per_message' => 8,                 // 单条消息附件个数
+    'max_request_bytes'           => 20 * 1024 * 1024,  // 单次模型请求的媒体总量
+    'allowed_paths'               => [APP_PATH . '/uploads'],   // 可选的目录白名单
+]);
+```
+
+任一附件不合法则整批失败，不会留下没人引用的孤儿文件。
+
+### 工作区图片：`read_file` 直接读图
+
+```php
+$agent->setTools(['read_file' => new ReadFileTool(new PathSafety(APP_PATH))]);
+$agent->chat('读一下 error.png，告诉我报的什么错');
+```
+
+工具只负责说「我发现了一张图，引用在这里」，**不决定**它以什么协议格式进入对话——那是运行时与协议层的事。所以 `ReadFileTool` 完全不需要知道当前跑的是 Claude 还是 OpenAI。
+
+媒体会被拼进**同一条** user 消息、排在 `tool_result` 之后。这一点两个协议家族都成立：Claude 的 user 消息本来就允许 `tool_result` 块后面跟 image 块；OpenAI 家族则由库自动拆成「若干条 `role:tool` + 随后一条 `role:user`」，图片落到那条能接受它的 user 消息里。**不能**另起一条 user 消息——Anthropic 不接受连续两条同角色消息。
+
+### 自动模态路由
+
+主模型是纯文本时，配一个能看图的平台，剩下的库自己处理：
+
+```php
+$agent->platforms([
+    'gemini' => [
+        'api_key'    => $geminiKey,
+        'platform'   => 'gemini',
+        'model'      => 'gemini-2.5-flash',
+        'proxy'      => 'http://127.0.0.1:8993',   // 需要代理时
+        'modalities' => ['vision'],
+    ],
+]);
+
+$agent->multimodal(['mode' => 'auto']);   // 默认就是 auto，这行可以省
+
+$agent->chat('图里那个四位数字是多少？', ['/uploads/shot.png']);
+// → 主模型看不了图 → 自动交给 Gemini 读成文字 → 主模型据此回答
+```
+
+四种模式：
+
+| 模式 | 行为 |
+|------|------|
+| `auto`（默认） | 当前模型确定支持 → 直发；不支持或不确定 → 找视觉模型 describe；找不到 → 明确告知不可用 |
+| `native` | 强制直发当前模型，不路由 |
+| `describe` | 总是先让视觉模型把文件读成文字，再交给主模型 |
+| `switch` | 本轮**这一次模型调用**换成视觉模型；tools / permissions / session / memory 一律不变 |
+
+默认 `auto` 而不是 `describe`：主模型本来就支持视觉时，describe 会白花一次调用，还把原图降级成了别人写的文字。
+
+**描述是派生上下文，不替代原图。** 它被记在媒体块的 `description` 字段里，原 `ref` 原样保留。两个好处：以后换成视觉模型还能重新看原图；同一张图在后续轮次里不会被反复描述。
+
+**回填时注明来源**，主模型收到的是：
+
+```text
+[图片「shot.png」的内容描述 —— 由 gemini-2.5-flash 查看后生成，当前模型无法直接查看该文件]
+图中是一个红色矩形按钮，上面用白色大写字母写着 SUBMIT，下方有黑色数字 7431。
+```
+
+不写来源的话，主模型会把二手描述当一手观察，在描述有偏差时给出过度自信的结论。
+
+要用自己的方式构造视觉模型的连接（比如走内网网关）：
+
+```php
+$agent->modalityRouter()->setAiFactory(function ($model, $config) {
+    return new AI(['api_key' => $config['api_key'], 'model' => $model,
+                   'base_url' => 'http://gateway.internal/v1']);
+});
+```
+
+路由决策会发 `modality_route` 事件，带 `decision` / `provider` / `notes`。
+
+### 模型能力表
+
+判断「这个模型能不能吃图片」用的是独立的能力表，**不是** `BaseModel::$features`——那份数据既有假阳性（`CustomModel` 对 39 个平台一律乐观声明 vision）又有假阴性（`Gemini25Pro` 只声明了 chat）。
+
+匹配的是**模型名**，不按协议家族推断：本库 40 个平台里大量是 OpenAI 兼容的中转与自建网关，同一个 `/v1/chat/completions` 后面可能是 GPT-4o，也可能是纯文本的 7B 模型。
+
+```php
+// 查一下
+$agent->capabilities()->supports('gpt-4o', 'image');          // true
+$agent->capabilities()->supports('deepseek-chat', 'image');    // false
+$agent->capabilities()->supports('my-private-vl', 'image');    // null —— 不知道
+
+// 自己补
+$agent->multimodal(['capabilities' => [
+    'my-private-vl' => ['input' => ['image' => true]],
+    'vl-*'          => ['input' => ['image' => true]],   // 支持通配
+]]);
+```
+
+**`null` 与 `false` 是两回事**：`null` 是「不知道」，`false` 是「确定不支持」。混淆这两者会导致两种错误——把图片发给看不了图的模型（换回一个难懂的错误码），或者放着能用的模型不用。内置表只填有把握的，拿不准的一律留 `null`。
+
+未知能力时的行为分两种口径：
+
+- 要不要**路由到**某个能力未知的模型 → 保守，不选（`unknown_policy`，默认 `conservative`）
+- 当前模型能力未知，但**手上有**确定能看图的模型 → 优先路由过去；实在没有外援才乐观直发
+
+后一条是实测逼出来的：某些平台的纯文本模型收到图片只返回一个 `HTTP 510 Model Request Error`，既不说是哪个字段的问题也不说是不支持。
+
+### 没有视觉模型时会怎样
+
+不会静默忽略，也不会假装看到。模型收到的是一句事实陈述：
+
+```text
+[系统提示] 用户上传了图片「shot.png」，但当前模型无法查看图片内容。
+请不要臆测其内容；如果需要，请告诉用户换用支持该类型的模型。
+```
+
+实测下模型的回答是「我看不到这张图片。当前模型无法查看图片内容。」——没有编造。
+
+### API 速查
+
+| 类 | 作用 |
+|---|---|
+| `Ai\Agent\Media\Attachment` | 附件入口：`fromPath` / `fromUrl` / `fromBase64` |
+| `Ai\Agent\Media\MediaReference` | `media://<id>` 值对象与 `agent_media` 块 |
+| `Ai\Agent\Media\MediaStoreInterface` | 存储接口，接对象存储时自己实现 |
+| `Ai\Agent\Media\FileMediaStore` | 默认实现，原子写 + sidecar 元数据 + `prune`/`gc` |
+| `Ai\Agent\Media\MediaResolver` | 请求边界解析引用 + 单次请求媒体配额 |
+| `Ai\Agent\Media\MediaManager` | 校验 / 存储 / 解析的门面，三级限额 |
+| `Ai\Agent\Context\MessagePart` | `text` / `agent_media` 块的构造与识别 |
+| `Ai\Helpers\MediaTranslator` | 内部块 → Anthropic `image` / OpenAI `image_url` |
+| `Ai\Agent\Capability\Modalities` | 输入模态常量 TEXT / IMAGE / PDF |
+| `Ai\Agent\Capability\CapabilityRegistry` | 模型能力表，内置 + 平台声明 + 用户覆盖 |
+| `Ai\Agent\Capability\CapabilityResolver` | 三层合并，`null` / `false` 严格区分 |
+| `Ai\Agent\Capability\ModalityRouter` | 四种模式的路由决策与消息改写 |
+| `Ai\Agent\Agent::media()` | 限额、白名单、自定义存储 |
+| `Ai\Agent\Agent::multimodal()` | 路由模式、能力覆盖、`unknown_policy` |
+
+可运行示例见 `examples_multimodal.php`（不联网、不需要 API Key）。
+
+---
+
 ## Memory：Agent 长期记忆
 
 把一个 Markdown 文件当作 Agent 的持久记忆（类似 `CLAUDE.md`）。文件位置由业务层决定，库不认识任何具体路径。
@@ -4968,6 +5189,8 @@ php-ai/
 ├── src/                    # 源代码（PSR-4 命名空间 Ai\）
 │   ├── AI.php              # 主入口：配置、模型解析、对话、流式、回调
 │   ├── Agent/              # Agent 循环 + 长期记忆
+│   │   ├── Media/          # 附件：Attachment / MediaStore / Resolver（历史存引用，不存 base64）
+│   │   ├── Capability/     # 输入模态能力表与模态路由（auto / native / describe / switch）
 │   │   ├── Registry/       # Tool Registry：SQLite(FTS5) / Memory / 执行器 / 风险策略 / Controller 网关
 │   │   ├── Indexer/        # 扫描器：PHPDoc / Attribute 解析、Reflection Schema、增量索引
 │   │   └── Discovery/      # 按需发现：搜索、权限过滤、接进 Agent 的三个运行时工具

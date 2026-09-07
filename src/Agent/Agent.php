@@ -102,6 +102,20 @@ class Agent
     /** @var \Ai\Agent\Media\MediaStoreInterface|null 应用自定义的存储（接对象存储时用） */
     protected $mediaStore = null;
 
+    /**
+     * @var array<string, array<string, mixed>> platforms() 传进来的平台配置
+     *
+     * 原先只喂给 SubAgentManager，主循环拿不到；模态路由要用它构造视觉模型的
+     * AI 实例，所以 Agent 自己也留一份。
+     */
+    protected $platformConfigs = [];
+
+    /** @var \Ai\Agent\Capability\CapabilityResolver|null 模型能力解析器 */
+    protected $capabilityResolver = null;
+
+    /** @var array<string, mixed> multimodal() 的配置 */
+    protected $multimodalOptions = [];
+
     /** @var \Ai\Agent\Tool\ToolGroup|null 工具分组 */
     protected $toolGroups = null;
 
@@ -296,7 +310,24 @@ class Agent
             $this->setSubAgentManager($sam);
         }
         $sam->setPlatformConfigs($configs);
+
+        // 主循环也要用：模态路由据此构造视觉模型的 AI 实例，
+        // 平台里声明的 modalities 也要进能力表
+        $this->platformConfigs = array_merge($this->platformConfigs, $configs);
+        if ($this->capabilityResolver !== null) {
+            $this->capabilityResolver->registry()->setPlatforms($this->platformConfigs);
+        }
         return $this;
+    }
+
+    /**
+     * 已配置的平台（供模态路由使用）
+     *
+     * @return array<string, array<string, mixed>>
+     */
+    public function platformConfigs()
+    {
+        return $this->platformConfigs;
     }
 
     /**
@@ -2518,6 +2549,100 @@ class Agent
     }
 
     /**
+     * 模型能力解析器（惰性构造）
+     *
+     * 判断当前模型能不能吃图片/PDF。数据来源是新建的 `CapabilityRegistry`，
+     * **不是** `BaseModel::$features`——那份数据既有假阳性（CustomModel 对 39 个
+     * 平台一律乐观声明 vision）又有假阴性（Gemini25Pro 只声明了 chat）。
+     *
+     * @return \Ai\Agent\Capability\CapabilityResolver
+     */
+    public function capabilities()
+    {
+        if ($this->capabilityResolver === null) {
+            $registry = new \Ai\Agent\Capability\CapabilityRegistry();
+            $registry->setPlatforms($this->platformConfigs);
+            if (isset($this->multimodalOptions['capabilities'])
+                && is_array($this->multimodalOptions['capabilities'])
+            ) {
+                foreach ($this->multimodalOptions['capabilities'] as $pattern => $caps) {
+                    if (is_array($caps)) {
+                        $registry->override((string) $pattern, $caps);
+                    }
+                }
+            }
+            $options = [];
+            if (isset($this->multimodalOptions['unknown_policy'])) {
+                $options['unknown_policy'] = $this->multimodalOptions['unknown_policy'];
+            }
+            $this->capabilityResolver = new \Ai\Agent\Capability\CapabilityResolver($registry, $options);
+        }
+        return $this->capabilityResolver;
+    }
+
+    /**
+     * 配置多模态行为
+     *
+     * ```php
+     * $agent->multimodal([
+     *     'mode'           => 'auto',        // auto | native | describe | switch
+     *     'model'          => 'gemini-2.5-pro',   // 指定视觉模型（可选）
+     *     'unknown_policy' => 'conservative',
+     *     'capabilities'   => ['my-private-vl' => ['input' => ['image' => true]]],
+     * ]);
+     * ```
+     *
+     * @param array<string, mixed> $options
+     * @return $this
+     */
+    public function multimodal(array $options = [])
+    {
+        $this->multimodalOptions = array_merge($this->multimodalOptions, $options);
+        // 配置变了就重建解析器，下次用到时按新配置来
+        $this->capabilityResolver = null;
+        return $this;
+    }
+
+    /**
+     * multimodal() 的当前配置
+     *
+     * @return array<string, mixed>
+     */
+    public function multimodalOptions()
+    {
+        return $this->multimodalOptions;
+    }
+
+    /**
+     * 把当前模型的模态支持情况同步到运行时
+     *
+     * 未知时**乐观**（照发不误）：这保持了库既有的行为，而且失败会在平台侧
+     * 明确报出来；谎称看不到反而会让模型编造内容。真正保守的是「要不要把图片
+     * 路由到某个不确定的模型」，那由 CapabilityResolver::canServe() 把关。
+     *
+     * @return void
+     */
+    protected function syncMediaSupport()
+    {
+        $model  = '';
+        $family = 'openai';
+
+        $m = $this->ai->model();
+        if ($m !== null) {
+            $model = (string) $m->getName();
+            $protocol = (string) $m->getProtocol();
+            // 协议类名里带 Claude / Anthropic 的走 Anthropic 家族。
+            // 这一步只决定**消息格式**，不用来推断模型能力（设计文档 §18）
+            if (stripos($protocol, 'claude') !== false || stripos($protocol, 'anthropic') !== false) {
+                $family = 'anthropic';
+            }
+        }
+
+        $flags = $this->capabilities()->supportFlags($model, ['family' => $family], true);
+        $this->runtime->setMediaSupport($flags);
+    }
+
+    /**
      * 媒体门面（惰性构造）
      *
      * 存储位置沿用 `AgentHome` 的双根与 userId 隔离——媒体是会话的附属物，
@@ -2556,6 +2681,7 @@ class Agent
         $manager = $this->mediaManager();
         $this->runtime->setMediaResolver($manager->resolver());
         $this->runtime->setMediaManager($manager);
+        $this->syncMediaSupport();
     }
 
     /**

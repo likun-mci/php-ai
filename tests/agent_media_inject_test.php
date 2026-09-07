@@ -285,7 +285,9 @@ echo "\n=== 5. 模型不支持视觉时明确告知 ===\n";
 
 $aiD = null;
 $agentD = make_agent($tmp, $aiD);
-$agentD->getRuntime()->setMediaSupport(['image' => false, 'pdf' => false]);
+// P5 起模态支持由能力系统计算（syncMediaSupport 是唯一权威），
+// 所以这里用公开 API 声明「这个模型看不了图」，而不是直接改运行时标志
+$agentD->multimodal(['capabilities' => ['gpt-4o' => ['input' => ['image' => false, 'pdf' => false]]]]);
 $agentD->chat('看看 shot.png');
 
 // 默认 json_encode 会把中文转义成 \uXXXX，断言中文时必须关掉

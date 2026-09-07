@@ -83,9 +83,16 @@ class DeepSeekV4Pro extends BaseModel
 
         // 将附件信息以JSON格式附加到消息尾部
         if (!empty($attachmentInfo)) {
-            $originalContent = is_string($lastMessage['content']) ? $lastMessage['content'] : '';
             $attachmentJson = json_encode($attachmentInfo, JSON_UNESCAPED_UNICODE | JSON_PRETTY_PRINT);
-            $lastMessage['content'] = $originalContent . "\n\n[附件信息]\n" . $attachmentJson;
+            $note = "\n\n[附件信息]\n" . $attachmentJson;
+            if (is_array($lastMessage['content'])) {
+                // 数组型 content 里可能有 tool_use / tool_result，拼成字符串会把它们
+                // 整体丢掉、拆散配对，下一次请求直接 400。这里改为追加一个 text 块。
+                $lastMessage['content'][] = ['type' => 'text', 'text' => ltrim($note)];
+            } else {
+                $originalContent = is_string($lastMessage['content']) ? $lastMessage['content'] : '';
+                $lastMessage['content'] = $originalContent . $note;
+            }
         }
 
         return $payload;

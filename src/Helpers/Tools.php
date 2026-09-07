@@ -227,6 +227,15 @@ class Tools
                 continue;
             }
 
+            // 媒体块要在这里翻译成 image_url：再往下就进 simplifyContent 了，
+            // 那里只认 text，非 text 一律原样返回，agent_media 会带着内部格式
+            // 直接飞到平台侧
+            $content = MediaTranslator::translateContent($content, MediaTranslator::FAMILY_OPENAI);
+            if (!is_array($content)) {
+                $out[] = ['role' => $role, 'content' => $content];
+                continue;
+            }
+
             // user / system：拆出 tool_result，其余部分保留为普通消息
             $toolMsgs = [];
             $rest     = [];

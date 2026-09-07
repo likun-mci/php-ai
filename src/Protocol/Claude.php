@@ -186,7 +186,12 @@ class Claude implements ProtocolInterface
             }
             $converted[] = [
                 'role' => $msg['role'],
-                'content' => $msg['content'],
+                // 媒体块在这里翻译成 Anthropic 的 image/document 块；
+                // 不含媒体的 content 原样透传，零开销
+                'content' => \Ai\Helpers\MediaTranslator::translateContent(
+                    $msg['content'],
+                    \Ai\Helpers\MediaTranslator::FAMILY_ANTHROPIC
+                ),
             ];
         }
         return $converted;

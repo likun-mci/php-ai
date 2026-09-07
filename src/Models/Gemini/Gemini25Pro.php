@@ -52,16 +52,19 @@ class Gemini25Pro extends BaseModel
             return $payload;
         }
         
-        // 将文本内容转换为 content 数组格式
-        $textContent = is_string($lastMessage['content']) ? $lastMessage['content'] : '';
+        // 原有内容必须**保留**：数组型 content 里可能有 tool_use / tool_result，
+        // 整体覆盖会拆散 tool_use↔tool_result 配对，下一次请求直接 400。
+        // 字符串转成 text 块、数组原样保留，附件一律**追加**在后面。
         $contentParts = [];
-        
-        // 添加文本部分
-        if (!empty($textContent)) {
-            $contentParts[] = [
-                'type' => 'text',
-                'text' => $textContent
-            ];
+        if (is_string($lastMessage['content'])) {
+            if ($lastMessage['content'] !== '') {
+                $contentParts[] = [
+                    'type' => 'text',
+                    'text' => $lastMessage['content']
+                ];
+            }
+        } elseif (is_array($lastMessage['content'])) {
+            $contentParts = $lastMessage['content'];
         }
         
         // 添加附件部分（Gemini inline_data 格式）

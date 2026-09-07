@@ -94,10 +94,15 @@ class CustomModel extends BaseModel
             return $payload;
         }
 
-        $textContent  = is_string($lastMessage['content']) ? $lastMessage['content'] : '';
+        // 原有内容必须**保留**：数组型 content 里可能有 tool_use / tool_result，
+        // 整体覆盖会拆散配对，下一次请求直接 400。附件一律**追加**在后面。
         $contentParts = [];
-        if ($textContent !== '') {
-            $contentParts[] = ['type' => 'text', 'text' => $textContent];
+        if (is_string($lastMessage['content'])) {
+            if ($lastMessage['content'] !== '') {
+                $contentParts[] = ['type' => 'text', 'text' => $lastMessage['content']];
+            }
+        } elseif (is_array($lastMessage['content'])) {
+            $contentParts = $lastMessage['content'];
         }
 
         foreach ($attachments as $attachment) {

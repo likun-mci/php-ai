@@ -187,17 +187,29 @@ class ModalityRouter
             return $this->result($messages, self::DECISION_NATIVE, $support, '');
         }
 
-        // 哪些模态是当前模型吃不下的
-        $missing = $this->missingModalities($messages, $support);
+        // 哪些模态是当前模型吃不下的、哪些是「不确定」的
+        $split   = $this->classifyModalities($messages, $currentModel, $options);
+        $missing = $split['missing'];
+        $unsure  = $split['unsure'];
 
-        if ($this->mode === self::MODE_AUTO && $missing === []) {
-            // 主模型自己就能看——不折腾，直发（设计文档 §10）
+        if ($this->mode === self::MODE_AUTO && $missing === [] && $unsure === []) {
+            // 主模型**确定**能看——不折腾，直发（设计文档 §10）
             return $this->result($messages, self::DECISION_NATIVE, $support, '');
         }
 
         // 需要外援。describe 模式即便主模型支持也照走（用户显式要求）
-        $needed = $missing === [] ? [Modalities::IMAGE] : $missing;
+        $needed = array_values(array_unique(array_merge($missing, $unsure)));
+        if ($needed === []) {
+            $needed = [Modalities::IMAGE];
+        }
         $provider = $this->pickProvider($needed);
+
+        // 能力不确定 + 没有可用的视觉模型 → 乐观直发，让平台自己说行不行。
+        // 这比谎称看不到诚实：万一模型其实支持，用户就白白损失了这个能力
+        if ($provider === null && $missing === [] && $unsure !== []) {
+            $this->notes[] = ['reason' => 'unknown_capability_optimistic', 'modalities' => $unsure];
+            return $this->result($messages, self::DECISION_NATIVE, $support, '');
+        }
 
         if ($provider === null) {
             $this->notes[] = [
@@ -217,26 +229,37 @@ class ModalityRouter
     }
 
     /**
-     * 消息里出现了哪些当前模型吃不下的模态
+     * 把消息里出现的模态分成「确定不支持」与「不确定」两类
+     *
+     * 为什么要分开：能力**未知**时如果乐观直发，撞上不支持的模型换回来的是
+     * 一个毫无信息量的错误（实测 SCNet 的 GLM-5-Base 收到图片直接 HTTP 510
+     * "Model Request Error"，既不说是哪个字段的问题也不说是不支持）。
+     * 所以只要手上有确定能看图的模型，不确定的情况也优先路由过去；
+     * 实在没有外援时才乐观直发——那时至少错误是可见的。
      *
      * @param array<int, array<string, mixed>> $messages
-     * @param array<string, bool> $support
-     * @return string[]
+     * @param string $currentModel
+     * @param array<string, mixed> $options
+     * @return array{missing: string[], unsure: string[]}
      */
-    protected function missingModalities(array $messages, array $support)
+    protected function classifyModalities(array $messages, $currentModel, array $options)
     {
-        $seen = [];
+        $missing = [];
+        $unsure  = [];
         foreach (MessagePart::mediaBlocksIn($messages) as $block) {
             // 已经有描述的不再算「缺」——它已经以文字形式可用了
             if (isset($block['description']) && (string) $block['description'] !== '') {
                 continue;
             }
             $media = isset($block['media']) ? (string) $block['media'] : Modalities::IMAGE;
-            if (empty($support[$media])) {
-                $seen[$media] = true;
+            $known = $this->capabilities->supports($currentModel, $media, $options);
+            if ($known === false) {
+                $missing[$media] = true;
+            } elseif ($known === null) {
+                $unsure[$media] = true;
             }
         }
-        return array_keys($seen);
+        return ['missing' => array_keys($missing), 'unsure' => array_keys($unsure)];
     }
 
     /**

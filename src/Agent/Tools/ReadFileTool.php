@@ -52,8 +52,13 @@ class ReadFileTool implements AgentToolInterface, ParallelSafeToolInterface
 
     public function description()
     {
-        return '读取工作区内的文件内容。支持 offset（从第几行开始，从 1 计）和 limit（最多返回多少行）。'
-            . '大文件会自动截断，截断部分会提示用 offset/limit 继续读取。';
+        // 必须点明能读图片：只写「读取文件内容」时，模型会自己推断这是个纯文本工具
+        // 而拒绝对 .png 调用它——实测里模型原话是「read_file 用于读取文本文件，
+        // 无法处理图像文件」。链路通不通是一回事，模型肯不肯调是另一回事
+        return '读取工作区内的文件内容。文本文件返回正文，支持 offset（从第几行开始，从 1 计）'
+            . '和 limit（最多返回多少行），大文件会自动截断并提示用 offset/limit 继续读取。'
+            . '**图片（png/jpg/gif/webp/bmp）与 PDF 也可以读**：它们会作为附件加入本轮对话，'
+            . '如果当前模型支持视觉输入，你就能直接看到图片内容并回答关于它的问题。';
     }
 
     public function schema()

@@ -34,6 +34,8 @@
         "stream",
         "php-ai",
         "llm-sdk",
+        "multimodal",
+        "vision",
         "tool-registry",
         "agent-tools",
         "sqlite"
@@ -74,7 +76,8 @@
             "examples_models.php",
             "examples_platforms.php",
             "examples_stream.php",
-            "examples_tool_registry.php"
+            "examples_tool_registry.php",
+            "examples_multimodal.php"
         ]
     },
     "config": {
@@ -143,7 +146,13 @@
             "php tests/agent_production_test.php",
             "php tests/agent_hardening_test.php",
             "php tests/agent_tool_registry_test.php",
-            "php tests/agent_tool_execution_test.php"
+            "php tests/agent_tool_execution_test.php",
+            "php tests/agent_media_test.php",
+            "php tests/agent_media_protocol_test.php",
+            "php tests/agent_attachment_test.php",
+            "php tests/agent_media_inject_test.php",
+            "php tests/agent_capability_test.php",
+            "php tests/agent_modality_router_test.php"
         ],
         "analyse": "phpstan analyse --memory-limit=512M",
         "compat": "phpcs -p --standard=PHPCompatibility --runtime-set testVersion 7.1- --extensions=php --ignore='*/vendor/*' .",
@@ -162,6 +171,7 @@
     },
     "suggest": {
         "ext-openssl": "使用 WebSocket 语音接口（wss://，如讯飞 TTS/ASR）时必需；对话、图像、HTTP 语音等其余能力不需要",
+        "ext-gd": "仅在附件超过体积上限、需要自动缩放图片时用到；不装则超限的图片会被明确拒绝并说明原因",
         "ext-pdo_sqlite": "使用默认的 SqliteToolRegistry（.ai/registry.sqlite）时必需；不装可改用 MemoryToolRegistry 或自行实现 ToolRegistryInterface",
         "nikic/php-parser": "装了它 code_index 会自动改走 AST 解析（类名全限定、闭包内调用不漏）；不装则维持 token 级解析，功能不受影响"
     }

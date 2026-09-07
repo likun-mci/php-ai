@@ -31,7 +31,7 @@ class MediaResolver
     /** @var int 本次请求已累计的字节 */
     protected $used = 0;
 
-    /** @var array<string, array<string, mixed>> id => 解析结果，同一请求内复用 */
+    /** @var array<string, array{mime: string, media: string, name: string, bytes: int, base64: string}> id => 解析结果，同一请求内复用 */
     protected $cache = [];
 
     /**
@@ -118,6 +118,7 @@ class MediaResolver
             }
         }
 
+        /** @var array{mime: string, media: string, name: string, bytes: int, base64: string} $out */
         $out = [
             'mime'   => $mime,
             'media'  => $ref->getMedia() !== '' ? $ref->getMedia() : MediaReference::mediaOfMime($mime),

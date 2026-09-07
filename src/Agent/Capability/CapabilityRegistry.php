@@ -100,6 +100,10 @@ class CapabilityRegistry
         // ===== 智谱 GLM =====
         ['match' => 'glm-4v*',         'caps' => ['input' => ['image' => true,  'pdf' => false]]],
         ['match' => 'glm-4.1v*',       'caps' => ['input' => ['image' => true,  'pdf' => false]]],
+        // 实测：SCNet 上的 GLM-5-Base 收到 image_url 直接 HTTP 510
+        // "Model Request Error"。只登记实测过的这一个，不推广到 glm-5*——
+        // 同代可能会有带 V 的多模态型号
+        ['match' => 'glm-5-base*',     'caps' => ['input' => ['image' => false, 'pdf' => false]]],
 
         // ===== 豆包 =====
         ['match' => 'doubao-*vision*', 'caps' => ['input' => ['image' => true,  'pdf' => false]]],

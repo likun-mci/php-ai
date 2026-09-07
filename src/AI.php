@@ -366,6 +366,18 @@ class AI
             $this->rounds = intval( $this->config['rounds'] );
             unset($this->config['rounds']);
         }
+
+        // 代理：原先只能通过 setProxy() 设置，构造配置里写了会被当成生成参数
+        // 一路带到请求体里。凡是「按配置数组构造 AI」的地方（如模态路由自动
+        // 构造视觉模型的连接）都拿不到代理，中国大陆访问 Gemini 之类必用代理
+        // 的场景就此断掉
+        if ( isset($this->config['proxy']) ) {
+            $proxy = (string) $this->config['proxy'];
+            unset($this->config['proxy']);
+            if ($proxy !== '') {
+                $this->transport->setProxy($proxy);
+            }
+        }
         
         // 初始化模型
         if ( isset($this->config['model']) ) {

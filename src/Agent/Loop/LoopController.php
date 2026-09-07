@@ -997,15 +997,23 @@ class LoopController
                         }
                     }
                     // 媒体不是 tool_result 的合法字段，得先摘出来再并进结果
-                    foreach ($parallelResults as $i => $pr) {
+                    $cleaned = [];
+                    foreach ($parallelResults as $pr) {
                         if (isset($pr['media']) && is_array($pr['media'])) {
                             foreach ($pr['media'] as $mediaBlock) {
                                 $toolMedia[] = $mediaBlock;
                             }
-                            unset($parallelResults[$i]['media']);
                         }
+                        // 重建而不是 unset：media 不是 tool_result 的合法字段，
+                        // 这里显式只留下要发出去的四个键
+                        $cleaned[] = [
+                            'type'        => isset($pr['type']) ? $pr['type'] : 'tool_result',
+                            'tool_use_id' => isset($pr['tool_use_id']) ? $pr['tool_use_id'] : '',
+                            'content'     => isset($pr['content']) ? $pr['content'] : '',
+                            'is_error'    => !empty($pr['is_error']),
+                        ];
                     }
-                    $results = array_merge($results, array_values($parallelResults));
+                    $results = array_merge($results, $cleaned);
                 } else {
                     // 顺序执行（带钩子）
                     foreach ($allowedCalls as $call) {

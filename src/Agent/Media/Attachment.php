@@ -205,20 +205,22 @@ class Attachment
     public function bytes(array $limits = [])
     {
         if ($this->raw !== null) {
-            $this->assertSize(strlen($this->raw), $limits);
-            return $this->raw;
+            $cached = $this->raw;
+            $this->assertSize(strlen($cached), $limits);
+            return $cached;
         }
 
         if ($this->source === 'path') {
-            $this->raw = $this->readPath($limits);
+            $raw = $this->readPath($limits);
         } elseif ($this->source === 'url') {
-            $this->raw = $this->readUrl($limits);
+            $raw = $this->readUrl($limits);
         } else {
             throw new MediaException('附件没有内容');
         }
 
-        $this->assertSize(strlen($this->raw), $limits);
-        return $this->raw;
+        $this->assertSize(strlen($raw), $limits);
+        $this->raw = $raw;
+        return $raw;
     }
 
     /**

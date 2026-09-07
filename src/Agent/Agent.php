@@ -2300,7 +2300,7 @@ class Agent
         $mediaBlocks = $attachments === [] ? [] : $this->mediaManager()->ingest($attachments);
         $this->wireMediaResolver();
 
-        if ($mediaBlocks !== [] && (is_string($input) || $input === '')) {
+        if ($mediaBlocks !== [] && is_string($input)) {
             // 字符串输入 + 附件：走媒体感知的拼接（悬空 tool_use 的处理一并沿用）
             $messages = \Ai\Agent\Context\Conversation::appendUserParts(
                 $this->getConversation(),
@@ -2664,7 +2664,7 @@ class Agent
 
         $m = $this->ai->model();
         if ($m !== null) {
-            $model = (string) $m->getName();
+            $model = $m->getName();
             $protocol = (string) $m->getProtocol();
             // 协议类名里带 Claude / Anthropic 的走 Anthropic 家族。
             // 这一步只决定**消息格式**，不用来推断模型能力（设计文档 §18）

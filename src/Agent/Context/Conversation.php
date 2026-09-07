@@ -287,6 +287,13 @@ class Conversation
         return $msg;
     }
 
+    /**
+     * 把一段文字并进已有的 user 消息
+     *
+     * @param array<string, mixed> $msg
+     * @param string $text
+     * @return array<string, mixed>
+     */
     protected static function mergeUserText(array $msg, $text)
     {
         $content = isset($msg['content']) ? $msg['content'] : '';

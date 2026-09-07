@@ -629,6 +629,8 @@ class LoopController
                 // 反复问「还要不要继续」，快照在这一刻就定死了，答不了后来的取消
                 'cancelled' => function () use ($context) { return $context->isCancelled(); },
             ]);
+            // 工具要交出发现的媒体（如 read_file 读到一张图）时用它落库
+            $toolContext->setMediaManager($context->getMediaManager());
 
             // 上下文压缩检查（Phase 4）
             $cm = $context->getContextManager();
@@ -891,6 +893,8 @@ class LoopController
 
             // 如果有被拒绝的调用，先回填它们
             $results = $deniedResults;
+            /** @var array<int, array<string, mixed>> 本轮工具发现的媒体 */
+            $toolMedia = [];
 
             // 2. 执行允许的调用（并行或串行）
             if ($allowedCalls) {
@@ -915,7 +919,16 @@ class LoopController
                             $parallelResults[$i]['is_error'] = !$tr->isSuccess();
                         }
                     }
-                    $results = array_merge($results, $parallelResults);
+                    // 媒体不是 tool_result 的合法字段，得先摘出来再并进结果
+                    foreach ($parallelResults as $i => $pr) {
+                        if (isset($pr['media']) && is_array($pr['media'])) {
+                            foreach ($pr['media'] as $mediaBlock) {
+                                $toolMedia[] = $mediaBlock;
+                            }
+                            unset($parallelResults[$i]['media']);
+                        }
+                    }
+                    $results = array_merge($results, array_values($parallelResults));
                 } else {
                     // 顺序执行（带钩子）
                     foreach ($allowedCalls as $call) {
@@ -961,6 +974,11 @@ class LoopController
                             'content'     => $out,
                             'is_error'    => $isError,
                         ];
+                        if ($result->hasMedia()) {
+                            foreach ($result->getMedia() as $mediaBlock) {
+                                $toolMedia[] = $mediaBlock;
+                            }
+                        }
                     }
                 }
             }
@@ -1038,6 +1056,20 @@ class LoopController
                             }
                         }
                     }
+                }
+            }
+
+            // 工具发现的媒体：追加到**同一条** user 消息、排在 tool_result 之后。
+            //
+            // 不能另起一条 user 消息——Anthropic 不接受连续两条同角色消息。
+            // 放在同一条里两个家族都成立：Claude 的 user 消息本来就允许
+            // tool_result 块后面跟 image 块；OpenAI 家族则由
+            // Tools::toOpenAiMessages() 拆成「role:tool 若干条 + 随后一条
+            // role:user」，图片自然落到那条 user 消息里（OpenAI 的 role:tool
+            // 消息不接受图片）。
+            if ($toolMedia) {
+                foreach ($toolMedia as $mediaBlock) {
+                    $results[] = $mediaBlock;
                 }
             }
 

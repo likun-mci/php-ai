@@ -164,6 +164,9 @@ class ToolExecutor
                 'metadata'   => $metadata,
                 'is_partial' => $result->isPartial(),
                 'display'    => $result->getDisplay(),
+                // 媒体必须跟着重建走：工具交出的图片引用在这里掉了，
+                // 后面 LoopController 就再也拿不到它
+                'media'      => $result->getMedia(),
             ]);
 
             // 成功 → 直接返回
@@ -276,6 +279,7 @@ class ToolExecutor
             'metadata'   => $metadata,
             'is_partial' => true,
             'display'    => $result->getDisplay() . ' (truncated)',
+            'media'      => $result->getMedia(),
         ]);
     }
 
@@ -317,6 +321,7 @@ class ToolExecutor
             'metadata'   => $metadata,
             'is_partial' => true,
             'display'    => $result->getDisplay() . ' (truncated)',
+            'media'      => $result->getMedia(),
         ]);
     }
 

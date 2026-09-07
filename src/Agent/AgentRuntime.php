@@ -85,6 +85,9 @@ class AgentRuntime
     /** @var array<string, bool>|null 当前模型支持的输入模态；null 表示用上下文的默认值 */
     protected $mediaSupport = null;
 
+    /** @var \Ai\Agent\Media\MediaManager|null 媒体门面，供工具落库用 */
+    protected $mediaManager = null;
+
     /** @var string */
     protected $workdir = '';
 
@@ -1271,6 +1274,9 @@ class AgentRuntime
         if ($this->mediaSupport !== null) {
             $context->setMediaSupport($this->mediaSupport);
         }
+        if ($this->mediaManager !== null) {
+            $context->setMediaManager($this->mediaManager);
+        }
         if ($this->taskId !== null) {
             $context->setCheckpointId($this->taskId);
         } elseif ($this->sessionId !== null) {
@@ -1297,6 +1303,18 @@ class AgentRuntime
     public function getMediaResolver()
     {
         return $this->mediaResolver;
+    }
+
+    /**
+     * 挂上媒体门面（工具用它把发现的图片落库）
+     *
+     * @param \Ai\Agent\Media\MediaManager|null $mm
+     * @return $this
+     */
+    public function setMediaManager($mm)
+    {
+        $this->mediaManager = $mm instanceof \Ai\Agent\Media\MediaManager ? $mm : null;
+        return $this;
     }
 
     /**

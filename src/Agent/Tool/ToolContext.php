@@ -49,6 +49,14 @@ class ToolContext
     protected $timeout = 0;
 
     /**
+     * @var \Ai\Agent\Media\MediaManager|null 媒体门面
+     *
+     * 工具要把发现的图片交出去时用它落库。挂空则工具应当降级成
+     * 「只报元数据」，而不是自己想办法把 base64 塞进结果里。
+     */
+    protected $mediaManager = null;
+
+    /**
      * @param array<string, mixed>|string $options 选项数组，或旧版「工作目录字符串」兼容写法
      * @param callable|null $oldEmit 旧版「事件发射器」参数（仅当 $options 为字符串时使用）
      */
@@ -110,6 +118,19 @@ class ToolContext
 
     /** @return int */
     public function timeout() { return $this->timeout; }
+
+    /** @return \Ai\Agent\Media\MediaManager|null */
+    public function mediaManager() { return $this->mediaManager; }
+
+    /**
+     * @param \Ai\Agent\Media\MediaManager|null $mm
+     * @return $this
+     */
+    public function setMediaManager($mm)
+    {
+        $this->mediaManager = $mm instanceof \Ai\Agent\Media\MediaManager ? $mm : null;
+        return $this;
+    }
 
     /**
      * @param string $toolCallId

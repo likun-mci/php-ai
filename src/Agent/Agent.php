@@ -2467,10 +2467,9 @@ class Agent
         $this->ensurePersistence();
         $this->registerMemoryTools();
         // run() 不收附件参数，媒体由 messages 里的 agent_media 块承载（设计文档 §24）。
-        // 只在真有媒体时才装配解析器——否则每次 run 都会为此建一个存储目录出来
-        if (\Ai\Agent\Context\MessagePart::messagesHaveMedia($messages)) {
-            $this->wireMediaResolver();
-        }
+        // 总是装配：除了消息里已有的媒体，工具（如 read_file 读到图片）也要用门面
+        // 落库。装配本身零副作用——FileMediaStore 的目录是首次 put 时才惰性创建的
+        $this->wireMediaResolver();
         // 委派次数上限是**每次运行**的预算，不是这个 Agent 对象一辈子的额度。
         // 不重置的话，同一个实例跑第二个任务时额度已经被上一个任务花光了
         if ($this->delegateTool !== null) {
@@ -2554,7 +2553,9 @@ class Agent
     protected function wireMediaResolver()
     {
         // 上下文是每次 run 时才建的，所以挂在 runtime 上，由 buildContext() 转交
-        $this->runtime->setMediaResolver($this->mediaManager()->resolver());
+        $manager = $this->mediaManager();
+        $this->runtime->setMediaResolver($manager->resolver());
+        $this->runtime->setMediaManager($manager);
     }
 
     /**

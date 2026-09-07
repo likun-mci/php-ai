@@ -40,6 +40,15 @@ class ToolResult
     protected $display = null;
 
     /**
+     * @var array<int, array<string, mixed>> 工具发现的媒体（agent_media 块）
+     *
+     * 工具只负责说「我发现了一张图，引用在这里」，**不决定**它以什么协议格式
+     * 进入对话——那是 Runtime 和协议层的事。这样 ReadFileTool 完全不需要
+     * 知道当前跑的是 Claude 还是 OpenAI。
+     */
+    protected $media = [];
+
+    /**
      * @param array<string, mixed> $data
      */
     public function __construct(array $data = [])
@@ -50,6 +59,7 @@ class ToolResult
         $this->metadata  = isset($data['metadata']) && is_array($data['metadata']) ? $data['metadata'] : [];
         $this->isPartial = isset($data['is_partial']) ? (bool) $data['is_partial'] : false;
         $this->display   = array_key_exists('display', $data) ? $data['display'] : null;
+        $this->media     = isset($data['media']) && is_array($data['media']) ? array_values($data['media']) : [];
     }
 
     /** 创建成功结果
@@ -113,6 +123,34 @@ class ToolResult
         return $this->metadata;
     }
 
+    /** 工具发现的媒体块
+     * @return array<int, array<string, mixed>>
+     */
+    public function getMedia()
+    {
+        return $this->media;
+    }
+
+    /** 是否带有媒体
+     * @return bool
+     */
+    public function hasMedia()
+    {
+        return $this->media !== [];
+    }
+
+    /**
+     * 附上媒体块
+     *
+     * @param array<int, array<string, mixed>> $blocks
+     * @return $this
+     */
+    public function withMedia(array $blocks)
+    {
+        $this->media = array_values($blocks);
+        return $this;
+    }
+
     /** 是否为部分结果
      * @return bool
      */
@@ -151,6 +189,7 @@ class ToolResult
             'error'      => $this->error,
             'metadata'   => $this->metadata,
             'is_partial' => $this->isPartial,
+            'media'      => $this->media,
         ];
     }
 }

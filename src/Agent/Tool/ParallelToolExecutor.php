@@ -173,15 +173,21 @@ class ParallelToolExecutor
     /**
      * @param array{id: string, name: string, input: array<string, mixed>} $call
      * @param ToolResult $result
-     * @return array{type: string, tool_use_id: string, content: string, is_error: bool}
+     * @return array{type: string, tool_use_id: string, content: string, is_error: bool, media?: array<int, array<string, mixed>>}
      */
     protected function formatResult(array $call, ToolResult $result)
     {
-        return [
+        $out = [
             'type'        => 'tool_result',
             'tool_use_id' => isset($call['id']) ? (string) $call['id'] : '',
             'content'     => (string) $result,
             'is_error'    => !$result->isSuccess(),
         ];
+        // 媒体顺着结果带出来，由 LoopController 统一摘走再拼进消息——
+        // 并行路径丢了它，read_file 一旦和别的工具同批调用图片就没了
+        if ($result->hasMedia()) {
+            $out['media'] = $result->getMedia();
+        }
+        return $out;
     }
 }

@@ -34,6 +34,9 @@ class AgentContext
     /** @var array<string, bool> 当前模型支持的输入模态 */
     protected $mediaSupport = ['image' => true, 'pdf' => true];
 
+    /** @var \Ai\Agent\Media\MediaManager|null 媒体门面，供工具落库用 */
+    protected $mediaManager = null;
+
     /** @var array<int, array<string, mixed>> */
     protected $messages = [];
 
@@ -209,6 +212,24 @@ class AgentContext
     public function getMediaSupport()
     {
         return $this->mediaSupport;
+    }
+
+    /**
+     * @param \Ai\Agent\Media\MediaManager|null $mm
+     * @return $this
+     */
+    public function setMediaManager($mm)
+    {
+        $this->mediaManager = $mm instanceof \Ai\Agent\Media\MediaManager ? $mm : null;
+        return $this;
+    }
+
+    /**
+     * @return \Ai\Agent\Media\MediaManager|null
+     */
+    public function getMediaManager()
+    {
+        return $this->mediaManager;
     }
 
     /**

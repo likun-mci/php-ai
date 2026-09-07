@@ -115,7 +115,7 @@ class ReadFileTool implements AgentToolInterface, ParallelSafeToolInterface
         // 非法 UTF-8 会让下一次请求的 json_encode() 直接失败，整个 Agent 运行中断。
         // 这里给出结构化说明，让模型换用别的手段（如让应用层以附件形式传给多模态模型）。
         if ($this->isBinary($content)) {
-            return $this->binaryResult($path, $absPath, $content, (int) $filesize);
+            return $this->binaryResult($path, $absPath, $content, (int) $filesize, $context);
         }
 
         $lines = explode("\n", $content);
@@ -190,9 +190,10 @@ class ReadFileTool implements AgentToolInterface, ParallelSafeToolInterface
      * @param string $absPath 绝对路径
      * @param string $content 原始内容（仅用于探测，不回传）
      * @param int $filesize
+     * @param ToolContext|null $context 有媒体门面时图片会被落库并作为引用交出去
      * @return ToolResult
      */
-    protected function binaryResult($path, $absPath, $content, $filesize)
+    protected function binaryResult($path, $absPath, $content, $filesize, $context = null)
     {
         $ext = strtolower((string) pathinfo($path, PATHINFO_EXTENSION));
         $kind = '二进制文件';
@@ -209,6 +210,7 @@ class ReadFileTool implements AgentToolInterface, ParallelSafeToolInterface
             $kind = '图片';
             $hint = '工具结果无法携带图像（各平台 tool_result 不统一支持）；'
                 . '需要视觉理解请由应用层把该文件作为附件传给多模态模型。';
+            $isImage = true;
             if (function_exists('getimagesize')) {
                 $size = @getimagesize($absPath);
                 if (is_array($size)) {
@@ -231,11 +233,37 @@ class ReadFileTool implements AgentToolInterface, ParallelSafeToolInterface
         }
 
         $dim = isset($meta['width']) ? ('，' . $meta['width'] . '×' . $meta['height']) : '';
-        return new ToolResult([
+
+        // 图片/PDF：交给媒体门面落库，把**引用**放进结果。
+        //
+        // 工具只负责说「我发现了一张图，引用在这里」，不决定它以什么协议格式
+        // 进入对话——那是 Runtime 与协议层的事（设计文档 §16）。所以这里既不
+        // 拼 image_url 也不拼 Anthropic 的 source 块，ReadFileTool 完全不需要
+        // 知道当前跑的是哪家协议。
+        $media = [];
+        $mediaNote = '';
+        $wantsMedia = !empty($isImage) || (isset($meta['mime']) && $meta['mime'] === 'application/pdf');
+        if ($wantsMedia && $context instanceof ToolContext && $context->mediaManager() !== null) {
+            try {
+                $media = $context->mediaManager()->ingest([
+                    ['data' => $content, 'mime' => isset($meta['mime']) ? $meta['mime'] : '', 'name' => basename($path)],
+                ]);
+                $mediaNote = "\n该文件已作为媒体附加到本轮上下文；若当前模型支持视觉输入，你可以直接查看它。";
+            } catch (\Ai\Agent\Media\MediaException $e) {
+                // 超限或类型不支持：如实说明，不静默吞掉——模型需要知道
+                // 「这里有张图但没能给你」，否则它会以为自己看过了
+                $mediaNote = "\n（未能附加该文件：" . $e->getMessage() . '）';
+            }
+        }
+
+        $result = new ToolResult([
             'success'  => true,
-            'content'  => $kind . '：' . $path . '（' . $filesize . ' 字节' . $dim . '）' . "\n" . $hint,
+            'content'  => $kind . '：' . $path . '（' . $filesize . ' 字节' . $dim . '）' . "\n"
+                . ($media === [] ? $hint : '已附加，见下方内容。') . $mediaNote,
             'metadata' => $meta,
             'display'  => 'Read（' . $kind . '）: ' . $path,
+            'media'    => $media,
         ]);
+        return $result;
     }
 }

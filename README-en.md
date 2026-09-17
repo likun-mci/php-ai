@@ -1251,6 +1251,8 @@ Exceptions thrown inside a callback are caught and written to `error_log`; they 
 | `getToolCalls(): array` | Tool calls requested by the model, normalised: `[['id'=>..,'name'=>..,'input'=>[..]]]` |
 | `hasToolCalls(): bool` | Whether this turn requests a tool call |
 | `getStopReason(): string` | Normalised stop reason: `end_turn` / `tool_use` / `max_tokens` / `content_filter` / `refusal` |
+| `getSources(): array` | Sources retrieved by web search, normalised; see [Sources and citations](#sources-and-citations) |
+| `getCitations(): array` | Citations in the reply text (with character ranges in the text), normalised; see [Sources and citations](#sources-and-citations) |
 | `toAssistantMessage(): array` | Convert to an assistant turn ready to append to `messages` |
 | `getError(): string` | Failure reason (only populated where exceptions are not thrown, such as `chatBatch()`) |
 | `toArray()` / `__toString()` | Convert to array / use directly as a string |
@@ -4721,6 +4723,71 @@ into `extra_body`.
 `extra_body` is also the escape hatch when the library's view of a platform is wrong or out of
 date: it bypasses every capability check and sends the platform's native search parameters
 directly.
+
+### Sources and citations
+
+The numbered, clickable citations you see in vendor chat UIs are returned by the API too — but every platform puts them in a different field with a different shape (Claude attaches them to text blocks, the OpenAI family calls them `annotations`, Perplexity uses top-level `search_results`, Gemini uses `groundingMetadata` …). The library normalises them into two lists, **so you can use whichever you need without caring about platform differences**:
+
+```php
+$ai = AI::create(['model' => 'claude-sonnet-5', 'api_key' => 'sk-ant-xxx', 'search' => true]);
+$resp = $ai->chat('Who won the 2026 World Cup?');
+
+echo $resp->getContent();
+
+// Sources: web pages the platform retrieved
+foreach ($resp->getSources() as $s) {
+    echo "[{$s['index']}] {$s['title']} {$s['url']}", $s['cited'] ? '' : ' (not cited)', "\n";
+}
+
+// Citations: which part of the reply came from where
+foreach ($resp->getCitations() as $c) {
+    $said = mb_substr($resp->getContent(), $c['start'], $c['end'] - $c['start']);
+    echo "\"{$said}\" <- {$c['url']}\n";
+}
+```
+
+Fields of the two lists:
+
+| Source `getSources()` | Meaning |
+|---|---|
+| `index` | Number matching inline markers like `[1]`; assigned sequentially from 1 when the platform gives none |
+| `url` / `title` | Page URL and title |
+| `snippet` | Summary or excerpt; empty string when not provided |
+| `site_name` / `published_at` | Site name and publish time (the platform's raw string, not parsed) |
+| `cited` | Whether the reply actually cited it — separates "used" from "merely retrieved" |
+| `raw` | The platform's original entry |
+
+| Citation `getCitations()` | Meaning |
+|---|---|
+| `url` / `title` | Where it came from |
+| `cited_text` | The quoted text from the source; empty string when not provided |
+| `start` / `end` | Range within `getContent()`, **counted in UTF-8 characters**, ready for `mb_substr()`; `null` when unknown |
+| `source_index` | Array index into `getSources()` (0-based) |
+| `type` | The platform's original type (e.g. `web_search_result_location`, `url_citation`); `marker` when parsed from inline markers |
+| `raw` | The platform's original entry |
+
+What each platform actually returns (per official docs):
+
+| Platform | Sources | Citations | Notes |
+|---|---|---|---|
+| Claude | ✅ `web_search_tool_result` | ✅ with `cited_text` | Range is the cited text block |
+| OpenRouter | Derived from `annotations` (deduplicated) | ✅ `annotations` | In live tests most models return a 0-0 range, so the library uses the position of the `[domain](url)` link in the text instead; entries that cannot be located count only as sources (`cited` is false) |
+| Perplexity | ✅ `search_results` | ✅ inline `[1]` markers | Range points at the marker itself. Perplexity has announced Sonar is supported only until 2026-09-27 |
+| ERNIE | ✅ `search_results` | ✅ inline `^[1]^` markers | Needs `sources` / `citation`; not returned when non-public pages were retrieved |
+| Zhipu GLM | ✅ `web_search` | ✅ inline `[ref_1]` markers | Needs `'sources' => true`. The platform's default `search_prompt` tells the model not to cite, so in live tests the text has no markers; they are parsed when a custom `search_prompt` asks for `[ref_1]`-style citations |
+| Qwen | ❌ | ❌ | Officially, the OpenAI-compatible endpoint returns neither sources nor markers; only the native DashScope protocol does |
+| Kimi | ❌ | ❌ | Search runs through the tool-call flow; the platform returns no sources |
+
+Two more compatibility notes:
+
+- **Native Gemini `generateContent` responses**: `groundingMetadata` is parsed too (the Gemini protocol's `parseResponse()` accepts both shapes; the vendor's byte offsets are converted to characters). The library's Gemini chat goes through the OpenAI-compatible endpoint, where Google does not offer search, so `gemini` is not in the supported list above.
+- **xAI**: inline `[[1]](url)` citations in the text are recognised, taking the URL straight from the link.
+
+Perplexity, Zhipu GLM, the native Gemini shape and OpenRouter (DeepSeek / Grok / Perplexity / Qwen / GLM / Kimi) above have been verified against the real APIs; see `tests/live/citations_live_test.php`.
+
+**Streaming works too.** Sources and citations are recorded as chunks arrive, and after the stream ends `getSources()` / `getCitations()` match the non-streaming result. The `stream_end` event's `data` also carries `sources` / `citations` (with `raw` stripped, ready to send to a front end); when there are no sources the two keys are absent and the payload is byte-for-byte what older versions sent.
+
+Both methods return an empty array when search is off or the platform returned nothing, so no null checks are needed. For vendor-specific fields, `raw` holds the original entry, and the full response is still available via `getRaw()`.
 
 ### How this differs from `Ai\Tools\HttpFetch`
 

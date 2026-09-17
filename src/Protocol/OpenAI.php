@@ -154,6 +154,9 @@ class OpenAI implements ProtocolInterface
             $usage['total_tokens'] = $usage['total_tokens'] ?? (int)$usage['prompt_tokens'] + (int)$usage['completion_tokens'];
         }
 
+        // 联网搜索的来源与引用：各家扩展字段互不重名，统一在 helper 里识别
+        $cite = \Ai\Helpers\Citations::fromOpenAi($response, $content);
+
         return new AIResponse([
             'content'     => $content,
             'model'       => $response['model'] ?? '',
@@ -162,6 +165,8 @@ class OpenAI implements ProtocolInterface
             'success'     => isset($response['choices']),
             'tool_calls'  => $toolCalls,
             'stop_reason' => $stopReason,
+            'sources'     => $cite['sources'],
+            'citations'   => $cite['citations'],
         ]);
     }
     

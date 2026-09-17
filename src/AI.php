@@ -98,6 +98,12 @@ class AI
     protected $streamToolCallParts = [];
 
     /**
+     * 流式过程中收集联网搜索的来源与引用（分片不记下来，流结束后就拿不到了）
+     * @var \Ai\Helpers\StreamCitationCollector|null
+     */
+    protected $streamCitations = null;
+
+    /**
      * 流式分片回调，注册后由调用方接管分片下发（见 setStreamCallback）
      * @var callable|null
      */
@@ -681,6 +687,7 @@ class AI
         $this->streamErrorMessage = '';
         $this->streamStopReason = '';
         $this->streamToolCallParts = [];
+        $this->streamCitations = new \Ai\Helpers\StreamCitationCollector();
         
         // 合并配置：模型默认参数 < 运行时配置里的生成参数 < 本次 payload
         $payload = array_merge([
@@ -711,6 +718,9 @@ class AI
                 // 累积流式内容
                 if ($content !== null) {
                     $this->streamAccumulatedContent .= $content;
+                }
+                if ($this->streamCitations !== null) {
+                    $this->streamCitations->feed($data, $content);
                 }
 
                 // 累积 usage：Anthropic 等平台把 input/output tokens 拆在不同帧下发，
@@ -832,6 +842,10 @@ class AI
                     );
                 }
 
+                $streamCite = $this->streamCitations !== null
+                    ? $this->streamCitations->result($this->streamAccumulatedContent)
+                    : ['sources' => [], 'citations' => []];
+
                 $response = new \Ai\Response\AIResponse([
                     'content'     => $this->streamAccumulatedContent,
                     'model'       => $this->model->getName(),
@@ -840,12 +854,21 @@ class AI
                     'success'     => true,
                     'stop_reason' => $this->streamStopReason,
                     'tool_calls'  => $streamToolCalls,
+                    'sources'     => $streamCite['sources'],
+                    'citations'   => $streamCite['citations'],
                 ]);
-                $this->emitStream([ 'type' => 'stream_end', 'data' => [
+                $endData = [
                     'content' => $this->streamAccumulatedContent,
                     'model'   => $this->model->getName(),
                     'usage'   => $streamUsage,
-                ]]);
+                ];
+                // 只在真有数据时追加：没开搜索的请求，结束帧与历史版本逐字节一致
+                // 下发给前端时去掉 raw，平台原始条目可能很大（Claude 的 encrypted_content）
+                if ($streamCite['sources'] || $streamCite['citations']) {
+                    $endData['sources']   = self::withoutRaw($streamCite['sources']);
+                    $endData['citations'] = self::withoutRaw($streamCite['citations']);
+                }
+                $this->emitStream([ 'type' => 'stream_end', 'data' => $endData ]);
             } else {
                 // 解析响应
                 $response = $this->protocol->parseResponse($responseData);
@@ -988,6 +1011,20 @@ class AI
             }
         }
         return $out;
+    }
+
+    /**
+     * 去掉每条来源 / 引用里的 raw 键
+     *
+     * @param array<int, array<string, mixed>> $items
+     * @return array<int, array<string, mixed>>
+     */
+    protected static function withoutRaw(array $items): array
+    {
+        foreach ($items as $k => $item) {
+            unset($items[$k]['raw']);
+        }
+        return $items;
     }
 
     /**

@@ -40,6 +40,14 @@ class AIResponse implements AIResponseInterface
      * @var string
      */
     protected $error;
+    /**
+     * @var array<int, array<string, mixed>>
+     */
+    protected $sources;
+    /**
+     * @var array<int, array<string, mixed>>
+     */
+    protected $citations;
 
     /**
      * @param array<string, mixed> $data
@@ -54,6 +62,37 @@ class AIResponse implements AIResponseInterface
         $this->toolCalls = $data['tool_calls'] ?? [];
         $this->stopReason = $data['stop_reason'] ?? '';
         $this->error = $data['error'] ?? '';
+        $this->sources = $data['sources'] ?? [];
+        $this->citations = $data['citations'] ?? [];
+    }
+
+    /**
+     * 联网搜索检索到的来源（已归一，各平台格式一致）
+     *
+     * 平台单独返回了检索结果时就是那份列表，`cited` 标出回答实际用上的；
+     * 平台只返回引用时，由被引用的 URL 去重得到。没开搜索或平台没返回时为空数组。
+     * 字段说明见 \Ai\Helpers\Citations。
+     *
+     * @return array<int, array<string, mixed>> [['index'=>1, 'url'=>.., 'title'=>.., 'snippet'=>..,
+     *               'site_name'=>.., 'published_at'=>.., 'cited'=>true, 'raw'=>[..]], ...]
+     */
+    public function getSources(): array
+    {
+        return $this->sources;
+    }
+
+    /**
+     * 回答正文里的引用（已归一，各平台格式一致）
+     *
+     * `start` / `end` 是在 getContent() 里的 UTF-8 字符区间，可直接用 mb_substr() 截取；
+     * `source_index` 是 getSources() 的数组下标。字段说明见 \Ai\Helpers\Citations。
+     *
+     * @return array<int, array<string, mixed>> [['url'=>.., 'title'=>.., 'cited_text'=>.., 'start'=>0,
+     *               'end'=>12, 'source_index'=>0, 'type'=>.., 'raw'=>[..]], ...]
+     */
+    public function getCitations(): array
+    {
+        return $this->citations;
     }
 
     /**
@@ -261,6 +300,8 @@ class AIResponse implements AIResponseInterface
             'success'     => $this->success,
             'tool_calls'  => $this->toolCalls,
             'stop_reason' => $this->stopReason,
+            'sources'     => $this->sources,
+            'citations'   => $this->citations,
         ];
     }
     

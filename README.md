@@ -1256,6 +1256,8 @@ $ai->onAfter(function ($response) {          // onResponse() 是它的别名
 | `getToolCalls(): array` | 模型发起的工具调用，已归一：`[['id'=>..,'name'=>..,'input'=>[..]]]` |
 | `hasToolCalls(): bool` | 本轮是否要求调用工具 |
 | `getStopReason(): string` | 结束原因（已归一）：`end_turn` / `tool_use` / `max_tokens` / `content_filter` / `refusal` |
+| `getSources(): array` | 联网搜索检索到的来源，已归一，见「[来源与引用](#来源与引用)」 |
+| `getCitations(): array` | 回答正文里的引用（含在正文里的字符区间），已归一，见「[来源与引用](#来源与引用)」 |
 | `toAssistantMessage(): array` | 转成可回填进 `messages` 的 assistant 回合 |
 | `getError(): string` | 失败原因（仅 `chatBatch()` 这类不抛异常的场景会填充） |
 | `toArray()` / `__toString()` | 转数组 / 直接当字符串用 |
@@ -4746,6 +4748,80 @@ $ai->setConfig([
 
 库对某平台的判断有误或过时时，`extra_body` 也是逃生口：它绕过全部声明检查，
 可以直接发平台原生的搜索参数。
+
+### 来源与引用
+
+平台界面上那串带角标、点开能看原文的引用，API 其实也发回来了——只是各家放在不同字段、
+结构完全不同（Claude 挂在 text 块上，OpenAI 系叫 `annotations`，Perplexity 是顶层
+`search_results`，Gemini 是 `groundingMetadata`……）。本库把它们归一成两份列表，
+**不用关心平台差异，按需取用**：
+
+```php
+$ai = AI::create(['model' => 'claude-sonnet-5', 'api_key' => 'sk-ant-xxx', 'search' => true]);
+$resp = $ai->chat('2026 年世界杯冠军是谁？');
+
+echo $resp->getContent();
+
+// 来源：平台检索到的网页
+foreach ($resp->getSources() as $s) {
+    echo "[{$s['index']}] {$s['title']} {$s['url']}", $s['cited'] ? '' : '（未被引用）', "\n";
+}
+
+// 引用：正文里哪段话出自哪里
+foreach ($resp->getCitations() as $c) {
+    $said = mb_substr($resp->getContent(), $c['start'], $c['end'] - $c['start']);
+    echo "「{$said}」← {$c['url']}\n";
+}
+```
+
+两份列表的字段：
+
+| 来源 `getSources()` | 说明 |
+|---|---|
+| `index` | 编号，与正文角标 `[1]` 对应；平台没给就按顺序从 1 编 |
+| `url` / `title` | 网页地址与标题 |
+| `snippet` | 摘要或正文片段，平台没给为空串 |
+| `site_name` / `published_at` | 站点名、发布时间（平台原样字符串，不解析） |
+| `cited` | 是否被回答实际引用——区分「用上了」和「只是搜到了」 |
+| `raw` | 平台原始条目 |
+
+| 引用 `getCitations()` | 说明 |
+|---|---|
+| `url` / `title` | 出处 |
+| `cited_text` | 来源里被引用的原文，平台没给为空串 |
+| `start` / `end` | 在 `getContent()` 里的区间，**按 UTF-8 字符计**，可直接喂 `mb_substr()`；未知时为 `null` |
+| `source_index` | 对应 `getSources()` 的数组下标（从 0 起） |
+| `type` | 平台原始类型（如 `web_search_result_location`、`url_citation`）；从正文角标解析出的为 `marker` |
+| `raw` | 平台原始条目 |
+
+各平台的实际情况（均以官方文档为准）：
+
+| 平台 | 来源 | 引用 | 说明 |
+|---|---|---|---|
+| Claude | ✅ `web_search_tool_result` | ✅ 带 `cited_text` | 区间是被引用的那段 text 块 |
+| OpenRouter | 由 `annotations` 去重得到 | ✅ `annotations` | 实测多数模型给的区间是 0-0，库改用正文里 `[域名](url)` 链接的位置；定位不到的只算来源（`cited` 为 false） |
+| Perplexity | ✅ `search_results` | ✅ 正文 `[1]` 角标 | 区间指向角标本身。Sonar 接口官方公告 2026-09-27 停止支持 |
+| 文心一言 | ✅ `search_results` | ✅ 正文 `^[1]^` 角标 | 需 `sources` / `citation` 开启；检索到非公开网页时平台不返回 |
+| 智谱 GLM | ✅ `web_search` | ✅ 正文 `[ref_1]` 角标 | 需 `'sources' => true`。平台默认的 `search_prompt` 要求模型不标出处，实测正文不带角标；在自定义 `search_prompt` 里要求按 `[ref_1]` 标注时可解析 |
+| 通义千问 | ❌ | ❌ | 官方明确：OpenAI 兼容端点不返回来源与角标，仅 DashScope 原生协议支持 |
+| Kimi | ❌ | ❌ | 搜索走工具调用流程，平台不返回来源 |
+
+另外两处兼容：
+
+- **Gemini 原生 `generateContent` 响应**的 `groundingMetadata` 也能解析（Gemini 协议的
+  `parseResponse()` 两种结构都认；平台给的是字节偏移，已换算成字符）。本库的 Gemini 对话
+  走 OpenAI 兼容端点，官方未在该端点提供搜索，所以 `gemini` 不在上面的支持列表里。
+- **xAI** 正文里的 `[[1]](url)` 行内引用会被识别，直接取链接里的 URL。
+
+以上 Perplexity、智谱 GLM、Gemini 原生结构、OpenRouter（DeepSeek / Grok / Perplexity / Qwen / GLM / Kimi）
+已经过真实接口实测，见 `tests/live/citations_live_test.php`。
+
+**流式同样可用**，分片里的来源与引用会边收边记，结束后 `getSources()` / `getCitations()`
+与非流式结果一致。`stream_end` 事件的 `data` 里也会带上 `sources` / `citations`（去掉了
+`raw`，方便直接下发前端）；没有来源时不出现这两个键，报文与旧版本完全一致。
+
+没开搜索或平台没返回时，两个方法都返回空数组，不需要判空。
+需要平台独有字段时，`raw` 里是原始条目，完整响应仍可用 `getRaw()` 取。
 
 ### 与 `Ai\Tools\HttpFetch` 的区别
 

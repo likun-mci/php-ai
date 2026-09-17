@@ -229,6 +229,11 @@ class Claude implements ProtocolInterface
             $usage['total_tokens'] = $usage['total_tokens'] ?? (int)$usage['prompt_tokens'] + (int)$usage['completion_tokens'];
         }
 
+        // 来源在 web_search_tool_result 块，引用挂在 text 块上
+        $cite = \Ai\Helpers\Citations::fromClaude(
+            isset($response['content']) && is_array($response['content']) ? $response['content'] : []
+        );
+
         return new AIResponse([
             'content'     => $content,
             'model'       => $response['model'] ?? '',
@@ -237,6 +242,8 @@ class Claude implements ProtocolInterface
             'success'     => isset($response['content']),
             'tool_calls'  => \Ai\Helpers\Tools::fromClaudeContent($response['content'] ?? []),
             'stop_reason' => \Ai\Helpers\Tools::normalizeStopReason($response['stop_reason'] ?? ''),
+            'sources'     => $cite['sources'],
+            'citations'   => $cite['citations'],
         ]);
     }
     

@@ -150,8 +150,14 @@ class Gemini implements ProtocolInterface
         // 对话走的是 OpenAI 兼容端点，返回体为 OpenAI 结构；同时兼容原生 Gemini 结构
         if (isset($response['choices'][0]['message']['content'])) {
             $content = $response['choices'][0]['message']['content'];
-        } elseif (isset($response['candidates'][0]['content']['parts'][0]['text'])) {
-            $content = $response['candidates'][0]['content']['parts'][0]['text'];
+        } elseif (isset($response['candidates'][0]['content']['parts']) && is_array($response['candidates'][0]['content']['parts'])) {
+            // 原生结构：按序拼接全部 text part，跳过思考摘要（thought: true）。
+            // 只取 parts[0] 会在开了联网搜索、回答被拆成多个 part 时丢正文，引用位置也对不上
+            foreach ($response['candidates'][0]['content']['parts'] as $part) {
+                if (is_array($part) && isset($part['text']) && empty($part['thought'])) {
+                    $content .= (string) $part['text'];
+                }
+            }
         }
 
         if (isset($response['usage'])) {
@@ -167,6 +173,11 @@ class Gemini implements ProtocolInterface
             $usage['total_tokens'] = $usage['total_tokens'] ?? ($usage['totalTokenCount'] ?? 0);
         }
 
+        // 原生结构的来源与引用在 groundingMetadata；兼容端点返回的是 OpenAI 结构
+        $cite = isset($response['candidates'])
+            ? \Ai\Helpers\Citations::fromGemini($response, $content)
+            : \Ai\Helpers\Citations::fromOpenAi($response, $content);
+
         return new AIResponse([
             'content'     => $content,
             'model'       => $response['model'] ?? ($response['modelVersion'] ?? ''),
@@ -175,6 +186,8 @@ class Gemini implements ProtocolInterface
             'success'     => isset($response['choices']) || isset($response['candidates']),
             'tool_calls'  => \Ai\Helpers\Tools::fromOpenAiToolCalls($response['choices'][0]['message'] ?? []),
             'stop_reason' => \Ai\Helpers\Tools::normalizeStopReason($response['choices'][0]['finish_reason'] ?? ''),
+            'sources'     => $cite['sources'],
+            'citations'   => $cite['citations'],
         ]);
     }
     

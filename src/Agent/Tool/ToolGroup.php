@@ -43,7 +43,7 @@ class ToolGroup
         self::GIT        => ['git_status', 'git_diff', 'git_commit'],
         self::DATABASE   => ['sql_query', 'db_schema'],
         self::NETWORK    => ['http_fetch', 'web_search'],
-        self::BROWSER    => ['browser'],
+        self::BROWSER    => ['browser', 'browser_authorize'],
         self::CLOUD      => ['s3_put', 's3_get'],
         self::TESTING    => ['run_tests'],
         self::DEPLOYMENT => ['deploy', 'rollback'],

@@ -3824,6 +3824,33 @@ Pass a `PathSafety` to confine screenshot paths to the workspace:
 $agent->addTool(new BrowserTool([], new \Ai\Agent\Tools\PathSafety('/var/www/project')));
 ```
 
+### Browser authorization tool (BrowserGrantTool)
+
+`BrowserTool` drives a browser on **the server**; this one obtains the right to drive **the user's own** browser — the extension lives there, the logged-in sessions are theirs, and the window is right in front of them. The credential cannot be conjured out of thin air: the user has to approve it in person, so it runs on an anonymous-ticket flow:
+
+```php
+use Ai\Agent\Tools\BrowserGrantTool;
+
+$agent->addTool(new BrowserGrantTool('https://example.com', ['app' => 'MCI AI Agent']));
+
+// Model calls:
+//   browser_authorize(action: "start")                      → request a ticket, hand out the authorize link via an event
+//   browser_authorize(action: "status")                     → once approved, take back the device + key
+//   browser_authorize(action: "status", wait_seconds: 60)   → wait a while server-side instead of polling repeatedly
+//   browser_authorize(action: "credential")                 → show the locally stored credential (never the plaintext key)
+//   browser_authorize(action: "forget")                     → drop the local credential and any pending ticket
+```
+
+**The host opens the new tab**: a backend cannot open the user's browser. `start` emits a `browser_authorize` event (with `authorize_url` / `app` / `expires_in`), and the host's SSE / WebSocket front end calls `window.open(authorize_url)`; once the user approves, `status` emits `browser_credential` (with `device` and the key prefix only — no plaintext).
+
+Authorization naturally spans turns: the user may only click approve on the next turn. So the ticket and the credential live in a **per-identity** directory (`users/<hash>/` when a `userId` is set, otherwise `projects/<slug>/`), the directory mode 0700 and the files 0600. The plaintext key is handed to the model exactly once, when it is retrieved; the local copy exists so later steps can use it. With no identity at all (`storageDir` empty — neither userId nor sessionId) the tool **refuses to write** and says why: two identities sharing one key that can drive a browser is worse than having no credential:
+
+```php
+$agent->setUserId('admin:7')->setSessionId('sess-1');   // give at least one, so there is a safe place to store it
+```
+
+`wait_seconds` is capped (120 by default, 300 max) and respects cancellation — hitting stop will not leave it waiting server-side.
+
 ### Code understanding (CodeAnalyzer)
 
 Before the Agent changes code it has to understand it. `Ai\Code` scans a project to build a class index plus two relationship graphs — who calls whom, who depends on whom — so "what does changing this method affect" no longer means grepping the whole project.

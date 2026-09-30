@@ -61,8 +61,14 @@ class PermissionManager
     /** @var string[] 持久写工具：非文件编辑但有持久副作用，manual 模式默认询问（如记忆写入，见 dev.md 14.2） */
     protected static $writeTools = ['remember', 'forget'];
 
-    /** @var string[] 外呼工具：访问网络，manual 模式默认询问（见 dev.md v2.1 §1.3 / §1.5） */
-    protected static $networkTools = ['web_fetch', 'web_search', 'translate'];
+    /**
+     * @var string[] 外呼工具：访问网络，manual 模式默认询问（见 dev.md v2.1 §1.3 / §1.5）
+     *
+     * browser_authorize 也算在这里：它不只是发两个 HTTP 请求，取回来的是能驱动用户
+     * 那台带登录态浏览器的密钥，并把密钥写到本机。落在四个默认放行的名单之外就等于
+     * 「装上了就默认允许」，正是最不该悄悄放过去的一类。
+     */
+    protected static $networkTools = ['web_fetch', 'web_search', 'translate', 'browser_authorize'];
 
     /** @var array<string, PermissionRequest> 待处理的权限请求 */
     protected $requests = [];

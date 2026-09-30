@@ -600,6 +600,11 @@ class Agent
      */
     protected function ensurePersistence()
     {
+        // 身份与存储根与 autoPersist 无关：工具（mci_browser 的授权凭据）要据此
+        // 决定写哪里。「读得到身份、却不知道往哪写」只会让工具去猜路径，
+        // 而猜出来的路径很可能落在两个身份共用的位置上
+        $this->wireRuntimeIdentity();
+
         if (!$this->autoPersist || !$this->hasPersistenceSignal()) {
             return;
         }
@@ -638,6 +643,30 @@ class Agent
             );
             $this->runtime->setSessionManager(new \Ai\Agent\Session\SessionManager($store));
         }
+    }
+
+    /**
+     * 把身份与私有存储根交给运行时（幂等，按当前最终状态解析）
+     *
+     * 存储根只取决于「有没有 userId / sessionId」，与 autoPersist 无关：
+     * 调用方关掉自动持久化是不想要会话 JSONL，不是想连「这是谁的会话」也不知道。
+     * 两者都没有时留空——空字符串是明确信号，工具据此拒绝写盘并说明原因。
+     *
+     * @return void
+     */
+    protected function wireRuntimeIdentity()
+    {
+        $this->runtime->setUserId($this->userId);
+
+        $sid = $this->runtime->getSessionId();
+        $sid = $sid === null ? '' : (string) $sid;
+        if ($this->userId === '' && $sid === '') {
+            $this->runtime->setStorageDir('');
+            return;
+        }
+        $this->runtime->setStorageDir(
+            $this->agentHome()->identityDir($this->userId !== '' ? $this->userId : '')
+        );
     }
 
     /**

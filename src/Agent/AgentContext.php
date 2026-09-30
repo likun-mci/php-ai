@@ -79,6 +79,12 @@ class AgentContext
     /** @var string */
     protected $sessionId = '';
 
+    /** @var string 调用方声明的用户标识（原始值，空表示未声明） */
+    protected $userId = '';
+
+    /** @var string 本次运行私有存储根目录（空表示身份不明，工具应拒绝写盘） */
+    protected $storageDir = '';
+
     /** @var string */
     protected $agentId = '';
 
@@ -841,6 +847,45 @@ class AgentContext
     public function getSessionId()
     {
         return $this->sessionId;
+    }
+
+    /**
+     * 调用方声明的用户标识（原始值）
+     *
+     * 请求边界之外的东西（工具、子 Agent）需要知道「这是谁的会话」时读它，
+     * 而不是去翻 agentHome 的哈希路径反推。
+     *
+     * @param string $userId
+     * @return $this
+     */
+    public function setUserId($userId)
+    {
+        $this->userId = (string) $userId;
+        return $this;
+    }
+
+    /** @return string */
+    public function getUserId()
+    {
+        return $this->userId;
+    }
+
+    /**
+     * 本次运行私有存储根目录（绝对路径；空 = 身份不明，工具应拒绝写盘）
+     *
+     * @param string $dir
+     * @return $this
+     */
+    public function setStorageDir($dir)
+    {
+        $this->storageDir = (string) $dir;
+        return $this;
+    }
+
+    /** @return string */
+    public function getStorageDir()
+    {
+        return $this->storageDir;
     }
 
     /**

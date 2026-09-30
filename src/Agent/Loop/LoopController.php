@@ -659,6 +659,8 @@ class LoopController
             $toolContext = new ToolContext([
                 'workdir'   => $context->getWorkdir(),
                 'sessionId' => $context->getSessionId(),
+                'userId'    => $context->getUserId(),
+                'storageDir'=> $context->getStorageDir(),
                 'agentId'   => $context->getAgentId(),
                 'iteration' => $iter + 1,
                 'timeout'   => $this->toolTimeout,

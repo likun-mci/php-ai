@@ -94,6 +94,17 @@ class AgentRuntime
     /** @var string */
     protected $workdir = '';
 
+    /**
+     * @var string 调用方声明的用户标识（原始值，空表示未声明）
+     *
+     * 运行时只负责把它转交给 AgentContext / ToolContext；路径推导（哈希分片、
+     * 项目 slug）留在 AgentHome，运行时不去重复一遍那套规则。
+     */
+    protected $userId = '';
+
+    /** @var string 本次运行私有存储根目录（如 users/<hash>/ 或 projects/<slug>/） */
+    protected $storageDir = '';
+
     /** @var string */
     protected $agentId = '';
 
@@ -380,6 +391,42 @@ class AgentRuntime
     {
         $this->sessionId = (string) $id;
         return $this;
+    }
+
+    /**
+     * 设置调用方声明的用户标识
+     *
+     * @param string $userId
+     * @return $this
+     */
+    public function setUserId($userId)
+    {
+        $this->userId = (string) $userId;
+        return $this;
+    }
+
+    /** @return string */
+    public function getUserId()
+    {
+        return $this->userId;
+    }
+
+    /**
+     * 设置本次运行的私有存储根目录（工具拿它放会话级凭据/临时文件）
+     *
+     * @param string $dir
+     * @return $this
+     */
+    public function setStorageDir($dir)
+    {
+        $this->storageDir = (string) $dir;
+        return $this;
+    }
+
+    /** @return string */
+    public function getStorageDir()
+    {
+        return $this->storageDir;
     }
 
     /**
@@ -1242,6 +1289,8 @@ class AgentRuntime
         $context->setSystem($this->system);
         $context->setWorkdir($this->workdir);
         $context->setSessionId((string) $this->sessionId);
+        $context->setUserId($this->userId);
+        $context->setStorageDir($this->storageDir);
         $context->setAgentId($this->agentId);
         if ($this->permission) {
             $context->setPermission($this->permission);

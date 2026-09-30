@@ -3860,6 +3860,33 @@ $session->close();
 $agent->addTool(new BrowserTool([], new \Ai\Agent\Tools\PathSafety('/var/www/project')));
 ```
 
+### 浏览器授权工具（BrowserGrantTool）
+
+`BrowserTool` 拉起的是**服务端自己**的浏览器；这个取的是**用户那台浏览器**的驱动权——扩展装在里面、登录态是他的、窗口就在他眼前。凭据不能凭空要，得让用户亲自点一次确认，所以走「匿名票据」流程：
+
+```php
+use Ai\Agent\Tools\BrowserGrantTool;
+
+$agent->addTool(new BrowserGrantTool('https://example.com', ['app' => 'MCI AI Agent']));
+
+// 模型调用：
+//   browser_authorize(action: "start")                      → 申请票据，把授权链接经事件交出去
+//   browser_authorize(action: "status")                     → 用户确认后取回 device + 密钥
+//   browser_authorize(action: "status", wait_seconds: 60)   → 在服务端等一会儿再问，别空转多次
+//   browser_authorize(action: "credential")                 → 看本地已存的凭据（不回密钥明文）
+//   browser_authorize(action: "forget")                     → 清掉本地凭据与待确认票据
+```
+
+**新标签页由宿主打开**：后端开不了用户的浏览器。`start` 会 emit 一个 `browser_authorize` 事件（带 `authorize_url` / `app` / `expires_in`），宿主的 SSE / WebSocket 前端据此 `window.open(authorize_url)`；用户确认后 `status` 再 emit `browser_credential`（只带 `device` / 密钥前缀，不带明文）。
+
+授权天然跨轮次——用户可能在下一轮才去点确认。所以票据与凭据落在**按身份隔离**的目录里（有 `userId` 走 `users/<hash>/`，否则退到 `projects/<slug>/`），目录 0700、文件 0600；密钥明文只在取回那一次交给模型，本地留档是给后续步骤用的。身份不明（`storageDir` 为空，既没 userId 也没 sessionId）时工具**拒绝写盘**并说明原因——两个身份共用一份能驱动浏览器的密钥，比没有凭据更糟：
+
+```php
+$agent->setUserId('admin:7')->setSessionId('sess-1');   // 至少给一个，才有地方安全地放凭据
+```
+
+`wait_seconds` 有上限（默认 120，最多 300），且会响应取消——用户点停止时不会继续在服务端干等。
+
 ### 代码理解（CodeAnalyzer）
 
 Agent 改代码前得先看懂代码。`Ai\Code` 扫描项目建立类索引与两张关系图——谁调用了谁、谁依赖了谁——之后回答「改这个方法会影响谁」不用再 grep 整个项目。

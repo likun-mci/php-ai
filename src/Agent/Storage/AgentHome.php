@@ -184,6 +184,28 @@ class AgentHome
         return $this->workdir;
     }
 
+    /**
+     * 身份目录：本次运行的私有存储根
+     *
+     * 传了 userId → `users/<hash>/`（哈希分片规则同 userDir()，与 media / sessions
+     * 同级）；否则 → `projects/<slug>/`。给「需要按身份存一份文件」的东西用——
+     * 比如浏览器授权凭据（能驱动用户浏览器的长期密钥）就得知道该落在谁名下，
+     * 否则只能落到一个两个身份共用的位置，那正是不能接受的情形。
+     *
+     * 纯路径推导，不创建目录。
+     *
+     * @param string|null $userId
+     * @return string
+     */
+    public function identityDir($userId = null)
+    {
+        $uid = $userId === null ? $this->userId : (string) $userId;
+        if ($uid !== '') {
+            return $this->userDir($uid);
+        }
+        return $this->home() . '/projects/' . $this->projectSlug();
+    }
+
     // ===== Memory 路径映射（见 dev.md 10.3） =====
 
     /**

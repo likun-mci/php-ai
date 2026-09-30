@@ -18,6 +18,26 @@ class ToolContext
     /** @var string */
     protected $sessionId = '';
 
+    /**
+     * @var string 调用方声明的用户标识（原始值，空表示未声明）
+     *
+     * 与 sessionId 一起决定「这个会话的私有数据该落在哪里」。工具不该自己去
+     * 猜路径——猜出来的路径很可能落在两个身份共享的位置上（见 mci_browser 的
+     * 浏览器授权凭据，那是一条能驱动用户浏览器的长期密钥）。
+     */
+    protected $userId = '';
+
+    /**
+     * @var string 本次运行的私有存储根目录（绝对路径，空表示身份不明）
+     *
+     * 由 Agent 按最终身份解析好后注入：有 userId 走 `users/<hash>/`，
+     * 只有 sessionId 则退到 `projects/<slug>/`。两者都没有时为空——
+     * 「为空」本身是有意义的信息，工具应据此拒绝写盘，而不是找个地方将就。
+     *
+     * 工具自己在它下面再分子路径（如 `browser.json` / `sessions/<sid>.xxx`）。
+     */
+    protected $storageDir = '';
+
     /** @var string */
     protected $agentId = '';
 
@@ -71,6 +91,8 @@ class ToolContext
         $options = (array) $options;
         $this->workdir      = isset($options['workdir']) ? (string) $options['workdir'] : '';
         $this->sessionId    = isset($options['sessionId']) ? (string) $options['sessionId'] : '';
+        $this->userId       = isset($options['userId']) ? (string) $options['userId'] : '';
+        $this->storageDir   = isset($options['storageDir']) ? (string) $options['storageDir'] : '';
         $this->agentId      = isset($options['agentId']) ? (string) $options['agentId'] : '';
         $this->parentAgentId = isset($options['parentAgentId']) ? (string) $options['parentAgentId'] : '';
         $this->emit         = isset($options['emit']) && is_callable($options['emit']) ? $options['emit'] : null;
@@ -90,6 +112,12 @@ class ToolContext
 
     /** @return string */
     public function sessionId() { return $this->sessionId; }
+
+    /** @return string 调用方声明的用户标识，空表示未声明 */
+    public function userId() { return $this->userId; }
+
+    /** @return string 本次运行私有存储根目录，空表示身份不明（调用方应拒绝写盘） */
+    public function storageDir() { return $this->storageDir; }
 
     /** @return string */
     public function agentId() { return $this->agentId; }

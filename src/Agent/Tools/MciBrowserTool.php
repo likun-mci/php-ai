@@ -151,6 +151,7 @@ class MciBrowserTool implements AgentToolInterface
             . "\n操作类：open / click / type / press / scroll / select / wait / reload / back / forward / close / activate。"
             . "\n脚本类：eval 执行 JS 并取回结果；screenshot 截图（图片直接进上下文，你能看到页面）。"
             . "\n凭据管理：credential 看本地凭据，forget 清除。"
+            . "\n收尾：open 开的标签是你借用户浏览器开的，用完（尤其是干完活）记得用 close 关掉——close 传 tab=<自己开的 id>，省略 tab 则关你上次操作的那个。别在他浏览器里留下一排标签；确实要留给用户看时才保留，并在回复里说明。"
             . '需要 JS 渲染或登录态的页面用它；只是取静态 HTML 用 web_fetch 更快。';
     }
 
@@ -436,9 +437,17 @@ class MciBrowserTool implements AgentToolInterface
 
             case 'open':
                 $note = trim((string) ($payload['note'] ?? ''));
+                $tab  = (string) ($payload['tab'] ?? '');
                 return '已打开：' . (string) ($payload['title'] ?? '') . '（' . (string) ($payload['url'] ?? '') . '）'
-                    . "\n标签 id：" . (string) ($payload['tab'] ?? '') . '，加载状态：' . (string) ($payload['load'] ?? '')
-                    . ($note !== '' ? "\n注意：" . $note : '');
+                    . "\n标签 id：" . $tab . '，加载状态：' . (string) ($payload['load'] ?? '')
+                    . ($note !== '' ? "\n注意：" . $note : '')
+                    // 这是你借用户浏览器开的标签：收尾时不关就是在他那儿留下一排标签
+                    . ($tab !== '' ? '\n（这个标签是你开的，用完请 mci_browser(action: "close", tab: ' . $tab . ') 关掉）' : '');
+
+            case 'close':
+                $tab = (string) ($payload['tab'] ?? '');
+                return '已关闭标签' . ($tab !== '' ? ' ' . $tab : '') . '。'
+                    . '（不传 tab 时关的是你上次操作的那个标签；用户的其它标签不受影响）';
 
             case 'devices':
                 return $this->devices($payload);

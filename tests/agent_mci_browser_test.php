@@ -138,6 +138,7 @@ foreach (['devices', 'tabs', 'open', 'click', 'text', 'eval', 'screenshot', 'wai
     test('枚举含操作动作 ' . $a, in_array($a, $enum, true));
 }
 assert_has('描述里点明要先授权', 'authorize', $tool->description());
+assert_has('描述里提醒收尾要关掉自己开的标签', 'close', $tool->description());
 
 // ===== 2) 身份不明 / 没凭据 =====
 $r = $tool->execute(['action' => 'devices'], $ctx(''));
@@ -224,6 +225,18 @@ assert_eq('open 传了 url', 'https://example.com', $calls[0]['form']['url']);
 assert_eq('open 默认 active=0（不抢焦点）', 0, $calls[0]['form']['active']);
 assert_has('open 回报标签 id', '955404376', $r->getContent());
 assert_has('open 回报标题', 'Example Domain', $r->getContent());
+// 开完就提醒关：这是借用户浏览器开的标签，不提醒就会留下一排
+assert_has('open 结果提醒收尾要关掉它', 'close', $r->getContent());
+assert_has('open 结果里的关闭提醒带上标签 id', '955404376', $r->getContent());
+
+// close：给人话，且说明不传 tab 关的是哪个
+$calls = []; $queue = [api_res(['tab' => 955404376, 'closed' => true])];
+$tool = new MciBrowserTool($site, ['app' => 'MCI AI Agent'], fake_http($calls, $queue));
+$r = $tool->execute(['action' => 'close', 'tab' => 955404376], $ctx($tmp));
+test('close 成功', $r->isSuccess());
+assert_eq('close 打到 close 接口', $apiBase . 'close', $calls[0]['url']);
+assert_has('close 回报关掉的标签 id', '955404376', $r->getContent());
+assert_has('close 说明不传 tab 关的是哪个', '上次操作', $r->getContent());
 
 $calls = []; $queue = [api_res(['tab' => 1, 'url' => 'u', 'title' => 't', 'load' => 'load'])];
 $tool = new MciBrowserTool($site, ['app' => 'MCI AI Agent'], fake_http($calls, $queue));

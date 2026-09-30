@@ -154,7 +154,9 @@
             "php tests/agent_attachment_test.php",
             "php tests/agent_media_inject_test.php",
             "php tests/agent_capability_test.php",
-            "php tests/agent_modality_router_test.php"
+            "php tests/agent_modality_router_test.php",
+            "php tests/agent_browser_grant_test.php",
+            "php tests/agent_mci_browser_test.php"
         ],
         "analyse": "phpstan analyse --memory-limit=512M",
         "compat": "phpcs -p --standard=PHPCompatibility --runtime-set testVersion 7.1- --extensions=php --ignore='*/vendor/*' .",

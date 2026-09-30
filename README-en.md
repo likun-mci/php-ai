@@ -3851,6 +3851,39 @@ $agent->setUserId('admin:7')->setSessionId('sess-1');   // give at least one, so
 
 `wait_seconds` is capped (120 by default, 300 max) and respects cancellation — hitting stop will not leave it waiting server-side.
 
+### Browser operation tool (MciBrowserTool)
+
+The tool above only **retrieves** the credential; driving the browser afterwards was left to you. `MciBrowserTool` folds authorization and operation into a single tool name, so the model has one thing to remember:
+
+```php
+use Ai\Agent\Tools\MciBrowserTool;
+
+$agent->addTool(new MciBrowserTool('https://example.com', ['app' => 'MCI AI Agent']));
+
+// The authorization half (run first when there is no credential; same names and meanings, delegated as-is):
+//   mci_browser(action: "authorize")                        → pop the approval page, get a ticket
+//   mci_browser(action: "grant", wait_seconds: 60)           → once approved, take back the device + key
+//
+// The operation half (any time you hold a credential, straight to /Browser/Api/*):
+//   mci_browser(action: "devices")                           → which browsers are online
+//   mci_browser(action: "open", url: "https://example.com")  → open a tab in the background
+//   mci_browser(action: "text", selector: "h1")              → read the page text
+//   mci_browser(action: "eval", expression: "document.title") → run JS and take the result
+//   mci_browser(action: "screenshot")                        → the screenshot goes straight into context
+```
+
+25 actions in total: inspection (`devices` / `tabs` / `url` / `text` / `html` / `form` / `metrics` / `console` / `network` / `cookies` / `quota`), interaction (`open` / `click` / `type` / `press` / `scroll` / `select` / `wait` / `reload` / `back` / `forward` / `close` / `activate`) and scripting (`eval` / `screenshot`).
+
+A few deliberate trade-offs:
+
+- **The authorization rules are written once**: `authorize` / `grant` / `credential` / `forget` delegate straight to `BrowserGrantTool`, so tickets, polling, storage and events stay identical (no host front-end changes needed).
+- **`device` defaults to the one authorized**: which browser is online is not for the model to guess — whichever the user picked is the one used, turn after turn. With several online, guessing wrong means driving someone else's browser; pass `device` explicitly to switch.
+- **`open` defaults to `active=0`**: the Agent usually works in the background, and stealing focus interrupts whatever the user is doing.
+- **Screenshots use `inline=1`** and hand the bytes to the media facade, so the image enters the context directly and the model really sees the page; the server-side path is reported too. When the caller mounted no media facade, the result **says it cannot see the image** rather than letting the model assume it did.
+- **Parameters are whitelisted per action**: extra keys the model supplies (other than the universal `device`) are never forwarded to the site. Without that layer the tool becomes a channel for splicing model input into requests.
+- **Rate limits, quotas, origin allow-lists and auditing stay on the site side** (`/Browser/Api/*`) — nothing here bypasses them.
+
+
 ### Code understanding (CodeAnalyzer)
 
 Before the Agent changes code it has to understand it. `Ai\Code` scans a project to build a class index plus two relationship graphs — who calls whom, who depends on whom — so "what does changing this method affect" no longer means grepping the whole project.

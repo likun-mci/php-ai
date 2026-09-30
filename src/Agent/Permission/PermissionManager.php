@@ -64,11 +64,12 @@ class PermissionManager
     /**
      * @var string[] 外呼工具：访问网络，manual 模式默认询问（见 dev.md v2.1 §1.3 / §1.5）
      *
-     * browser_authorize 也算在这里：它不只是发两个 HTTP 请求，取回来的是能驱动用户
-     * 那台带登录态浏览器的密钥，并把密钥写到本机。落在四个默认放行的名单之外就等于
-     * 「装上了就默认允许」，正是最不该悄悄放过去的一类。
+     * mci_browser / browser_authorize 也算在这里：它们不只是发几个 HTTP 请求，取回来的是
+     * 能驱动用户那台带登录态浏览器的密钥，并把密钥写到本机；之后每一个动作都在用户的
+     * 真实浏览器里执行。落在四个默认放行的名单之外就等于「装上了就默认允许」，
+     * 正是最不该悄悄放过去的一类。
      */
-    protected static $networkTools = ['web_fetch', 'web_search', 'translate', 'browser_authorize'];
+    protected static $networkTools = ['web_fetch', 'web_search', 'translate', 'browser_authorize', 'mci_browser'];
 
     /** @var array<string, PermissionRequest> 待处理的权限请求 */
     protected $requests = [];
@@ -366,6 +367,17 @@ class PermissionManager
     {
         if ($toolName === 'bash' && isset($input['command'])) {
             return mb_substr((string) $input['command'], 0, 120);
+        }
+        // 浏览器工具：真正要人确认的是「用它去动什么」——动作名 + 目标。
+        // 只说一句「是否允许执行 mci_browser」，用户没法判断该不该点允许。
+        if ($toolName === 'mci_browser') {
+            $parts = [];
+            foreach (['action', 'url', 'selector', 'expression', 'tab'] as $key) {
+                if (isset($input[$key]) && $input[$key] !== '') {
+                    $parts[] = $key . '=' . mb_substr((string) $input[$key], 0, 80);
+                }
+            }
+            return implode(' ', $parts);
         }
         if (isset($input['path'])) {
             return (string) $input['path'];

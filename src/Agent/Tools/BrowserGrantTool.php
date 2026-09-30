@@ -403,6 +403,32 @@ class BrowserGrantTool implements AgentToolInterface
     // ==================== 本地文件 ====================
 
     /**
+     * 取已存的浏览器凭据（只读入口，给上层工具用）
+     *
+     * `MciBrowserTool` 这类「授权 + 操作」一体的工具要拿这里存的 device / 密钥 /
+     * api_base 去发浏览器命令，所以给一个只读入口，而不是让它自己去拼
+     * storageDir 下的路径 —— 路径规则只应有一处定义。
+     *
+     * 「身份不明」与「还没授权」都返回 null：对调用方来说两者的意思一样 ——
+     * 手上没有可用的凭据。要区分原因请各自检查 storageDir() 与 grant 文件。
+     *
+     * @param ToolContext $context
+     * @return array<string, mixed>|null
+     */
+    public function storedCredential(ToolContext $context)
+    {
+        $path = $this->resolvePath($context);
+        if ($path === null) {
+            return null;
+        }
+        $cred = $this->readJson($path['cred']);
+        if ($cred === null || (string) ($cred['key'] ?? '') === '') {
+            return null;
+        }
+        return $cred;
+    }
+
+    /**
      * 解析本身份的存储路径；身份不明（没 userId 也没 sessionId）时返回 null
      *
      * @return array{dir: string, grant: string, cred: string}|null

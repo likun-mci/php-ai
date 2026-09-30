@@ -3887,6 +3887,39 @@ $agent->setUserId('admin:7')->setSessionId('sess-1');   // 至少给一个，才
 
 `wait_seconds` 有上限（默认 120，最多 300），且会响应取消——用户点停止时不会继续在服务端干等。
 
+### 浏览器操作工具（MciBrowserTool）
+
+上面那个只把凭据**取回来**，之后怎么驱动浏览器还得自己接；`MciBrowserTool` 把「授权」与「操作」收进同一个工具名，模型只记一件事：
+
+```php
+use Ai\Agent\Tools\MciBrowserTool;
+
+$agent->addTool(new MciBrowserTool('https://example.com', ['app' => 'MCI AI Agent']));
+
+// 授权那一半（没凭据时先做；与 browser_authorize 同名同义，原样委托过去）：
+//   mci_browser(action: "authorize")                       → 弹确认页，取票据
+//   mci_browser(action: "grant", wait_seconds: 60)          → 用户确认后取回 device + 密钥
+//
+// 操作那一半（有凭据即可，直通站点 /Browser/Api/*）：
+//   mci_browser(action: "devices")                          → 哪几台浏览器在线
+//   mci_browser(action: "open", url: "https://example.com") → 后台开一个标签页
+//   mci_browser(action: "text", selector: "h1")             → 读正文
+//   mci_browser(action: "eval", expression: "document.title") → 执行 JS 取回结果
+//   mci_browser(action: "screenshot")                       → 截图直接进上下文
+```
+
+动作共 25 个：查看类 `devices` / `tabs` / `url` / `text` / `html` / `form` / `metrics` / `console` / `network` / `cookies` / `quota`，操作类 `open` / `click` / `type` / `press` / `scroll` / `select` / `wait` / `reload` / `back` / `forward` / `close` / `activate`，脚本类 `eval` / `screenshot`。
+
+几处刻意的取舍：
+
+- **授权规则只写一处**：`authorize` / `grant` / `credential` / `forget` 四个动作直接委托给 `BrowserGrantTool`，票据、轮询、落盘、事件保持完全一致（宿主前端不用改）。
+- **`device` 默认取凭据里授权的那台**：站点上在线的是哪台不由模型猜 —— 他授权时选的是哪台就一直用哪台。多台在线时猜错就是把命令打到别人的浏览器上；确实要换台时显式传 `device`。
+- **`open` 默认 `active=0`**：AI 干活多在后台，抢走焦点等于打断用户手头的事。
+- **截图走 `inline=1` 取字节**交给媒体门面，图直接进上下文，模型是真看得见页面；站点上那份落盘路径也一并回报。调用方没挂媒体门面时，结果里会**明说这次看不到图**，而不是让模型以为自己看过了。
+- **参数按动作走白名单**：模型多给的键（通用目标 `device` 除外）不会原样转给站点。少了这层，工具就成了「把模型输入拼进请求」的通道。
+- **限流、配额、来源白名单、审计都还在站点那侧**（`/Browser/Api/*`），漏过这一层不会绕过任何一道。
+
+
 ### 代码理解（CodeAnalyzer）
 
 Agent 改代码前得先看懂代码。`Ai\Code` 扫描项目建立类索引与两张关系图——谁调用了谁、谁依赖了谁——之后回答「改这个方法会影响谁」不用再 grep 整个项目。

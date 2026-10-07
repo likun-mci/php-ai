@@ -395,6 +395,31 @@ class Agent
     }
 
     /**
+     * 挂上「运行途中用户消息」的来源
+     *
+     * Agent 跑一轮可能要好几分钟。这期间用户想补一句、改个方向，不必等它跑完
+     * 再说——把消息来源挂在这里，循环每轮迭代开头（以及正要收尾时）都会回调一次，
+     * 有新消息就当作一条 user 消息注入上下文，模型下一轮决策就能看到。
+     *
+     * 回调签名：`function (): array`，返回这一批新消息：
+     * `[['text' => '改用方案 b', 'blocks' => [], 'meta' => ['queued_id' => '...']], ...]`，
+     * 空数组表示没有。`meta` 会原样并进 `user_message` 事件，便于界面把某个本地气泡对上号。
+     * 回调自己负责把取走的消息标记为已读 —— 跨进程时一般就是读一个 inbox 文件
+     * 并记录已读的位置（用户在另一个请求里发来的话，另一个进程写盘）。
+     *
+     * 注入遵循 role 交替与 tool_use/tool_result 配对约束，不会发出非法请求。
+     * 每注入一条会发一个 `user_message` 事件，方便界面把「排队中」的气泡改成已投递。
+     *
+     * @param callable|null $source
+     * @return $this
+     */
+    public function setUserMessageSource($source)
+    {
+        $this->runtime->setUserMessageSource($source);
+        return $this;
+    }
+
+    /**
      * 是否以流式跑这个循环
      *
      * 开启后每一轮的正文都会实时经由 AI 的流式回调吐出去，工具调用照常工作

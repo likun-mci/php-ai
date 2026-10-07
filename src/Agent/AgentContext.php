@@ -43,6 +43,12 @@ class AgentContext
     /** @var array<int, array<string, mixed>> */
     protected $messages = [];
 
+    /** @var array<int, array<string, mixed>> 运行中累积、待注入的用户消息（见 queueUserMessage） */
+    protected $userQueue = [];
+
+    /** @var callable|null 用户消息来源：每轮迭代回调一次，取跨进程送来的新消息 */
+    protected $userMessageSource = null;
+
     /** @var AI */
     protected $ai;
 
@@ -648,6 +654,113 @@ class AgentContext
         }
         $this->messages[] = ['role' => 'user', 'content' => $text];
         return $this;
+    }
+
+    /* ---------- 运行途中追加的用户消息 ---------- */
+
+    /**
+     * 排队一条用户消息，下一轮迭代开始时注入上下文
+     *
+     * 与 `appendUser()` 的区别是「时机」：appendUser 立刻落到消息尾部，
+     * 排队的这条要等到本轮工具跑完、下一次请求模型之前才注入 —— 也就是
+     * 用户「边跑边说」的话，模型在下一次决策时才看到。
+     *
+     * 循环在两种位置排空队列：每轮迭代开头，以及模型给出终稿、正要收尾之前。
+     * 后一处保证用户在收尾瞬间发出的话不会石沉大海（见 LoopController::injectUserMessages）。
+     *
+     * @param string $text 用户原话
+     * @param array<int, array<string, mixed>> $blocks 附加内容块（agent_media 等）
+     * @param array<string, mixed> $meta 随消息带回的附加信息（会并进 user_message 事件）
+     * @return $this
+     */
+    public function queueUserMessage($text, array $blocks = [], array $meta = [])
+    {
+        $text = (string) $text;
+        if (trim($text) === '' && !$blocks) {
+            return $this;
+        }
+        $this->userQueue[] = [
+            'text'   => $text,
+            'blocks' => array_values($blocks),
+            'meta'   => $meta,
+            'ts'     => time(),
+        ];
+        return $this;
+    }
+
+    /**
+     * 进程内队列里还有没有待注入的用户消息
+     *
+     * 只看 `queueUserMessage()` 攒下的那些，**不会去问消息来源** ——
+     * 来源是「取走即已读」的，为了判断一下而回调它，等于把消息吞掉。
+     * 想知道来源里有没有东西，只能去 `drainUserMessages()` 取，取到多少算多少。
+     *
+     * @return bool
+     */
+    public function hasQueuedUserMessages()
+    {
+        return (bool) $this->userQueue;
+    }
+
+    /**
+     * @return array<int, array<string, mixed>> 队列内容（不清空）
+     */
+    public function queuedUserMessages()
+    {
+        return $this->userQueue;
+    }
+
+    /**
+     * 排空队列（消息来源 + 进程内队列一起取走）
+     *
+     * 顺序按时间：来源里的（跨进程送来的）在前，进程内队列的在后。
+     * **来源每调一次就消耗一批**：回调返回的应当是「自上次之后新到的」那些，
+     * 且由回调自己负责标记已读（典型做法是记住文件读到的偏移量）。
+     *
+     * @return array<int, array<string, mixed>>
+     */
+    public function drainUserMessages()
+    {
+        $batch = [];
+        if ($this->userMessageSource !== null) {
+            $pending = call_user_func($this->userMessageSource);
+            if (is_array($pending)) {
+                foreach ($pending as $item) {
+                    if (is_array($item)) {
+                        $batch[] = $item;
+                    }
+                }
+            }
+        }
+        foreach ($this->userQueue as $item) {
+            $batch[] = $item;
+        }
+        $this->userQueue = [];
+        return $batch;
+    }
+
+    /**
+     * 挂上用户消息来源
+     *
+     * 进程内队列（queueUserMessage）只有同一个进程看得见；用户在另一个
+     * HTTP 请求里发来的消息跨不了进程，得由调用方提供一个「去读盘」的回调：
+     * 每次回调返回自上次之后新到的消息（并自行负责标记已读），空数组表示没有。
+     *
+     * 签名：function (): array<int, array<string, mixed>>
+     *
+     * @param callable|null $source
+     * @return $this
+     */
+    public function setUserMessageSource($source)
+    {
+        $this->userMessageSource = $source !== null && is_callable($source) ? $source : null;
+        return $this;
+    }
+
+    /** @return callable|null */
+    public function getUserMessageSource()
+    {
+        return $this->userMessageSource;
     }
 
     /* ---------- 系统提示词 ---------- */

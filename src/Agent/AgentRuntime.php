@@ -150,6 +150,9 @@ class AgentRuntime
     /** @var \Ai\Agent\Tool\ToolDiscovery|null 工具发现（渐进披露） */
     protected $toolDiscovery = null;
 
+    /** @var callable|null 用户消息来源：每轮迭代回调一次，取运行途中送来的新消息 */
+    protected $userMessageSource = null;
+
     /** @var PlanManager|null */
     protected $planManager = null;
 
@@ -1215,6 +1218,31 @@ class AgentRuntime
     }
 
     /**
+     * 挂上「运行途中用户消息」的来源
+     *
+     * 回调每轮迭代被调用一次，返回这一批新消息（`[['text'=>..., 'blocks'=>[]], ...]`），
+     * 并自行负责把已取走的标记为已读。返回空数组表示没有新消息。
+     *
+     * 用户在另一个 HTTP 请求里发来的话跨不了进程，只能这样去读盘取。
+     *
+     * 签名：function (): array<int, array<string, mixed>>
+     *
+     * @param callable|null $source
+     * @return $this
+     */
+    public function setUserMessageSource($source)
+    {
+        $this->userMessageSource = $source !== null && is_callable($source) ? $source : null;
+        return $this;
+    }
+
+    /** @return callable|null */
+    public function getUserMessageSource()
+    {
+        return $this->userMessageSource;
+    }
+
+    /**
      * 把本次运行的度量填进结果
      *
      * `AgentResult` 的契约字段（cost / duration_ms / files_changed …）一直存在，
@@ -1329,6 +1357,9 @@ class AgentRuntime
         $context->setCheckpointManager($this->checkpointManager);
         $context->setCancellation($this->cancellation);
         $context->setToolDiscovery($this->toolDiscovery);
+        if ($this->userMessageSource !== null) {
+            $context->setUserMessageSource($this->userMessageSource);
+        }
         // 媒体：Conversation 里存的是 media://<id>，解析器只在请求边界用到
         if ($this->mediaResolver !== null) {
             $context->setMediaResolver($this->mediaResolver);

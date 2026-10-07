@@ -4,6 +4,7 @@ namespace Ai\Agent\Loop;
 use Ai\Agent\AgentContext;
 use Ai\Agent\AgentResult;
 use Ai\Agent\Budget\BudgetManager;
+use Ai\Agent\Context\Conversation;
 use Ai\Agent\Permission\PermissionResult;
 use Ai\Agent\Tool\ParallelToolExecutor;
 use Ai\Agent\Tool\ToolContext;
@@ -574,6 +575,59 @@ class LoopController
     }
 
     /**
+     * 把运行途中累积的用户消息注入上下文
+     *
+     * 来源有两处：
+     *   - 进程内队列 AgentContext::queueUserMessage()（同一进程的调用方追加）
+     *   - 用户消息来源 AgentContext::setUserMessageSource()（跨进程：用户在另一个
+     *     HTTP 请求里发来的话，由回调去读盘取）
+     *
+     * 注入用 `Conversation::appendUserParts()`，它已经处理了两个硬约束：
+     * 上一轮停在悬空 tool_use 上时要先补 tool_result（否则 Anthropic 直接 400），
+     * 以及不能出现相邻的两条 user 消息。
+     *
+     * 每注入一条就发一个 `user_message` 事件，调用方据此知道这条消息模型已经看到了
+     * （前端用它把「排队中」的本地气泡改成已投递）。队列项里的 `meta` 数组会原样
+     * 并进事件，页面就能用自己发的气泡 id 对上号。
+     *
+     * @return int 注入的条数
+     */
+    protected function injectUserMessages(AgentContext $context)
+    {
+        $batch = $context->drainUserMessages();
+        if (!$batch) {
+            return 0;
+        }
+        $n = 0;
+        foreach ($batch as $item) {
+            if (!is_array($item)) {
+                continue;
+            }
+            $text   = isset($item['text']) ? (string) $item['text'] : '';
+            $blocks = isset($item['blocks']) && is_array($item['blocks']) ? $item['blocks'] : [];
+            if (trim($text) === '' && !$blocks) {
+                continue;
+            }
+            $context->setMessages(
+                Conversation::appendUserParts($context->getMessages(), $text, $blocks)
+            );
+            $n++;
+            $eventData = [
+                'text'   => $text,
+                'queued' => true,
+                'iter'   => $context->getIteration(),
+                'ts'     => isset($item['ts']) ? (int) $item['ts'] : time(),
+            ];
+            // 调用方自带的附加信息（如前端气泡 id）原样带回，方便它对上号
+            if (isset($item['meta']) && is_array($item['meta'])) {
+                $eventData = array_merge($eventData, $item['meta']);
+            }
+            $context->emit('user_message', $eventData);
+        }
+        return $n;
+    }
+
+    /**
      * 收到取消信号后收尾
      *
      * 存检查点再返回——取消不是放弃：用户按停止往往是想「先停一下」，
@@ -648,6 +702,11 @@ class LoopController
             }
 
             $context->setIteration($iter + 1);
+
+            // 运行途中用户又说了话：先注入，再问模型。注入走 Conversation 的拼接规则
+            // （悬空 tool_use 补结果、相邻 user 合并），不会破坏 role 交替
+            $this->injectUserMessages($context);
+
             $context->emit('thinking', ['iter' => $iter + 1]);
 
             // 工具定义每轮重算：渐进披露下模型上一轮激活的工具，这一轮才看得见。
@@ -862,6 +921,11 @@ class LoopController
 
             // 没有工具调用 → 反思一次，确认目标真的达成后才结束
             if (!$toolCalls) {
+                // 刚要收尾时用户又说了话：这不算「做完了」。注入这条消息、继续下一轮 ——
+                // 否则用户在收尾瞬间发出的需求会留在队列里，一直没人处理
+                if ($this->injectUserMessages($context) > 0) {
+                    continue;
+                }
                 $reflection = $this->reflect($context, $iter);
                 if ($reflection !== null) {
                     $context->emit('reflection', [

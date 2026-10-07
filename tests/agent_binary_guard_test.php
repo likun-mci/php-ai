@@ -11,6 +11,7 @@
 require __DIR__ . '/../autoload.php';
 
 use Ai\Agent\Tools\ReadFileTool;
+use Ai\Agent\Tools\BashTool;
 use Ai\Agent\Tools\GrepTool;
 use Ai\Agent\Tools\PathSafety;
 use Ai\Agent\Tool\ToolContext;
@@ -93,6 +94,21 @@ test('grep 结果合法 UTF-8', mb_check_encoding($gc, 'UTF-8'));
 test('grep json_encode 不失败', json_encode(['c' => $gc]) !== false);
 test('命中文本文件 code.php', strpos($gc, 'code.php') !== false);
 test('跳过二进制 blob.bin', strpos($gc, 'blob.bin') === false);
+
+// ===== 四、bash 输出里的坏字节（不是截断造成的，是外面来的） =====
+// 截断只是「自己别切出坏字节」；`cat` 一张图带进来的坏字节是同一个故障的另一半：
+// 一旦落进消息历史，之后每一轮请求的 json_encode() 都失败。
+echo "\n=== 四、bash 输出里的外部坏字节 ===\n";
+file_put_contents($base . '/blob2.bin', random_bytes(2048));
+$bash = new BashTool(20);
+$bash->setWorkdir($base);
+$r = $bash->execute(['command' => 'cat blob2.bin'], $ctx);
+test('bash 读二进制仍返回结果', $r->isSuccess());
+test('bash 输出合法 UTF-8', mb_check_encoding($r->getContent(), 'UTF-8'));
+test('bash 输出可 json_encode', json_encode(['c' => $r->getContent()]) !== false);
+
+$r = $bash->execute(['command' => 'printf "\\xB4\\xF3\\xD6\\xD0"'], $ctx);
+test('bash 坏字节输出可 json_encode', json_encode(['c' => $r->getContent()]) !== false);
 
 rrmdir($base);
 echo "\n" . str_repeat('=', 50) . "\n";

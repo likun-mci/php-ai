@@ -103,6 +103,9 @@ class WebFetchTool implements AgentToolInterface
             $body = $this->htmlToText($body);
         }
         $body = trim($body);
+        // 网页编码不受我们控制：GBK 页面、乱码片段都可能带非法 UTF-8，
+        // 回填进上下文就会让下一次请求的 json_encode() 失败，先把坏字节换成 �
+        $body = Text::sanitizeUtf8($body);
 
         $truncated = false;
         if (strlen($body) > $this->maxOutputBytes) {

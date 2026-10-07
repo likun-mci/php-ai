@@ -84,14 +84,20 @@ foreach (['application/json', 'application/json; charset=utf-8', 'APPLICATION/JS
     }
 }
 
-// 编码失败时仍抛出原来那个异常
+// 非法 UTF-8：v2.5.2 起不再抛异常，而是洗成合法 UTF-8 后照常编（整轮运行不因几节坏字节中断）
+$headers = [];
+$got = $encode->invokeArgs($transport, [['bad' => "\xB4\xF3"], &$headers]);
+check(mb_check_encoding($got, 'UTF-8'), '非 UTF-8 内容被洗成合法 UTF-8 后照常发出', $got);
+check(json_decode($got, true) === ['bad' => "\u{FFFD}"], '洗过的内容仍是原结构（只换掉坏字节）', $got);
+
+// 真编不了的东西（INF/NAN，非 UTF-8 原因）仍然抛错，错误码不变
 $headers = [];
 try {
-    $encode->invokeArgs($transport, [['bad' => "\xB4\xF3"], &$headers]);
-    check(false, '非 UTF-8 内容仍抛 json_encode_failed', '未抛异常');
+    $encode->invokeArgs($transport, [['bad' => INF], &$headers]);
+    check(false, 'INF 等不可编码值仍抛 json_encode_failed', '未抛异常');
 } catch (\Ai\Exceptions\RequestException $e) {
     check(strpos($e->getMessage(), '请求体 JSON 编码失败') === 0,
-          '非 UTF-8 内容仍抛 json_encode_failed', $e->getMessage());
+          'INF 等不可编码值仍抛 json_encode_failed', $e->getMessage());
 }
 
 // =====================================================================

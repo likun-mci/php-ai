@@ -225,6 +225,12 @@ class BashTool implements AgentToolInterface
             // 已超时杀死，exitCode 可能不可靠
         }
 
+        // 命令输出什么都有可能：`cat` 一张图、`tail` 一个 GBK 日志、`objdump` 一段二进制。
+        // 原始坏字节进了上下文，下一次请求的 json_encode() 就失败，整轮运行中断，
+        // 所以回填给模型之前一律净化成合法 UTF-8（只是显示成 �，多数内容照样可用）
+        $stdout = Text::sanitizeUtf8($stdout);
+        $stderr = Text::sanitizeUtf8($stderr);
+
         // 组装结果
         $output = '';
         if ($stdout !== '') {

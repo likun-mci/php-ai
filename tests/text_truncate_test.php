@@ -149,6 +149,35 @@ if (isset($meta['errors'][0])) {
     echo "  （反思未产生错误摘要，跳过）\n";
 }
 
+// ===== 五、sanitizeUtf8：外部灌进来的坏字节 =====
+// 截断只是「自己别切出坏字节」，管不了 bash 里 cat 一张图、抓回 GBK 网页带进来的坏字节。
+// 那是同一个故障的另一半：坏字节一旦落进消息历史，**之后每一轮**请求都发不出去。
+
+echo "\n=== 五、外部坏字节净化 ===\n";
+
+$gbk  = mb_convert_encoding('汉字', 'GBK', 'UTF-8');
+$latin = "\xB4\xF3\xD6\xD0";
+
+assert_eq('合法文本原样返回', '中文 ok', Text::sanitizeUtf8('中文 ok'));
+test('GBK 字节被洗成合法 UTF-8', Text::isValidUtf8(Text::sanitizeUtf8($gbk)));
+test('latin1 字节被洗成合法 UTF-8', Text::isValidUtf8(Text::sanitizeUtf8($latin)));
+test('洗过的内容可放进请求体', encodable(Text::sanitizeUtf8($latin)));
+test('合法部分一字不动', Text::sanitizeUtf8("前缀 ok {$latin} 后缀 ok") === "前缀 ok \u{FFFD} 后缀 ok");
+
+// 截断的 emoji（末字节被切掉）也是常见来源
+$emoji = 'abc' . substr('😀', 0, 3);
+test('截断的 emoji 被洗成合法 UTF-8', Text::isValidUtf8(Text::sanitizeUtf8($emoji)));
+test('完整 emoji 不受影响', Text::sanitizeUtf8('😀 测试') === '😀 测试');
+
+// 连续坏字节折叠成一个替换字符：否则一行二进制会灌成上万个 �
+$blob = str_repeat("\xFF", 200);
+test('连续坏字节折叠成一个替换字符', Text::sanitizeUtf8($blob) === "\u{FFFD}");
+test('整段二进制洗成合法 UTF-8', Text::isValidUtf8(Text::sanitizeUtf8(random_bytes(4096))));
+
+// 嵌套结构的所有层都要过一遍：json_encode 会在任意一层失败
+$deep = ['m' => [['role' => 'user', 'content' => [['text' => "bad {$latin}"]]]]];
+test('sanitizeDeep 逐层净化', encodable(Text::sanitizeDeep($deep)));
+
 // ===== 汇总 =====
 
 echo "\n============================================================\n";

@@ -4,6 +4,7 @@ namespace Ai\Agent\Tools;
 use Ai\Agent\Tool\AgentToolInterface;
 use Ai\Agent\Tool\ToolContext;
 use Ai\Agent\Tool\ToolResult;
+use Ai\Helpers\Text;
 use Ai\Tools\HttpFetch;
 
 /**
@@ -79,6 +80,11 @@ class WebSearchTool implements AgentToolInterface
         }
 
         $results = $this->parse((string) (isset($res['body']) ? $res['body'] : ''), $limit);
+        // 搜索页编码不受我们控制，标题/摘要里可能带非法字节；净化掉再拼给模型
+        foreach ($results as $i => $r) {
+            $results[$i]['title']   = Text::sanitizeUtf8($r['title']);
+            $results[$i]['snippet'] = Text::sanitizeUtf8($r['snippet']);
+        }
         if (!$results) {
             return ToolResult::success('未找到「' . $query . '」的搜索结果', [
                 'query'   => $query,

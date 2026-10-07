@@ -6,6 +6,7 @@ use Ai\Agent\Tool\ParallelSafeToolInterface;
 use Ai\Agent\Tool\ToolContext;
 use Ai\Agent\Tool\ToolResult;
 use Ai\Helpers\Shell;
+use Ai\Helpers\Text;
 
 /**
  * 文本搜索工具（Grep）
@@ -487,6 +488,9 @@ class GrepTool implements AgentToolInterface, ParallelSafeToolInterface
         $fileCount = count($filesSeen);
         $content = "Found {$matchLines} match(es) in {$fileCount} file(s) for '{$pattern}':\n---\n"
             . implode("\n", $out) . "\n";
+        // 命中的可能是纯文本里混了二进制片段的文件（isBinary 只看前 8KB）；
+        // 坏字节带进上下文会让下一次请求的 json_encode() 失败，统一净化
+        $content = Text::sanitizeUtf8($content);
 
         return new ToolResult([
             'success'  => true,

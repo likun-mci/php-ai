@@ -96,6 +96,8 @@ class BashOutputTool implements AgentToolInterface
         if ($res['stderr'] !== '') {
             $out .= ($out !== '' ? "\n" : '') . "STDERR:\n" . $res['stderr'];
         }
+        // 后台任务与前台同源：可能是 `cat` 二进制、抓包输出之类的坏字节，净化后再回填
+        $out = Text::sanitizeUtf8($out);
         $truncated = false;
         if (strlen($out) > $this->maxOutputBytes) {
             $out = Text::cutBytes($out, $this->maxOutputBytes);

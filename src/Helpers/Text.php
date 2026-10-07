@@ -161,6 +161,74 @@ class Text
     }
 
     /**
+     * 把非法字节换成替换字符，保证结果是合法 UTF-8
+     *
+     * 截断（cutBytes）只保证自己别切出坏字节，管不了**外面灌进来的**坏字节：
+     * `bash` 里 `cat` 一张图、抓回一个 GBK 网页、MCP 服务端回了段二进制——
+     * 这些内容一旦进了消息历史，之后每一次模型请求的 `json_encode()` 都返回 false，
+     * 整个 Agent 运行就此中断。所以入上下文之前必须过这一道。
+     *
+     * 合法序列原样保留，只有非法字节被换成 U+FFFD，且连续的一段坏字节折叠成一个替换字符
+     * （否则一行二进制会灌成上万个 �）。本来就是合法 UTF-8 时走快路径原样返回。
+     *
+     * @param string $text
+     * @param string $replacement 替换字符
+     * @return string
+     */
+    public static function sanitizeUtf8($text, $replacement = "\u{FFFD}")
+    {
+        $text = (string) $text;
+        if ($text === '' || self::isValidUtf8($text)) {
+            return $text;
+        }
+        // 先把「合法序列」整段匹配掉并跳过（(*SKIP)(*F)），剩下的高字节连片就是非法的：
+        // 孤立续字节、被截断的前导字节、超范围前导（C0/C1/F5+）、代理区编码（ED A0+）等
+        $valid = '[\x00-\x7F]'
+            . '|[\xC2-\xDF][\x80-\xBF]'
+            . '|\xE0[\xA0-\xBF][\x80-\xBF]'
+            . '|[\xE1-\xEC\xEE\xEF][\x80-\xBF]{2}'
+            . '|\xED[\x80-\x9F][\x80-\xBF]'
+            . '|\xF0[\x90-\xBF][\x80-\xBF]{2}'
+            . '|[\xF1-\xF3][\x80-\xBF]{3}'
+            . '|\xF4[\x80-\x8F][\x80-\xBF]{2}';
+        $out = @preg_replace('/(?:' . $valid . ')(*SKIP)(*F)|[\x80-\xFF]+/s', $replacement, $text);
+        if ($out === null) {
+            // 极端情况（PCRE 不支持 (*SKIP)）：退回逐字节替换，宁可多几个 � 也别放坏字节过去
+            $out = preg_replace('/[\x80-\xFF]/', $replacement, $text);
+        }
+        return (string) $out;
+    }
+
+    /**
+     * 递归净化数组 / 对象里的所有字符串
+     *
+     * 请求体是嵌套结构，`json_encode()` 会在任意一层字符串上失败，兜底就得整棵树都过一遍。
+     * 非字符串标量原样返回：INF / NAN 编不了 JSON，但那不是 UTF-8 的事，留给 json_encode 报错。
+     *
+     * @param mixed $value
+     * @return mixed
+     */
+    public static function sanitizeDeep($value)
+    {
+        if (is_string($value)) {
+            return self::sanitizeUtf8($value);
+        }
+        if (is_array($value)) {
+            $out = [];
+            foreach ($value as $k => $v) {
+                $out[is_string($k) ? self::sanitizeUtf8($k) : $k] = self::sanitizeDeep($v);
+            }
+            return $out;
+        }
+        if (is_object($value)) {
+            foreach (get_object_vars($value) as $k => $v) {
+                $value->$k = self::sanitizeDeep($v);
+            }
+        }
+        return $value;
+    }
+
+    /**
      * 去掉末尾残缺的多字节序列
      *
      * 最多回退 3 字节——UTF-8 单个字符最长 4 字节，所以残缺尾巴不会超过 3 字节。

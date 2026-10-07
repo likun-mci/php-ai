@@ -135,6 +135,10 @@ class ReadFileTool implements AgentToolInterface, ParallelSafeToolInterface
             $result = $content;
         }
 
+        // isBinary 只看前 8KB（大文件不整份扫），所以 8KB 之后仍可能是二进制；
+        // 这里再兜一道：保证回填给模型的东西一定编得了 JSON
+        $result = Text::sanitizeUtf8($result);
+
         $resultBytes = strlen($result);
         $isPartial = false;
 

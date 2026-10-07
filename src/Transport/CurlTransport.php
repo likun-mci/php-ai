@@ -5,6 +5,7 @@ use Ai\Contracts\TransportInterface;
 use Ai\Exceptions\RequestException;
 use Ai\Helpers\AIFile;
 use Ai\Helpers\Media;
+use Ai\Helpers\Text;
 
 /**
  * HTTP 传输层实现（使用 cURL）
@@ -287,11 +288,19 @@ class CurlTransport implements TransportInterface
 
         // —— 默认路径：无声明或声明 JSON ——
         if ($contentType === '' || stripos($contentType, 'application/json') === 0) {
-            // 先编码再发：json_encode 失败（最常见是内容含非 UTF-8 字节，
-            // 如从 GBK 库表里读出来的旧数据）会返回 false，直接塞给 CURLOPT_POSTFIELDS
+            // 先编码再发：json_encode 失败会返回 false，直接塞给 CURLOPT_POSTFIELDS
             // 会被当成空 body 发出去，拿到一个语义完全错误的响应且全程无报错
             $payload = json_encode($data, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
             if ($payload === false) {
+                // 兜底：非法 UTF-8 把内容洗一遍再编。工具输出（bash 里 cat 到二进制、
+                // 抓回 GBK 网页）混进上下文是常态，为几节坏字节把整轮运行弄得开不了口不值得
+                $payload = json_encode(
+                    Text::sanitizeDeep($data),
+                    JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES
+                );
+            }
+            if ($payload === false) {
+                // 还是编不了（INF/NAN、递归引用之类，不是 UTF-8 的事）——保持原错
                 throw new RequestException(
                     '请求体 JSON 编码失败：' . json_last_error_msg()
                     . '（常见原因：消息内容含非 UTF-8 字节，请先转成 UTF-8）',
@@ -345,6 +354,9 @@ class CurlTransport implements TransportInterface
             if (is_array($value) || is_object($value)) {
                 // multipart 表达不了嵌套结构，转成 JSON 字符串——多数平台接受这种写法
                 $encoded = json_encode($value, JSON_UNESCAPED_UNICODE);
+                if ($encoded === false) {
+                    $encoded = json_encode(Text::sanitizeDeep($value), JSON_UNESCAPED_UNICODE);
+                }
                 $fields[$key] = $encoded === false ? '' : $encoded;
                 continue;
             }
@@ -615,6 +627,13 @@ class CurlTransport implements TransportInterface
     protected function buildHandle(array $req, array &$results, $key)
     {
         $payload = json_encode($req['data'] ?? [], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+        if ($payload === false) {
+            // 与单发路径同一套兜底：非法 UTF-8 洗一遍再编
+            $payload = json_encode(
+                Text::sanitizeDeep($req['data'] ?? []),
+                JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES
+            );
+        }
         if ($payload === false) {
             $results[$key] = [
                 'ok'       => false,

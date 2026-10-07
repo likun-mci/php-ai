@@ -2395,6 +2395,59 @@ allowed-tools:
 
 `use_skill` 工具被自动注册到 Agent 工具注册表，模型调用后加载完整技能正文，同时收集 `allowed-tools` 中的工具限制（不能突破全局权限）。
 
+#### 技能附件（references/ 等附带文件）
+
+一个技能目录里除 `SKILL.md` 之外的文件都是它的**附带文件**：
+
+```text
+skills/brand-archetype-system/
+├── SKILL.md                              ← 正文（use_skill 返回）
+└── references/
+    ├── core-archetypes/06-luxe-considered.md
+    └── by-vertical/05-fintech-consumer.md
+```
+
+这不是可有可无的补充：官方 Agent Skills 的渐进披露是两层的，正文往往只写「遇到 X 就去
+`references/y.md` 挑匹配的那一份」，真正的方法论在被引用的文件里。只给正文等于让模型猜文件名。
+
+所以 `use_skill` 返回的不只是正文，后面还会附一段附件说明：
+
+```php
+$handler = $sm->getUseSkillHandler();
+echo $handler(['skill' => 'brand-archetype-system']);
+```
+
+```text
+（技能正文……）
+
+<skill-resources>
+技能目录：/path/to/skills/brand-archetype-system
+本技能附带 33 个文件（相对上述目录；正文里引用的相对路径就在其中，需要时用 read_resource 读，skill="brand-archetype-system"）：
+- README.md
+- references/01-how-to-apply-an-archetype.md
+- references/core-archetypes/06-luxe-considered.md
+  …
+</skill-resources>
+```
+
+模型随后用 `read_resource` 工具读具体附件（与 `use_skill` 一起由 Agent 运行时自动注册）：
+
+```php
+// 程序里直接读
+$sm->readResource('brand-archetype-system', 'references/core-archetypes/06-luxe-considered.md');
+```
+
+- **边界由技能自己定义**：附件路径只允许在技能目录内，`..` 穿越、绝对路径、
+  隐藏项（`.git`）、软链接逃逸、二进制文件、超限大文件一律拒绝并给出中文原因。
+  因此宿主不必把整个技能库目录加进 `read_file` 的白名单。
+- **清单与读取用同一份体积上限**（默认 1MB，`setResourceMaxBytes()`）：不会出现
+  「清单里列了、`read_resource` 却读不了」。
+- 清单会跳过 `.git` 之类的隐藏项、根目录的 `SKILL.md`，以及超大文件；默认最多列
+  200 条（`setResourceListLimit()`），超出只报个数。
+- 不想让清单进上下文时 `setResourceListVisible(false)`，行为退回「只回正文」。
+- `SkillDefinition::getDir()` / `getResources()` 可单独使用（懒扫描 + 缓存），
+  宿主自己做技能索引时直接读这两个值即可。
+
 #### 按需发现与场景匹配（Skill 2.0）
 
 技能多起来之后，`loadFromDir()` 会把每份正文都读进内存。`discover()` 只解析 frontmatter 登记技能，正文等模型真正 `use_skill` 时再读盘：
@@ -2436,6 +2489,25 @@ $sm->loadByName('wordpress');
 ```
 
 **没配 `files` 的技能永远匹配不到**——按技能名去猜文件路径太容易误伤，宁可要求显式声明。
+
+#### 技能名很多时：去掉 schema 里的 enum
+
+`use_skill` 的 schema 默认带技能名 `enum`（IDE 与模型都能少猜）。技能上百时，
+一百多个名字每次工具调用都要重发一遍，可以关掉，把「先检索再加载」的约定留给 description：
+
+```php
+$sm->setEnumInSchema(false);
+```
+
+#### 子 Agent 的技能子集
+
+宿主用子类扩展过 `SkillManager`（自建索引、按需发现等）时，取子集要用 `subset()`——
+它会 `clone` 出同类型的新实例并保留定义的全部字段（含附件目录），按名 `new SkillManager()`
+重建会把子类行为降级回基类：
+
+```php
+$child = $sm->subset(['php-development', 'seo']);   // 不继承激活状态
+```
 
 ### 项目指令（InstructionManager）
 
@@ -4295,7 +4367,7 @@ Agent（对外 API）
         ├── BudgetManager（预算管理器）                  ← token / 成本控制
         ├── VerificationManager（验证管理器）            ← 工具执行后自动验证
         ├── WorkspaceManager（工作区管理器）             ← Git 状态跟踪
-        ├── SkillManager（技能管理器）                   ← 技能目录 + use_skill 工具
+        ├── SkillManager（技能管理器）                   ← 技能目录 + use_skill / read_resource 工具
         ├── InstructionManager（项目指令管理器）          ← CLAUDE.md / AGENTS.md
         ├── McpManager（MCP 管理器）                    ← stdio JSON-RPC 工具
         ├── MemoryManager（记忆管理器）                  ← 分作用域长期记忆

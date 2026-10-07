@@ -571,7 +571,10 @@ class AgentRuntime
     }
 
     /**
-     * 注册 use_skill 工具（如果技能管理器存在）
+     * 注册 use_skill / read_resource 工具（如果技能管理器存在）
+     *
+     * read_resource 只在「有从目录加载的技能」时注册：技能附件是文件，
+     * 手工 register() 的技能没有目录，多一个工具名只是白占 schema。
      *
      * @return void
      */
@@ -581,15 +584,22 @@ class AgentRuntime
         if ($sm === null || !$sm->isEnabled() || $sm->count() === 0) {
             return;
         }
-        if ($this->toolRegistry->has('use_skill')) {
-            return;
+        if (!$this->toolRegistry->has('use_skill')) {
+            $schema = $sm->getUseSkillToolSchema();
+            $this->toolRegistry->register('use_skill', [
+                'description'  => $schema['description'],
+                'input_schema' => $schema['input_schema'],
+                'handler'      => $sm->getUseSkillHandler(),
+            ]);
         }
-        $schema = $sm->getUseSkillToolSchema();
-        $this->toolRegistry->register('use_skill', [
-            'description'  => $schema['description'],
-            'input_schema' => $schema['input_schema'],
-            'handler'      => $sm->getUseSkillHandler(),
-        ]);
+        if (!$this->toolRegistry->has('read_resource') && $sm->hasResourceSkills()) {
+            $schema = $sm->getReadResourceToolSchema();
+            $this->toolRegistry->register('read_resource', [
+                'description'  => $schema['description'],
+                'input_schema' => $schema['input_schema'],
+                'handler'      => $sm->getReadResourceHandler(),
+            ]);
+        }
     }
 
     /**

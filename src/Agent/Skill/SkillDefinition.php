@@ -11,6 +11,11 @@ namespace Ai\Agent\Skill;
  * 默认只把名称与描述提供给模型（节省 Context），
  * 模型需要时通过 use_skill 工具加载完整正文。
  *
+ * 技能目录里的**附带文件**（Anthropic 官方技能约定里的 `references/*.md`、
+ * `scripts/*`、`assets/*`）是技能的第二层正文：SKILL.md 只说明「遇到 X 时
+ * 去看 references/y.md」，真正的方法论在被引用的文件里。这些文件靠
+ * `getDir()` / `getResources()` 暴露，读取走 `SkillManager::readResource()`。
+ *
  * 用法：
  * ```php
  * $skill = new SkillDefinition([
@@ -21,6 +26,9 @@ namespace Ai\Agent\Skill;
  * ]);
  * echo $skill->getName();        // 'deploy'
  * echo $skill->getDescription(); // '部署项目到生产环境'
+ *
+ * // 从目录加载的技能才有附带文件
+ * $skill->getResources();        // ['references/a.md', 'references/b.md']
  * ```
  */
 class SkillDefinition
@@ -39,6 +47,19 @@ class SkillDefinition
 
     /** @var string 来源路径 */
     protected $path = '';
+
+    /** @var string 技能目录（SKILL.md 所在目录，注释见 getDir()） */
+    protected $dir = '';
+
+    /** @var string[]|null 附带文件清单缓存（相对技能目录的路径） */
+    protected $resources = null;
+
+    /**
+     * @var int 单个附带文件体积上限（字节），超过的不列进清单；0 = 不限
+     *
+     * 默认 1MB：清单是给模型看的，列一个读不动的文件只会诱发一次徒劳的读取。
+     */
+    protected $resourceMaxBytes = 1048576;
 
     /** @var string 简短知识（frontmatter 的 knowledge 字段），匹配到场景时随描述一起注入 */
     protected $knowledge = '';
@@ -70,6 +91,13 @@ class SkillDefinition
             ? array_values($data['allowedTools'])
             : [];
         $this->path         = isset($data['path']) ? (string) $data['path'] : '';
+        $this->dir          = isset($data['dir']) ? (string) $data['dir'] : '';
+        if (isset($data['resources']) && is_array($data['resources'])) {
+            $this->setResources($data['resources']);
+        }
+        if (isset($data['resourceMaxBytes'])) {
+            $this->setResourceMaxBytes($data['resourceMaxBytes']);
+        }
         $this->knowledge    = isset($data['knowledge']) ? (string) $data['knowledge'] : '';
         $this->filePatterns = isset($data['filePatterns']) && is_array($data['filePatterns'])
             ? array_values(array_map('strval', $data['filePatterns']))
@@ -111,6 +139,164 @@ class SkillDefinition
     public function getPath()
     {
         return $this->path;
+    }
+
+    /**
+     * 技能目录
+     *
+     * 显式设过就用显式的；否则从 `path`（SKILL.md 路径）推。
+     * 只给了文件名（没有目录部分）时返回空串——那种情况下 `dirname()` 会
+     * 得到 `.`，把当前工作目录当成技能目录去扫，不是我们想要的。
+     *
+     * @return string 目录绝对/相对路径；无从得知返回空串
+     */
+    public function getDir()
+    {
+        if ($this->dir !== '') {
+            return $this->dir;
+        }
+        if ($this->path === '') {
+            return '';
+        }
+        $dir = dirname(str_replace('\\', '/', $this->path));
+        return ($dir === '.' || $dir === '/' || $dir === '') ? '' : $dir;
+    }
+
+    /**
+     * @param string $dir
+     * @return $this
+     */
+    public function setDir($dir)
+    {
+        $this->dir      = (string) $dir;
+        $this->resources = null;  // 目录换了，旧的清单作废
+        return $this;
+    }
+
+    /**
+     * 附带文件清单（相对技能目录的路径，已排序）
+     *
+     * 懒扫描：第一次调用时遍历技能目录，之后走缓存（`$reload = true` 强制重扫）。
+     * 只列文件名不读内容，几十个附件的开销可以忽略。
+     *
+     * 入列规则：
+     *  - 只列普通文件，目录本身不列（层级由文件路径体现）
+     *  - 跳过任何以 `.` 开头的路径段（`.git`、`.DS_Store` 等）
+     *  - 跳过根目录的 `SKILL.md`（正文由 use_skill 返回，不必当附件）
+     *  - 跳过超过 `resourceMaxBytes` 的大文件
+     *
+     * @param bool $reload 是否强制重扫
+     * @return string[] 相对路径，如 ['references/a.md', 'scripts/run.sh']
+     */
+    public function getResources($reload = false)
+    {
+        if ($this->resources === null || $reload) {
+            $this->resources = $this->scanResources();
+        }
+        return $this->resources;
+    }
+
+    /**
+     * 直接给定清单（宿主自己有过索引时可省掉一次扫盘）
+     *
+     * @param string[] $resources 相对技能目录的路径
+     * @return $this
+     */
+    public function setResources(array $resources)
+    {
+        $clean = [];
+        foreach ($resources as $rel) {
+            $rel = trim(str_replace('\\', '/', (string) $rel), '/');
+            if ($rel !== '') {
+                $clean[] = $rel;
+            }
+        }
+        sort($clean, SORT_STRING);
+        $this->resources = $clean;
+        return $this;
+    }
+
+    /** @return bool 是否有附带文件 */
+    public function hasResources()
+    {
+        return $this->getResources() !== [];
+    }
+
+    /**
+     * @param int $bytes 0 = 不限
+     * @return $this
+     */
+    public function setResourceMaxBytes($bytes)
+    {
+        $this->resourceMaxBytes = max(0, (int) $bytes);
+        $this->resources = null;  // 体积上限参与筛选，清单作废
+        return $this;
+    }
+
+    /** @return int */
+    public function getResourceMaxBytes()
+    {
+        return $this->resourceMaxBytes;
+    }
+
+    /**
+     * 扫盘得到附带文件清单
+     *
+     * @return string[]
+     */
+    protected function scanResources()
+    {
+        $dir = $this->getDir();
+        if ($dir === '' || !is_dir($dir)) {
+            return [];
+        }
+        $files = [];
+        $this->walkResources($dir, '', $files, 0);
+        sort($files, SORT_STRING);
+        return $files;
+    }
+
+    /**
+     * 递归收集附带文件
+     *
+     * 深度上限 16 纯粹是防御性的：软链接成环时 scandir 会一直往下走。
+     *
+     * @param string   $absDir
+     * @param string   $prefix 相对技能目录的前缀
+     * @param string[] $files  收集结果（引用传递）
+     * @param int      $depth
+     * @return void
+     */
+    protected function walkResources($absDir, $prefix, array &$files, $depth)
+    {
+        if ($depth > 16) {
+            return;
+        }
+        $entries = @scandir($absDir);
+        if ($entries === false) {
+            return;
+        }
+        foreach ($entries as $entry) {
+            if ($entry === '.' || $entry === '..' || strpos($entry, '.') === 0) {
+                continue;
+            }
+            $abs = $absDir . '/' . $entry;
+            $rel = $prefix === '' ? $entry : $prefix . '/' . $entry;
+            if (is_dir($abs)) {
+                $this->walkResources($abs, $rel, $files, $depth + 1);
+                continue;
+            }
+            if (!is_file($abs) || ($prefix === '' && $entry === 'SKILL.md')) {
+                continue;
+            }
+            if ($this->resourceMaxBytes > 0) {
+                $size = @filesize($abs);
+                if ($size !== false && $size > $this->resourceMaxBytes) {
+                    continue;
+                }
+            }
+            $files[] = $rel;
+        }
     }
 
     /**
@@ -237,6 +423,7 @@ class SkillDefinition
             'allowedTools' => $this->allowedTools,
             'filePatterns' => $this->filePatterns,
             'path'         => $this->path,
+            'dir'          => $this->getDir(),
             'loaded'       => $this->loaded,
             'active'       => $this->active,
         ];

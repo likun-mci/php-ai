@@ -50,10 +50,10 @@ class PermissionManager
     protected $askHandler = null;
 
     /** @var string[] plan 模式下放行的只读工具 */
-    protected static $readOnlyTools = ['read_file', 'glob', 'grep', 'list_directory', 'search'];
+    protected static $readOnlyTools = ['read_file', 'glob', 'grep', 'list_directory', 'search', 'use_skill', 'read_resource'];
 
     /** @var string[] accept_edits 模式下自动放行的文件工具 */
-    protected static $editTools = ['read_file', 'write_file', 'edit_file', 'glob', 'grep'];
+    protected static $editTools = ['read_file', 'write_file', 'edit_file', 'glob', 'grep', 'use_skill', 'read_resource'];
 
     /** @var string[] 需要询问的危险工具 */
     protected static $dangerousTools = ['bash', 'delete_file', 'rm', 'exec'];

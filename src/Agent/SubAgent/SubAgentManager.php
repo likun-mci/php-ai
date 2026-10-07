@@ -685,21 +685,15 @@ class SubAgentManager
         }
 
         // 技能：从父 Agent 的技能里挑子集
+        //
+        // 用 subset() 而不是按名重建：父管理器可能是宿主的子类（自建索引、
+        // 按需加载），按名 new SkillManager() 会把子类行为降级成基类，
+        // 子 Agent 于是变成「全量描述注入 + 没有按需检索 + 附件读不到」。
+        // subset() 保留子类与定义的全部字段（含附件目录），并克隆新实例——
+        // 子 Agent 激活技能不会反过来影响父 Agent。
         $skills = $def->getSkills();
         if ($skills && $this->parentSkills !== null) {
-            $sm = new \Ai\Agent\Skill\SkillManager();
-            foreach ($skills as $skillName) {
-                $skill = $this->parentSkills->get($skillName);
-                if ($skill !== null) {
-                    $sm->register($skill->getName(), [
-                        'description'  => $skill->getDescription(),
-                        'content'      => $skill->getContent(),
-                        'allowedTools' => $skill->getAllowedTools(),
-                        'path'         => $skill->getPath(),
-                    ]);
-                }
-            }
-            $runtime->setSkillManager($sm);
+            $runtime->setSkillManager($this->parentSkills->subset($skills));
         }
 
         // MCP：父 Agent 已登记的服务器里挑子集

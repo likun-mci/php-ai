@@ -2373,6 +2373,64 @@ allowed-tools:
 
 The `use_skill` tool is automatically registered in the Agent's tool registry. When the model calls it, the full skill content is loaded and any `allowed-tools` restrictions are collected (these cannot break through global permissions).
 
+#### Skill resources (references/ and other attached files)
+
+Every file in a skill directory other than `SKILL.md` is one of its **resources**:
+
+```text
+skills/brand-archetype-system/
+├── SKILL.md                              ← body (returned by use_skill)
+└── references/
+    ├── core-archetypes/06-luxe-considered.md
+    └── by-vertical/05-fintech-consumer.md
+```
+
+This is not optional decoration: the official Agent Skills progressive disclosure is two-layered, and a body
+often only says "when you hit X, pick the matching file under `references/y.md`" — the actual methodology
+lives in the referenced files. Returning the body alone leaves the model guessing at file names.
+
+So `use_skill` returns not just the body but an attached resource block:
+
+```php
+$handler = $sm->getUseSkillHandler();
+echo $handler(['skill' => 'brand-archetype-system']);
+```
+
+```text
+(skill body ...)
+
+<skill-resources>
+技能目录：/path/to/skills/brand-archetype-system
+本技能附带 33 个文件（相对上述目录；正文里引用的相对路径就在其中，需要时用 read_resource 读，skill="brand-archetype-system"）：
+- README.md
+- references/01-how-to-apply-an-archetype.md
+- references/core-archetypes/06-luxe-considered.md
+  …
+</skill-resources>
+```
+
+(That block is the literal output — like the rest of this library's tool output, the surrounding messages
+are written in Chinese.)
+
+The model then reads individual resources with the `read_resource` tool (registered automatically alongside `use_skill`):
+
+```php
+// Or read directly in code
+$sm->readResource('brand-archetype-system', 'references/core-archetypes/06-luxe-considered.md');
+```
+
+- **The boundary is defined by the skill itself**: resource paths must stay inside the skill directory.
+  `..` traversal, absolute paths, hidden entries (`.git`), symlink escapes, binary files and oversized
+  files are all rejected with a human-readable reason. The host therefore never has to add the whole
+  skills directory to the `read_file` allow-list.
+- **Listing and reading share one size limit** (1MB by default, `setResourceMaxBytes()`), so you never see
+  "listed in the inventory but unreadable".
+- The inventory skips hidden entries such as `.git`, the root `SKILL.md`, and oversized files; it lists at
+  most 200 entries by default (`setResourceListLimit()`) and just reports the count beyond that.
+- `setResourceListVisible(false)` keeps the inventory out of context and restores the "body only" behaviour.
+- `SkillDefinition::getDir()` / `getResources()` are usable on their own (lazy scan + cache) for hosts
+  building their own skill index.
+
 #### On-demand discovery and context matching (Skill 2.0)
 
 Once you have many skills, `loadFromDir()` reads every body into memory. `discover()` registers skills from their frontmatter alone and defers the body until the model actually calls `use_skill`:
@@ -2414,6 +2472,27 @@ $sm->loadByName('wordpress');
 ```
 
 **A skill without `files` never matches** — guessing file paths from a skill's name misfires too easily, so the declaration has to be explicit.
+
+#### Many skills: drop the enum from the schema
+
+The `use_skill` schema carries a skill-name `enum` by default (fewer guesses for IDEs and models). With
+hundreds of skills a hundred-plus names are resent on every tool call; turn it off and leave the
+"search first, then load" convention to the description:
+
+```php
+$sm->setEnumInSchema(false);
+```
+
+#### Skill subsets for sub-agents
+
+If a host extends `SkillManager` with a subclass (custom index, on-demand discovery), take subsets with
+`subset()` — it `clone`s a new instance of the same class and keeps every field of the definition
+(including the resource directory). Rebuilding by name with `new SkillManager()` silently downgrades the
+subclass behaviour back to the base class:
+
+```php
+$child = $sm->subset(['php-development', 'seo']);   // activation state is not inherited
+```
 
 ### Project instructions (InstructionManager)
 
@@ -4257,7 +4336,7 @@ Agent (public API)
         ├── BudgetManager (budget manager)              ← token / cost control
         ├── VerificationManager (verification manager)  ← auto-verify after tool execution
         ├── WorkspaceManager (workspace manager)        ← git status tracking
-        ├── SkillManager (skill manager)                ← skill directory + use_skill tool
+        ├── SkillManager (skill manager)                ← skill directory + use_skill / read_resource tools
         ├── InstructionManager (instruction manager)    ← CLAUDE.md / AGENTS.md
         ├── McpManager (MCP manager)                    ← stdio JSON-RPC tools
         ├── MemoryManager (memory manager)              ← scoped long-term memory

@@ -1,6 +1,8 @@
 <?php
 namespace Ai\Agent\Skill;
 
+use Ai\Agent\Tools\PathSafety;
+
 /**
  * SkillManager——技能管理器
  *
@@ -29,6 +31,22 @@ namespace Ai\Agent\Skill;
  * ...
  * ```
  *
+ * 一个技能目录里除 SKILL.md 之外的文件都是它的**附带文件**（附件）：
+ *
+ * ```text
+ * skills/brand-archetype-system/
+ * ├── SKILL.md                          ← 正文（use_skill 返回）
+ * └── references/
+ *     ├── core-archetypes/06-luxe-considered.md
+ *     └── by-vertical/saas.md
+ * ```
+ *
+ * Claude Code / Agent Skills 的渐进披露是两层的：正文只说明「遇到 X 去看
+ * references/y.md」，方法论其实在被引用的文件里。所以 `use_skill` 返回的
+ * 不只是正文，还会附上技能目录与附件清单（可用 `setResourceListVisible(false)`
+ * 关掉），模型再用 `read_resource` 工具读具体文件。Agent 运行时会自动注册
+ * `use_skill` 与 `read_resource` 两个只读工具。
+ *
  * 用法：
  * ```php
  * $sm = new SkillManager();
@@ -41,6 +59,8 @@ namespace Ai\Agent\Skill;
  * echo $sm->toSystemPrompt();       // 注入系统提示词的描述列表
  * $sm->getUseSkillToolSchema();     // use_skill 工具元数据
  * $sm->getUseSkillHandler();        // use_skill 工具的 handler
+ * $sm->getReadResourceToolSchema(); // read_resource 工具元数据（读技能附件）
+ * $sm->getReadResourceHandler();
  * ```
  */
 class SkillManager
@@ -56,6 +76,23 @@ class SkillManager
 
     /** @var callable|null 生命周期事件回调 function(array $event): void */
     protected $emit = null;
+
+    /** @var bool use_skill 返回里是否附上「技能目录 + 附件清单」 */
+    protected $resourceListVisible = true;
+
+    /** @var int 附件清单最多列多少条（0 = 不限），超出部分只报个数 */
+    protected $resourceListLimit = 200;
+
+    /**
+     * @var int 附件体积上限（字节）：大于它的文件既不列进清单、也不允许读取；0 = 不限
+     *
+     * 一份设定，两处生效。分开设会出现「清单里列了、readResource 却拒了」的
+     * 糊涂状态——面给模型看的信息要跟它能做的事一致。
+     */
+    protected $resourceMaxBytes = 1048576;
+
+    /** @var bool use_skill 的 schema 里是否带技能名 enum */
+    protected $enumInSchema = true;
 
     /**
      * 注册一个技能
@@ -603,6 +640,250 @@ class SkillManager
     }
 
     /**
+     * use_skill 的完整返回：技能正文 + 附件清单
+     *
+     * 与 `useSkill()` 的区别：正文后面多一段 `<skill-resources>`，告诉模型
+     * 技能目录在哪、带了哪些文件。没有它，模型看到正文里的
+     * “见 references/core-archetypes/ 下的匹配档案”只能靠猜文件名。
+     *
+     * @param string $name
+     * @return string 技能不存在返回空串
+     */
+    public function useSkillResult($name)
+    {
+        $content = $this->useSkill($name);
+        if ($content === '') {
+            return '';
+        }
+        return $content . $this->resourceBlock($name);
+    }
+
+    /**
+     * 技能附件说明块（正文尾部追加的那段）
+     *
+     * @param string $name
+     * @return string 关掉清单开关 / 技能无目录 / 没有附件时返回空串
+     */
+    public function resourceBlock($name)
+    {
+        if (!$this->enabled || !$this->resourceListVisible) {
+            return '';
+        }
+        $skill = $this->get((string) $name);
+        if ($skill === null) {
+            return '';
+        }
+        $dir = $skill->getDir();
+        $this->applyResourceLimit($skill);
+        $resources = $skill->getResources();
+        if ($dir === '' || !$resources) {
+            return '';
+        }
+
+        $total = count($resources);
+        $shown = $resources;
+        $more = 0;
+        if ($this->resourceListLimit > 0 && $total > $this->resourceListLimit) {
+            $shown = array_slice($resources, 0, $this->resourceListLimit);
+            $more = $total - $this->resourceListLimit;
+        }
+
+        $lines = ['<skill-resources>'];
+        $lines[] = '技能目录：' . $dir;
+        $lines[] = '本技能附带 ' . $total . ' 个文件（相对上述目录；正文里引用的相对路径就在其中，'
+            . '需要时用 read_resource 读，skill="' . $skill->getName() . '"）：';
+        foreach ($shown as $rel) {
+            $lines[] = '- ' . $rel;
+        }
+        if ($more > 0) {
+            $lines[] = '…另有 ' . $more . ' 个文件未列出';
+        }
+        $lines[] = '</skill-resources>';
+
+        return "\n\n" . implode("\n", $lines);
+    }
+
+    /**
+     * 把管理器的体积上限推到技能定义上
+     *
+     * 技能定义也有自己的上限（独立使用时用），管理器设定过的以管理器为准。
+     *
+     * @param SkillDefinition $skill
+     * @return void
+     */
+    protected function applyResourceLimit(SkillDefinition $skill)
+    {
+        if ($skill->getResourceMaxBytes() !== $this->resourceMaxBytes) {
+            $skill->setResourceMaxBytes($this->resourceMaxBytes);
+        }
+    }
+
+    /**
+     * 读取技能的一个附带文件
+     *
+     * 附件路径必须落在技能目录内：`..` 穿越、绝对路径、软链接逃逸都会被拒。
+     * 边界由技能自己定义，于是宿主不必把整个技能库目录加进 read_file 的白名单。
+     *
+     * @param string $name 技能名
+     * @param string $rel  附件相对路径，如 `references/a.md`
+     * @return string 文件内容
+     * @throws SkillResourceException 失败时抛出，消息是可直接展示的中文
+     */
+    public function readResource($name, $rel)
+    {
+        $skill = $this->get((string) $name);
+        if ($skill === null) {
+            throw new SkillResourceException('技能 "' . $name . '" 不存在');
+        }
+        $dir = $skill->getDir();
+        if ($dir === '' || !is_dir($dir)) {
+            throw new SkillResourceException('技能 "' . $name . '" 没有附带文件（它未从目录加载）');
+        }
+        if ($this->resourceMaxBytes > 0) {
+            $this->applyResourceLimit($skill);
+        }
+
+        $rel = str_replace('\\', '/', trim((string) $rel));
+        if ($rel === '' || strpos($rel, "\0") !== false) {
+            throw new SkillResourceException('附件路径不能为空');
+        }
+        if (strpos($rel, '/') === 0 || preg_match('#^[a-zA-Z][a-zA-Z0-9+.\-]*:#', $rel)) {
+            throw new SkillResourceException('附件路径必须是技能目录下的相对路径：' . $rel);
+        }
+        foreach (explode('/', $rel) as $seg) {
+            if ($seg === '.' || $seg === '') {
+                continue;  // `./a.md` 这种写法是噪音，PathSafety 会归一化
+            }
+            if ($seg === '..') {
+                throw new SkillResourceException('附件路径不能包含「..」（只能读技能目录内的文件）：' . $rel);
+            }
+            if (strpos($seg, '.') === 0) {
+                throw new SkillResourceException('附件路径不能包含隐藏项（以 . 开头的目录 / 文件）：' . $rel);
+            }
+        }
+
+        try {
+            $path = (new PathSafety($dir))->resolve($rel);
+        } catch (\InvalidArgumentException $e) {
+            throw new SkillResourceException('附件路径超出技能目录范围：' . $rel);
+        }
+        if (!is_file($path)) {
+            throw new SkillResourceException('附件不存在：' . $rel . '（可用附件见 use_skill 返回的清单）');
+        }
+        $size = @filesize($path);
+        if ($size !== false && $this->resourceMaxBytes > 0 && $size > $this->resourceMaxBytes) {
+            throw new SkillResourceException(
+                '附件过大：' . $rel . '（' . $size . ' 字节，读取上限 ' . $this->resourceMaxBytes . ' 字节）'
+            );
+        }
+        $content = @file_get_contents($path);
+        if ($content === false) {
+            throw new SkillResourceException('附件读取失败：' . $rel);
+        }
+        if (strpos($content, "\0") !== false) {
+            throw new SkillResourceException('附件不是文本文件：' . $rel . '（' . strlen($content) . ' 字节）');
+        }
+        return $content;
+    }
+
+    /**
+     * 是否存在「可能有附带文件」的技能
+     *
+     * 只看技能有没有目录，不扫盘——用来决定要不要把 read_resource 注册给模型。
+     * 手工 register() 且没给 path / dir 的技能永远没有附件。
+     *
+     * @return bool
+     */
+    public function hasResourceSkills()
+    {
+        foreach ($this->skills as $skill) {
+            if ($skill->getDir() !== '') {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * use_skill 返回里是否附上附件清单
+     *
+     * 关掉后 `use_skill` 只回正文，与旧版行为一致。
+     *
+     * @param bool $visible
+     * @return $this
+     */
+    public function setResourceListVisible($visible)
+    {
+        $this->resourceListVisible = (bool) $visible;
+        return $this;
+    }
+
+    /** @return bool */
+    public function isResourceListVisible()
+    {
+        return $this->resourceListVisible;
+    }
+
+    /**
+     * @param int $limit 附件清单最多列多少条；0 = 不限
+     * @return $this
+     */
+    public function setResourceListLimit($limit)
+    {
+        $this->resourceListLimit = max(0, (int) $limit);
+        return $this;
+    }
+
+    /**
+     * @param int $bytes 附件体积上限；0 = 不限
+     * @return $this
+     */
+    public function setResourceMaxBytes($bytes)
+    {
+        $this->resourceMaxBytes = max(0, (int) $bytes);
+        return $this;
+    }
+
+    /** @return int */
+    public function getResourceMaxBytes()
+    {
+        return $this->resourceMaxBytes;
+    }
+
+    /**
+     * 按名单取一个子集（新实例，与源管理器互不影响）
+     *
+     * 子 Agent 用它取父 Agent 的技能子集。用 `clone $this` 而不是新建
+     * `SkillManager`，是因为宿主可能用子类扩展了管理器（自建索引、按需加载等）：
+     * 按名重建会把子类行为降级回基类，子 Agent 于是变成「全量描述注入 +
+     * 没有按需检索 + 附件读不到」。
+     *
+     * 保留定义的全部字段（描述、正文、knowledge、allowed-tools、附件目录等），
+     * 但**不继承激活状态**——子 Agent 是另一个上下文，用不用哪个技能由它自己决定。
+     * 子类若在自身持有索引 / 缓存，可自行覆盖本方法重建。
+     *
+     * @param string[] $names
+     * @return static
+     */
+    public function subset(array $names)
+    {
+        $copy = clone $this;
+        $copy->skills = [];
+        $copy->allowedTools = [];
+        foreach ($names as $name) {
+            $name = (string) $name;
+            $skill = $this->get($name);
+            if ($skill === null) {
+                continue;
+            }
+            $clone = clone $skill;
+            $clone->setActive(false);
+            $copy->skills[$name] = $clone;
+        }
+        return $copy;
+    }
+
+    /**
      * 已激活技能
      *
      * @return array<string, SkillDefinition>
@@ -640,6 +921,14 @@ class SkillManager
             $names[] = (string) $name;
         }
 
+        $skillProp = [
+            'type'        => 'string',
+            'description' => '要加载的技能名称',
+        ];
+        if ($this->enumInSchema) {
+            $skillProp['enum'] = $names;
+        }
+
         return [
             'name'        => 'use_skill',
             'description' => '加载一个技能（Skill）的完整内容。'
@@ -648,15 +937,26 @@ class SkillManager
             'input_schema' => [
                 'type'       => 'object',
                 'properties' => [
-                    'skill' => [
-                        'type'        => 'string',
-                        'description' => '要加载的技能名称',
-                        'enum'        => $names,
-                    ],
+                    'skill' => $skillProp,
                 ],
                 'required' => ['skill'],
             ],
         ];
+    }
+
+    /**
+     * schema 里是否带技能名 enum
+     *
+     * 技能上百时，一百多个名字的 enum 每次工具调用都要重发一遍。
+     * 关掉后「先检索再加载」的约定就落在 description 里。
+     *
+     * @param bool $enabled
+     * @return $this
+     */
+    public function setEnumInSchema($enabled)
+    {
+        $this->enumInSchema = (bool) $enabled;
+        return $this;
     }
 
     /**
@@ -672,11 +972,63 @@ class SkillManager
             if ($name === '') {
                 return 'ERROR: 请指定要加载的技能名称';
             }
-            $content = $self->useSkill($name);
+            $content = $self->useSkillResult($name);
             if ($content === '') {
                 return 'ERROR: 技能 "' . $name . '" 不存在';
             }
             return $content;
+        };
+    }
+
+    /**
+     * read_resource 工具的 schema
+     *
+     * @return array<string, mixed>
+     */
+    public function getReadResourceToolSchema()
+    {
+        return [
+            'name'        => 'read_resource',
+            'description' => '读取某个技能附带文件的内容。'
+                . '技能正文（use_skill 返回）里引用的 references/xxx.md 等相对路径就用它读；'
+                . '路径相对技能目录，在 use_skill 返回的附件清单里列出。'
+                . '只读，只能读技能目录内的文件。',
+            'input_schema' => [
+                'type'       => 'object',
+                'properties' => [
+                    'skill' => [
+                        'type'        => 'string',
+                        'description' => '技能名称',
+                    ],
+                    'resource' => [
+                        'type'        => 'string',
+                        'description' => '附件路径，相对技能目录，如 references/a.md',
+                    ],
+                ],
+                'required' => ['skill', 'resource'],
+            ],
+        ];
+    }
+
+    /**
+     * read_resource 工具的 handler
+     *
+     * @return callable
+     */
+    public function getReadResourceHandler()
+    {
+        $self = $this;
+        return function (array $input) use ($self) {
+            $name = isset($input['skill']) ? (string) $input['skill'] : '';
+            $rel  = isset($input['resource']) ? (string) $input['resource'] : '';
+            if ($name === '' || $rel === '') {
+                return 'ERROR: 请同时指定技能名称与附件路径（skill / resource）';
+            }
+            try {
+                return $self->readResource($name, $rel);
+            } catch (SkillResourceException $e) {
+                return 'ERROR: ' . $e->getMessage();
+            }
         };
     }
 }

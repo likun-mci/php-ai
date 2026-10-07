@@ -3968,6 +3968,13 @@ use Ai\Agent\Tools\MciBrowserTool;
 
 $agent->addTool(new MciBrowserTool('https://example.com', ['app' => 'MCI AI Agent']));
 
+// 调用方若知道「用户此刻正在用的那台」，经 client_device 传进来更准（可选）：
+// 页面从扩展写在 <html data-mci-device> 上的设备号读来，随消息一起交过来。
+// $agent->addTool(new MciBrowserTool('https://example.com', [
+//     'app'           => 'MCI AI Agent',
+//     'client_device' => 'd5708b07f',
+// ]));
+
 // 授权那一半（没凭据时先做；与 browser_authorize 同名同义，原样委托过去）：
 //   mci_browser(action: "authorize")                       → 弹确认页，取票据
 //   mci_browser(action: "grant", wait_seconds: 60)          → 用户确认后取回 device + 密钥
@@ -3985,7 +3992,7 @@ $agent->addTool(new MciBrowserTool('https://example.com', ['app' => 'MCI AI Agen
 几处刻意的取舍：
 
 - **授权规则只写一处**：`authorize` / `grant` / `credential` / `forget` 四个动作直接委托给 `BrowserGrantTool`，票据、轮询、落盘、事件保持完全一致（宿主前端不用改）。
-- **`device` 默认取凭据里授权的那台**：站点上在线的是哪台不由模型猜 —— 他授权时选的是哪台就一直用哪台。多台在线时猜错就是把命令打到别人的浏览器上；确实要换台时显式传 `device`。
+- **`device` 默认取「用户此刻正在用的那台」**：调用方把页面从扩展写的 `<html data-mci-device>` 读到的设备号经构造选项 `client_device` 传进来，工具拿它跟站点的在线清单（`/Browser/Api/status`）核对过才用 —— 用户要的往往是他面前这台，而不是几天前授权时随手选的那台。它只是个提示：那台不在线、或清单查不到（网络 / 权限），就退回凭据里授权的那台，并把「这条命令发给了哪台」写进结果 —— 否则用户看着自己这台没动静，会以为是「点了没反应」。同一实例一轮里只核对一次；不传 `client_device` 时行为与从前完全一致，确实要换台仍显式传 `device`。
 - **`open` 默认 `active=0`**：AI 干活多在后台，抢走焦点等于打断用户手头的事。
 - **自己开的标签要自己关**：`open` 的结果里直接附上带 tab id 的关闭命令，工具描述也把「收尾用 `close`」写成硬要求；不传 `tab` 时关的是你上次操作的那个标签，用户的其它标签不受影响。少了这条，AI 每干一次活就在用户浏览器里留下一排标签。
 - **截图走 `inline=1` 取字节**交给媒体门面，图直接进上下文，模型是真看得见页面；站点上那份落盘路径也一并回报。调用方没挂媒体门面时，结果里会**明说这次看不到图**，而不是让模型以为自己看过了。

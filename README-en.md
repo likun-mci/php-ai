@@ -3939,6 +3939,14 @@ use Ai\Agent\Tools\MciBrowserTool;
 
 $agent->addTool(new MciBrowserTool('https://example.com', ['app' => 'MCI AI Agent']));
 
+// If the caller knows which browser the user is talking from, pass it via client_device
+// (optional). The page reads the id from the <html data-mci-device> attribute the
+// extension writes and sends it along with the message.
+// $agent->addTool(new MciBrowserTool('https://example.com', [
+//     'app'           => 'MCI AI Agent',
+//     'client_device' => 'd5708b07f',
+// ]));
+
 // The authorization half (run first when there is no credential; same names and meanings, delegated as-is):
 //   mci_browser(action: "authorize")                        → pop the approval page, get a ticket
 //   mci_browser(action: "grant", wait_seconds: 60)           → once approved, take back the device + key
@@ -3956,7 +3964,7 @@ $agent->addTool(new MciBrowserTool('https://example.com', ['app' => 'MCI AI Agen
 A few deliberate trade-offs:
 
 - **The authorization rules are written once**: `authorize` / `grant` / `credential` / `forget` delegate straight to `BrowserGrantTool`, so tickets, polling, storage and events stay identical (no host front-end changes needed).
-- **`device` defaults to the one authorized**: which browser is online is not for the model to guess — whichever the user picked is the one used, turn after turn. With several online, guessing wrong means driving someone else's browser; pass `device` explicitly to switch.
+- **`device` defaults to the browser the user is talking from**: the caller passes the id the page read from the extension-written `<html data-mci-device>` attribute through the `client_device` option, and the tool only uses it after checking it against the site's online list (`/Browser/Api/status`) — users usually mean the machine in front of them, not whatever happened to be picked at authorization time. It is a hint, though: if that one is offline, or the list cannot be fetched (network / permission), the tool falls back to the authorized device and states in the result which device the command actually went to — otherwise a user watching their own browser do nothing assumes the click simply failed. The check runs once per instance; without `client_device` the behaviour is exactly as before, and you can still pass `device` explicitly to switch.
 - **`open` defaults to `active=0`**: the Agent usually works in the background, and stealing focus interrupts whatever the user is doing.
 - **Screenshots use `inline=1`** and hand the bytes to the media facade, so the image enters the context directly and the model really sees the page; the server-side path is reported too. When the caller mounted no media facade, the result **says it cannot see the image** rather than letting the model assume it did.
 - **Parameters are whitelisted per action**: extra keys the model supplies (other than the universal `device`) are never forwarded to the site. Without that layer the tool becomes a channel for splicing model input into requests.

@@ -38,8 +38,10 @@ use Ai\Agent\Tool\ToolResult;
  * ── 几条刻意的取舍 ──
  * · 授权那一半委托给 BrowserGrantTool：票据/轮询/落盘的规则只写一处。本工具在
  *   它之上加的是「拿凭据去操作」这一半，以及把两半收进同一个工具名。
- * · `device` 默认取凭据里授权的那台：站点在线的是什么设备不由模型猜，它授权时
- *   选的是哪台就一直用哪台（多台在线时尤其重要 —— 打错了就是别人的浏览器）。
+ * · `device` 默认取**用户此刻正在用的那台**（页面从扩展写在 `<html>` 上的
+ *   `data-mci-device` 读来、经构造选项 `client_device` 交进来），它不在线时退回
+ *   凭据里授权的那台。多台在线时猜错就是把命令打到别人的浏览器上，所以这里不猜：
+ *   要么是这两台里有依据的一台，要么让模型显式指定。
  * · `open` 默认 `active=0`：AI 干活多在后台，抢走焦点等于打断用户手头的事。
  * · 截图走 `inline=1` 取回字节并交给媒体门面，由 Runtime 决定怎么进对话；模型
  *   看得到图，而不是拿到一个它读不了的服务器路径。落盘路径也一并回报，给人看。
@@ -118,6 +120,15 @@ class MciBrowserTool implements AgentToolInterface
     /** @var bool open 是否把标签切到前台（默认否，不抢用户的焦点） */
     protected $openActive = false;
 
+    /** @var string 用户此刻正在用的那台浏览器（空 = 不知道，见 resolveDevice()） */
+    protected $clientDevice = '';
+
+    /** @var bool 在线清单是否问过（一轮里只问一次，见 onlineIds()） */
+    protected $onlineChecked = false;
+
+    /** @var array<int, string>|null 在线设备 id 清单；null = 问过但没拿到 */
+    protected $onlineIds = null;
+
     /** @var callable|null 注入的 HTTP 客户端 function(string $method, string $url, array $form, int $timeout): array */
     protected $http;
 
@@ -131,6 +142,8 @@ class MciBrowserTool implements AgentToolInterface
         $this->siteBase = rtrim(trim((string) $siteBase), '/');
         $this->timeout  = max(3, (int) ($options['timeout'] ?? 15));
         $this->openActive = !empty($options['open_active']);
+        // 用户此刻正在用的那台（调用方从页面读来的提示，见 resolveDevice()）
+        $this->clientDevice = trim((string) ($options['client_device'] ?? ''));
         // 注入的客户端按 ($method, $url, $form, $timeout, $key) 五点签名；授权那一半
         // 只传前三个，所以后两个参数要带默认值，两边共用同一个闭包（见测试）
         $this->grant    = new BrowserGrantTool($this->siteBase, $options, $http);
@@ -150,6 +163,8 @@ class MciBrowserTool implements AgentToolInterface
             . "\n查看类：devices（在线浏览器）/ tabs / url / text / html / form / metrics / console / network / cookies / quota。"
             . "\n操作类：open / click / type / press / scroll / select / wait / reload / back / forward / close / activate。"
             . "\n脚本类：eval 执行 JS 并取回结果；screenshot 截图（图片直接进上下文，你能看到页面）。"
+            . "\n操作的目标默认是**用户此刻正在用的那台**浏览器（他就坐在那台机器前跟你对话，前提是那台连着本站），"
+            . "其次才是授权时选的那台。除非用户明确指名别的机器，一般不用传 device。"
             . "\n凭据管理：credential 看本地凭据，forget 清除。"
             . "\n收尾：open 开的标签是你借用户浏览器开的，用完（尤其是干完活）记得用 close 关掉——close 传 tab=<自己开的 id>，省略 tab 则关你上次操作的那个。别在他浏览器里留下一排标签；确实要留给用户看时才保留，并在回复里说明。"
             . '需要 JS 渲染或登录态的页面用它；只是取静态 HTML 用 web_fetch 更快。';
@@ -209,7 +224,7 @@ class MciBrowserTool implements AgentToolInterface
                 'visible'    => $bool('wait 是否要求元素可见', true),
                 'props'      => $str('metrics 要读的计算样式属性，逗号分隔'),
                 'app'        => $str('authorize 时自报的名字，显示在确认页上'),
-                'device'     => $str('目标浏览器 id，默认用凭据里授权的那台'),
+                'device'     => $str('目标浏览器 id，默认用用户此刻正在用的那台（否则用授权时选的那台）'),
                 'wait_seconds' => $int('grant 时在服务端等待用户确认的秒数（0 = 只查一次，上限 300）', 0),
             ],
             'required'   => ['action'],
@@ -287,9 +302,10 @@ class MciBrowserTool implements AgentToolInterface
         // device 是所有动作通用的目标选择，不在逐个动作的参数表里，单独放行
         $form = $this->pick($input, array_merge(['device'], $params));
 
-        // device 默认用授权时选的那台：多台在线时，猜错就是把命令打到别人的浏览器上
+        // device 默认用「用户此刻正在用的那台」，拿不准就退回授权时选的那台（见 resolveDevice）
+        $note = '';
         if (!isset($form['device'])) {
-            $device = trim((string) ($cred['device'] ?? ''));
+            list($device, $note) = $this->resolveDevice($cred);
             if ($device !== '') {
                 $form['device'] = $device;
             }
@@ -332,15 +348,108 @@ class MciBrowserTool implements AgentToolInterface
         ];
 
         if ($action === 'screenshot') {
+            if ($note !== '') {
+                $meta['note'] = $note;
+            }
             return $this->screenshot($wrap, $meta, $context);
         }
 
         $text = $this->summarize($action, $payload);
+        if ($note !== '') {
+            $text = '（' . $note . '）' . "\n" . $text;
+        }
         if (strlen($text) > self::MAX_TEXT) {
             $text = substr($text, 0, self::MAX_TEXT) . "\n…（已截断，完整内容 " . strlen($text) . " 字节）";
             $meta['truncated'] = true;
         }
         return ToolResult::success($text, $meta);
+    }
+
+    /**
+     * 这一轮该打哪台浏览器
+     *
+     * 优先「用户此刻正在用的那台」（页面从扩展写在 `<html>` 上的 `data-mci-device`
+     * 读来、随消息一起交进来，见构造选项 client_device）：多台在线时，用户要的
+     * 是他面前这台，而不是授权时随手选的那台 —— 后者可能是几天前配的、早就不在他手边。
+     *
+     * 但它只是个**提示**，不当依据用：
+     *   · 那台得真在线 —— 拿 status 的在线清单核对，那份是权威；
+     *   · 那台得归调用方 —— 站点按密钥的会员身份判，不归会 403。
+     * 任一条不满足就退回授权时选的那台，行为与没有这条信息时一致。
+     *
+     * @param array<string, mixed> $cred
+     * @return array{0: string, 1: string} [设备 id（空 = 不指定，由站点自己挑）, 退回说明]
+     */
+    protected function resolveDevice(array $cred)
+    {
+        $granted = trim((string) ($cred['device'] ?? ''));
+        $client  = trim((string) $this->clientDevice);
+        // 没这条信息，或本来就是同一台：照旧
+        if ($client === '' || $client === $granted) {
+            return [$granted, ''];
+        }
+
+        $online = $this->onlineIds($cred);
+        if ($online !== null && in_array($client, $online, true)) {
+            return [$client, ''];
+        }
+
+        /*
+         * 用户面前那台不能用了，就在授权那台上跑 —— 与以前一样。
+         * 但必须说明，否则滑向最坑的那种现象：用户看着自己这台浏览器没动静，
+         * 而命令其实打到了他另一台机器上（「点了没反应」）。
+         */
+        if ($granted === '') {
+            return ['', ''];
+        }
+        return [$granted, '你正在对话的那台浏览器（' . $client . '）现在没连上本站，'
+            . '这条命令发给了授权时选的那台（' . $granted . '）。要操作你面前这台，'
+            . '请确认浏览器里那个 MCI 扩展显示为已连接再重试。'];
+    }
+
+    /**
+     * 在线设备 id 清单；查不到返回 null
+     *
+     * 一轮里只查一次：resolveDevice() 对每个动作都可能问一遍，而「哪台在线」
+     * 不会因为同一轮里的几次工具调用就变。查失败（网络、权限）当「不知道」，
+     * 也不重试 —— 退回授权那台就够了，没必要每个动作都再试一次。
+     *
+     * @param array<string, mixed> $cred
+     * @return array<int, string>|null
+     */
+    protected function onlineIds(array $cred)
+    {
+        if ($this->onlineChecked) {
+            return $this->onlineIds;
+        }
+        $this->onlineChecked = true;
+
+        $apiBase = trim((string) ($cred['api_base'] ?? ''));
+        if ($apiBase === '') {
+            $apiBase = $this->siteBase . '/Browser/Api/';
+        }
+        $res = $this->request('GET', rtrim($apiBase, '/') . '/status', [], $this->timeout, (string) ($cred['key'] ?? ''));
+        if (!$res['ok']) {
+            return null;
+        }
+        $data = $this->decode($res['body']);
+        if (!is_array($data)) {
+            return null;
+        }
+        $wrap = is_array($data['result'] ?? null) ? $data['result'] : [];
+        // 站点信封是 {status, message, result:{device, ms, result:{online:[…]}}}：
+        // 与 operate() 里取 payload 的写法保持一致，别只看一层
+        $payload = is_array($wrap['result'] ?? null) ? $wrap['result'] : $wrap;
+        $ids  = [];
+        // 站点给的是 [{device_id, version, …}]，但也容错一份纯字符串的写法
+        foreach ((array) ($payload['online'] ?? []) as $d) {
+            $id = is_array($d) ? (string) ($d['device_id'] ?? '') : (string) $d;
+            if ($id !== '') {
+                $ids[] = $id;
+            }
+        }
+        $this->onlineIds = $ids;
+        return $ids;
     }
 
     /**
@@ -365,7 +474,10 @@ class MciBrowserTool implements AgentToolInterface
         $bytes   = (int) ($payload['bytes'] ?? 0);
 
         $unread = "截图已生成，但没能附到上下文，这次看不到图。";
-        $line   = '截图：' . ($file !== '' ? $file : '（站点未返回路径）')
+        // 目标不是用户面前那台时的那句说明，由 operate() 放进 meta（见 resolveDevice）
+        $note   = trim((string) ($meta['note'] ?? ''));
+        $line   = ($note !== '' ? '（' . $note . "）\n" : '')
+            . '截图：' . ($file !== '' ? $file : '（站点未返回路径）')
             . ($width > 0 ? '（' . $width . '×' . $height . '，' . $bytes . ' 字节）' : '')
             . ($url !== '' ? "\n页面：" . $url : '');
 
@@ -469,9 +581,12 @@ class MciBrowserTool implements AgentToolInterface
     {
         $lines = [];
         foreach ((array) ($payload['online'] ?? []) as $d) {
-            $lines[] = '- ' . (string) ($d['device_id'] ?? '') . '（在线'
-                . (isset($d['version']) ? '，扩展 ' . $d['version'] : '')
-                . (isset($d['ip']) ? '，' . $d['ip'] : '') . '）';
+            $id    = is_array($d) ? (string) ($d['device_id'] ?? '') : (string) $d;
+            $lines[] = '- ' . $id . '（在线'
+                . (is_array($d) && isset($d['version']) ? '，扩展 ' . $d['version'] : '')
+                . (is_array($d) && isset($d['ip']) ? '，' . $d['ip'] : '') . '）'
+                // 多台在线时，模型得知道哪台是用户面前这台（默认就是打它）
+                . ($id !== '' && $id === trim((string) $this->clientDevice) ? '　← 用户此刻正在用这台跟你对话（不传 device 就是它）' : '');
         }
         $out = $lines ? ('在线浏览器：' . "\n" . implode("\n", $lines)) : '当前没有浏览器在线（用户那台的扩展可能没启动）。';
 

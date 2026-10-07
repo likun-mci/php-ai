@@ -214,6 +214,76 @@ assert_eq('devices 默认带上凭据里的设备', 'DEV-9', $calls[0]['form']['
 assert_has('devices 列出在线设备', 'DEV-9', $r->getContent());
 assert_has('devices 列出离线设备', '旧机', $r->getContent());
 
+// ===== 5b) client_device：优先「用户此刻正在用的那台」 =====
+// 设备号由页面从扩展写在 <html data-mci-device> 上读来、随消息传给工具（构造选项
+// client_device）。它只是提示，得拿 status 的在线清单核对过才用；拿不准就退回授权
+// 那台，并把「打到了哪台」写进结果 —— 否则用户会看着自己这台没动静、以为点了没反应。
+
+// a) 与授权那台相同：不多问一次，行为照旧
+$calls = []; $queue = [api_res(['text' => 'hi'])];
+$tool = new MciBrowserTool($site, ['app' => 'MCI AI Agent', 'client_device' => 'DEV-9'], fake_http($calls, $queue));
+$tool->execute(['action' => 'text'], $ctx($tmp));
+assert_eq('client_device 与授权那台相同：只发一个请求', 1, count($calls));
+assert_eq('client_device 与授权那台相同：device 照旧', 'DEV-9', $calls[0]['form']['device']);
+
+// b) 不同但在线：改用用户面前那台
+$calls = []; $queue = [
+    api_res(['online' => [['device_id' => 'DEV-CLIENT', 'version' => '1.3.4']], 'devices' => [], 'settings' => []]),
+    api_res(['text' => 'hi']),
+];
+$tool = new MciBrowserTool($site, ['app' => 'MCI AI Agent', 'client_device' => 'DEV-CLIENT'], fake_http($calls, $queue));
+$r = $tool->execute(['action' => 'text'], $ctx($tmp));
+assert_eq('client_device 在线：先拿 status 核对', $apiBase . 'status', $calls[0]['url']);
+assert_eq('client_device 在线：改用用户面前那台', 'DEV-CLIENT', $calls[1]['form']['device']);
+assert_has('client_device 在线：正文照常给', 'hi', $r->getContent());
+assert_not_has('client_device 在线：不啰嗦解释', '没连上本站', $r->getContent());
+
+// c) 不同且不在线：退回授权那台，并说明
+$calls = []; $queue = [
+    api_res(['online' => [['device_id' => 'DEV-OTHER']], 'devices' => [], 'settings' => []]),
+    api_res(['text' => 'hi']),
+];
+$tool = new MciBrowserTool($site, ['app' => 'MCI AI Agent', 'client_device' => 'DEV-CLIENT'], fake_http($calls, $queue));
+$r = $tool->execute(['action' => 'text'], $ctx($tmp));
+assert_eq('client_device 不在线：退回授权那台', 'DEV-9', $calls[1]['form']['device']);
+assert_has('client_device 不在线：正文说明打到了哪台', '授权时选的那台', $r->getContent());
+
+// d) 在线清单查不到（请求失败）：同样退回授权那台并说明
+$calls = []; $queue = [
+    ['ok' => false, 'status' => 0, 'body' => '', 'error' => 'boom'],
+    api_res(['text' => 'hi']),
+];
+$tool = new MciBrowserTool($site, ['app' => 'MCI AI Agent', 'client_device' => 'DEV-CLIENT'], fake_http($calls, $queue));
+$r = $tool->execute(['action' => 'text'], $ctx($tmp));
+assert_eq('在线清单查不到：退回授权那台', 'DEV-9', $calls[1]['form']['device']);
+assert_has('在线清单查不到：也不静默', '没连上本站', $r->getContent());
+
+// e) 一轮里只核对一次（同一实例连着调两个动作）
+$calls = []; $queue = [
+    api_res(['online' => [['device_id' => 'DEV-CLIENT']], 'devices' => [], 'settings' => []]),
+    api_res(['text' => 'a']),
+    api_res(['text' => 'b']),
+];
+$tool = new MciBrowserTool($site, ['app' => 'MCI AI Agent', 'client_device' => 'DEV-CLIENT'], fake_http($calls, $queue));
+$tool->execute(['action' => 'text'], $ctx($tmp));
+$tool->execute(['action' => 'text'], $ctx($tmp));
+$probes = array_filter($calls, function ($c) use ($apiBase) { return $c['url'] === $apiBase . 'status'; });
+assert_eq('在线清单一轮只问一次', 1, count($probes));
+assert_eq('两次操作都打到用户面前那台', 'DEV-CLIENT', $calls[1]['form']['device']);
+
+// f) devices 清单里标出「用户此刻正在用这台」
+//    注意 devices 自己就要打一次 status：先一次核对、再一次取清单
+$calls = []; $queue = [
+    api_res(['online' => [['device_id' => 'DEV-CLIENT']], 'devices' => [], 'settings' => []]),
+    api_res([
+        'online'  => [['device_id' => 'DEV-CLIENT', 'version' => '1.3.4'], ['device_id' => 'DEV-OTHER']],
+        'devices' => [], 'settings' => [],
+    ]),
+];
+$tool = new MciBrowserTool($site, ['app' => 'MCI AI Agent', 'client_device' => 'DEV-CLIENT'], fake_http($calls, $queue));
+$r = $tool->execute(['action' => 'devices'], $ctx($tmp));
+assert_has('devices 标出用户此刻正在用的那台', '用户此刻正在用', $r->getContent());
+
 // ===== 6) open：默认后台打开，不抢焦点 =====
 $calls = []; $queue = [api_res(['tab' => 955404376, 'url' => 'https://example.com/', 'title' => 'Example Domain', 'load' => 'load', 'note' => ''])];
 $tool = new MciBrowserTool($site, ['app' => 'MCI AI Agent'], fake_http($calls, $queue));
@@ -330,6 +400,15 @@ $r = $tool->execute(['action' => 'screenshot'], $ctx($tmp));
 test('无媒体门面时仍成功', $r->isSuccess());
 assert_not_has('无媒体门面时不谎称已附加', '视觉输入', $r->getContent());
 assert_has('无媒体门面时说明看不到图', '看不到图', $r->getContent());
+
+// 截图正文是单独拼的，退回说明同样要带上（别只加在普通动作那条分支）
+$calls = []; $queue = [
+    api_res(['online' => [], 'devices' => [], 'settings' => []]),
+    api_res(['file' => '/www/shots/y.png', 'bytes' => 68, 'width' => 10, 'height' => 10, 'data' => $onePixelPng]),
+];
+$tool = new MciBrowserTool($site, ['app' => 'MCI AI Agent', 'client_device' => 'DEV-GONE'], fake_http($calls, $queue));
+$r = $tool->execute(['action' => 'screenshot'], $ctx($tmp, true));
+assert_has('截图退回授权那台时也说明打到了哪台', '授权时选的那台', $r->getContent());
 
 // ===== 11) credential / forget =====
 $calls = []; $queue = [];
